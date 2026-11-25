@@ -227,13 +227,43 @@ fn inject_type_probe(source: &str, var_name: &str, marker: &str) -> Option<Strin
     None
 }
 
-/// Extracts `<Type>` from rustc's `expected \`<marker>\`, found \`<Type>\`` diagnostic.
+/// Extracts `<Type>` from rustc's `expected \`<marker>\`, found ...` diagnostic.
 fn extract_found_type(stderr: &str, marker: &str) -> Option<String> {
-    let needle = format!("expected `{}`, found `", marker);
-    let idx = stderr.find(&needle)?;
-    let rest = &stderr[idx + needle.len()..];
-    let end = rest.find('`')?;
-    let ty = rest[..end].trim();
+    let needle = format!("expected `{}`, found ", marker);
+    if let Some(idx) = stderr.find(&needle)
+        && let Some(line) = stderr[idx + needle.len()..].lines().next()
+    {
+        if let Some(ty) = extract_backticked_type(line) {
+            return Some(ty);
+        }
+        match line.trim() {
+            "integer" => return Some("i32".to_string()),
+            "floating-point number" => return Some("f64".to_string()),
+            _ => {}
+        }
+    }
+    // Multi-line rustc note form:
+    //   = note: expected struct `<marker>`
+    //           found associated type `<T as Trait>::Item<'static>`
+    let note_needle = format!("expected struct `{}`", marker);
+    if let Some(idx) = stderr.find(&note_needle) {
+        let mut lines = stderr[idx..].lines();
+        lines.next();
+        if let Some(found_line) = lines.next()
+            && found_line.contains("found ")
+            && let Some(ty) = extract_backticked_type(found_line)
+        {
+            return Some(ty);
+        }
+    }
+    None
+}
+
+fn extract_backticked_type(line: &str) -> Option<String> {
+    let open = line.find('`')?;
+    let after_open = &line[open + 1..];
+    let end = after_open.find('`')?;
+    let ty = after_open[..end].trim();
     if ty.is_empty() {
         None
     } else {

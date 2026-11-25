@@ -117,6 +117,21 @@ impl<'a> Lexer<'a> {
                         TokenKind::DocComment(cleaned),
                         self.span_from(line, col, start),
                     ));
+                } else if self.peek() == Some('!') {
+                    self.bump();
+                    let text_start = self.pos;
+                    while let Some(c) = self.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.bump();
+                    }
+                    let text = self.src[text_start..self.pos].trim_end_matches('\r');
+                    let cleaned = text.strip_prefix(' ').unwrap_or(text).to_string();
+                    tokens.push(Token::new(
+                        TokenKind::InnerDocComment(cleaned),
+                        self.span_from(line, col, start),
+                    ));
                 } else {
                     while let Some(c) = self.peek() {
                         if c == '\n' {
@@ -126,11 +141,69 @@ impl<'a> Lexer<'a> {
                     }
                 }
             } else if self.peek() == Some('/') && self.peek_at(1) == Some('*') {
-                self.skip_block_comment()?;
+                self.lex_block_comment_or_doc(tokens)?;
             } else {
                 return Ok(());
             }
         }
+    }
+
+    fn lex_block_comment_or_doc(&mut self, tokens: &mut Vec<Token>) -> Result<()> {
+        let line = self.line;
+        let col = self.col;
+        let start = self.pos;
+        let doc_kind = match (self.peek_at(2), self.peek_at(3)) {
+            (Some('!'), _) => Some(true),
+            (Some('*'), Some(c)) if c != '*' && c != '/' => Some(false),
+            _ => None,
+        };
+        let Some(is_inner) = doc_kind else {
+            return self.skip_block_comment();
+        };
+        self.bump(); // '/'
+        self.bump(); // '*'
+        self.bump(); // '*' or '!'
+        let body_start = self.pos;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match (self.peek(), self.peek_at(1)) {
+                (Some('/'), Some('*')) => {
+                    self.bump();
+                    self.bump();
+                    depth += 1;
+                }
+                (Some('*'), Some('/')) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let raw = &self.src[body_start..self.pos];
+                        self.bump();
+                        self.bump();
+                        let span = self.span_from(line, col, start);
+                        for doc_line in clean_block_doc(raw) {
+                            let kind = if is_inner {
+                                TokenKind::InnerDocComment(doc_line)
+                            } else {
+                                TokenKind::DocComment(doc_line)
+                            };
+                            tokens.push(Token::new(kind, span));
+                        }
+                        return Ok(());
+                    }
+                    self.bump();
+                    self.bump();
+                }
+                (Some(_), _) => {
+                    self.bump();
+                }
+                (None, _) => {
+                    return Err(RSharpError::lex(
+                        self.span_from(line, col, start),
+                        "Unterminated block comment",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn skip_block_comment(&mut self) -> Result<()> {
@@ -479,19 +552,28 @@ impl<'a> Lexer<'a> {
         }
 
         let mut is_float = false;
-        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
-            is_float = true;
-            self.bump();
-            while let Some(c) = self.peek() {
-                if c.is_ascii_digit() || c == '_' {
-                    self.bump();
-                } else {
-                    break;
+        let mut trailing_dot = false;
+        if self.peek() == Some('.') {
+            if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
+                is_float = true;
+                self.bump();
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() || c == '_' {
+                        self.bump();
+                    } else {
+                        break;
+                    }
                 }
+            } else if !matches!(self.peek_at(1), Some('.'))
+                && !self.peek_at(1).is_some_and(is_ident_start)
+            {
+                is_float = true;
+                trailing_dot = true;
+                self.bump();
             }
         }
 
-        if matches!(self.peek(), Some('e' | 'E')) {
+        if !trailing_dot && matches!(self.peek(), Some('e' | 'E')) {
             is_float = true;
             self.bump();
             if matches!(self.peek(), Some('+' | '-')) {
@@ -506,7 +588,9 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        self.consume_num_suffix();
+        if !trailing_dot {
+            self.consume_num_suffix();
+        }
         let text = self.src[start..self.pos].to_string();
         let kind = if is_float || text.ends_with("f32") || text.ends_with("f64") {
             TokenKind::FloatLit(text)
@@ -882,6 +966,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             '$' => TokenKind::Dollar,
+            '#' => TokenKind::Hash,
             other => {
                 return Err(RSharpError::lex(
                     self.span_from(line, col, start),
@@ -898,6 +983,31 @@ fn push_hole_char(expr_buf: &mut String, fmt_buf: &mut Option<String>, c: char) 
         fmt.push(c);
     } else {
         expr_buf.push(c);
+    }
+}
+
+fn clean_block_doc(raw: &str) -> Vec<String> {
+    let lines: Vec<String> = raw
+        .lines()
+        .map(|l| {
+            let trimmed = l.trim();
+            if let Some(rest) = trimmed.strip_prefix('*') {
+                rest.strip_prefix(' ').unwrap_or(rest).to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+        .collect();
+    let start = lines.iter().position(|l| !l.is_empty()).unwrap_or(0);
+    let end = lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(start);
+    if start >= end {
+        vec![String::new()]
+    } else {
+        lines[start..end].to_vec()
     }
 }
 

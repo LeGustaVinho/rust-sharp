@@ -113,6 +113,25 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
 | `unsafe extern "C" { pub safe fn f(); static E: i32; fn p(s: *const i8, ...); }` | `unsafe extern "C" { public safe void f(); static int E; void p(read ptr<sbyte> s, ...); }` |
 | `#[unsafe(no_mangle)]`, `#[unsafe(export_name = "f")]` | `[unsafe NoMangle]`, `[unsafe ExportName = "f"]` |
 | `extern crate alloc;` | `extern crate alloc;` |
+| `Ok(a) if let Some(b) = opt && b > 0 => ...` *(Rust 1.95)* | `Ok(int a) when opt is Some(int b) && b > 0 => ...` |
+| `pub unsafe extern "C" fn f(n: i32, mut args: ...) -> i32` *(Rust 1.99)* | `public unsafe extern "C" int f(int n, mut ... args)` |
+| `[false; _]` / `make::<_>()` *(Rust 1.89)* | `[false; _]` / `make<_>()` |
+| `#[unsafe(naked)]` *(Rust 1.88)* | `[unsafe Naked]` |
+| `return expr` / `break lbl expr` / `continue lbl` *(as expr)* | `return expr` / `break lbl expr` / `continue lbl` |
+| `if let Some(v) = o { v } else { 0 }` *(expr)* | `if (o is Some(int v)) => v else => 0` |
+| `(a, b) = (b, a);` *(destructuring assign)* | `(a, b) = (b, a);` *(no types = assign; typed = decl)* |
+| `Iterator<Item: Display>`, `Lending<Item<'a> = &'a str>` | `Iterator<Item : Display>`, `Lending<Item<life a> = read<a> str>` |
+| `struct S<'a, 'b: 'a + 'static>` | `struct S<life a, life b : a + static>` |
+| `unsafe extern "C" fn(*const i8, ...) -> i32`, `fn(x: i32) -> bool` | `unsafe extern "C" (read ptr<sbyte>, ...) -> int`, `(int x) -> bool` |
+| `fn f(mut self)`, `fn g(mut self: Box<Self>)` | `void f(mut take this)`, `void g(mut Box<Self> this)` |
+| `my_ty!()`, `my_pat!()`, `trait/impl/extern { m!(); }` | `my_ty!()`, `my_pat!()`, `trait/impl/extern { m!(); }` |
+| `::std::fmt::Display`, `use {a, b};`, `self::foo()` | `global::std.fmt.Display`, `using { a, b };`, `this.foo()` |
+| `#![allow(unused)]` *(inside fn/trait/impl/extern/block)* | `[inner: Allow(unused)]` *(and `[module: ...]` in file/namespace)* |
+| `//!`, `/** ... */`, `/*! ... */` | `//!`, `/** ... */`, `/*! ... */` |
+| `S { ..base }`, `Pair { 0: 1, ..p }`, `Pair { 0: a, .. }` | `base with {}`, `p with { 0 = 1 }`, `Pair { 0: int a, .. }` |
+| `&mut v`, `&(1 \| 2)`, `(x,)` | `deref write int v`, `deref (1 \| 2)`, `(int x,)` |
+| `r#type`, `'r#async`, `'r#loop`, `1.`, `b"\xff\x00"` | `@type`, `<life @async>`, `@loop:`, `1.`, `"\xff\x00"u8` |
+| `macro_rules! m ( ... );` / `[ ... ];` | `macro m ( ... );` / `[ ... ];` |
 
 ## 5. Bidirectional Conversion Rules
 

@@ -1,6 +1,7 @@
 /// Root AST for an `.rsharp` source file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileAst {
+    pub inner_docs: Vec<String>,
     pub inner_attrs: Vec<Attribute>,
     pub items: Vec<Item>,
 }
@@ -56,6 +57,8 @@ pub enum ItemKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NamespaceDecl {
     pub path: Vec<String>,
+    pub inner_docs: Vec<String>,
+    pub inner_attrs: Vec<Attribute>,
     /// `None` for file-scoped `namespace Foo.Bar;`, `Some(items)` for `namespace Foo { ... }`.
     pub items: Option<Vec<Item>>,
 }
@@ -68,11 +71,13 @@ pub struct UsingDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsingTree {
     Path {
+        global: bool,
         prefix: Vec<String>,
         wildcard: bool,
         alias: Option<String>,
     },
     Group {
+        global: bool,
         prefix: Vec<String>,
         items: Vec<UsingTree>,
     },
@@ -86,12 +91,16 @@ pub struct ExternCrateDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GenericParam {
+    pub attrs: Vec<Attribute>,
     pub kind: GenericParamKind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GenericParamKind {
-    Lifetime(String),
+    Lifetime {
+        name: String,
+        outlives: Vec<String>,
+    },
     Type {
         name: String,
         bounds: Vec<TypeBound>,
@@ -100,7 +109,7 @@ pub enum GenericParamKind {
     Const {
         ty: Type,
         name: String,
-        default: Option<Expr>,
+        default: Option<Box<Expr>>,
     },
 }
 
@@ -201,6 +210,7 @@ pub enum VariantKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VariantTupleField {
+    pub attrs: Vec<Attribute>,
     pub ty: Type,
     pub name: Option<String>,
 }
@@ -211,6 +221,8 @@ pub struct UnionDecl {
     pub generics: Vec<GenericParam>,
     pub where_clause: Option<WhereClause>,
     pub fields: Vec<FieldDecl>,
+    /// Inline C#-style methods defined directly inside the union body.
+    pub methods: Vec<Item>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +232,8 @@ pub struct TraitDecl {
     pub generics: Vec<GenericParam>,
     pub supertraits: Vec<TypeBound>,
     pub where_clause: Option<WhereClause>,
+    pub inner_docs: Vec<String>,
+    pub inner_attrs: Vec<Attribute>,
     pub items: Vec<TraitItem>,
 }
 
@@ -240,6 +254,7 @@ pub enum TraitItem {
         name: String,
         default: Option<Expr>,
     },
+    MacroCall(MacroCall),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,6 +264,8 @@ pub struct ImplDecl {
     pub trait_path: Option<TypePath>,
     pub target_ty: Type,
     pub where_clause: Option<WhereClause>,
+    pub inner_docs: Vec<String>,
+    pub inner_attrs: Vec<Attribute>,
     pub items: Vec<ImplItem>,
 }
 
@@ -263,6 +280,7 @@ pub enum ImplItem {
         ty: Type,
     },
     AssocConst(Item),
+    MacroCall(MacroCall),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -295,17 +313,21 @@ pub struct StaticDecl {
 pub struct ExternBlock {
     pub is_unsafe: bool,
     pub abi: Option<String>,
+    pub inner_docs: Vec<String>,
+    pub inner_attrs: Vec<Attribute>,
     pub items: Vec<Item>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroDecl {
     pub name: String,
+    pub delim: MacroDelim,
     pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroCall {
+    pub global: bool,
     pub path: Vec<String>,
     pub delim: MacroDelim,
     pub body: String,
@@ -316,6 +338,13 @@ pub enum MacroDelim {
     Paren,
     Bracket,
     Brace,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariadicParam {
+    pub attrs: Vec<Attribute>,
+    pub is_mut: bool,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -330,7 +359,7 @@ pub struct FnDecl {
     pub name: String,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
-    pub is_variadic: bool,
+    pub variadic: Option<VariadicParam>,
     pub where_clause: Option<WhereClause>,
     pub body: Option<Block>,
 }
@@ -347,6 +376,7 @@ pub enum Param {
     Pattern {
         attrs: Vec<Attribute>,
         pat: Pattern,
+        explicit_ty: Option<Type>,
     },
 }
 
@@ -354,17 +384,20 @@ pub enum Param {
 pub enum ReceiverKind {
     Read(Option<String>),
     Write(Option<String>),
-    Take,
-    Typed { ty: Type },
+    Take { is_mut: bool },
+    Typed { is_mut: bool, ty: Type },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
+    pub inner_docs: Vec<String>,
+    pub inner_attrs: Vec<Attribute>,
     pub stmts: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypePath {
+    pub global: bool,
     pub segments: Vec<TypePathSegment>,
 }
 
@@ -388,9 +421,24 @@ pub enum TypePathArgs {
 pub enum GenericArg {
     Lifetime(String),
     Type(Type),
-    AssocBinding { name: String, ty: Type },
+    AssocBinding {
+        name: String,
+        generics: Vec<GenericArg>,
+        ty: Type,
+    },
+    AssocBound {
+        name: String,
+        generics: Vec<GenericArg>,
+        bounds: Vec<TypeBound>,
+    },
     ConstExpr(Expr),
     ConstBlock(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnPtrParam {
+    pub name: Option<String>,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -433,9 +481,11 @@ pub enum Type {
         lifetimes: Vec<String>,
         is_unsafe: bool,
         extern_abi: Option<String>,
-        params: Vec<Type>,
+        params: Vec<FnPtrParam>,
+        is_variadic: bool,
         ret: Box<Type>,
     },
+    Macro(MacroCall),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -471,6 +521,10 @@ pub enum StmtKind {
     Destructure {
         pat: Pattern,
         init: Expr,
+    },
+    DestructureAssign {
+        pat: Pattern,
+        value: Expr,
     },
     Discard(Expr),
     Item(Box<Item>),
@@ -556,7 +610,7 @@ pub struct MatchExpr {
 pub struct MatchArm {
     pub attrs: Vec<Attribute>,
     pub pat: Pattern,
-    pub guard: Option<Expr>,
+    pub guard: Option<Condition>,
     pub body: MatchArmBody,
 }
 
@@ -589,8 +643,13 @@ pub enum Pattern {
         ty: Type,
         name: String,
     },
-    /// Reference-stripping pattern `deref int val` (`&val`).
-    DerefPat(Box<Pattern>),
+    /// Reference-stripping pattern `deref int val` (`&val`) or `deref write int val` (`&mut val`).
+    DerefPat {
+        is_mut: bool,
+        inner: Box<Pattern>,
+    },
+    /// Parenthesized pattern `(1 | 2)`.
+    Paren(Box<Pattern>),
     /// Subpattern binding `<pat> as <Type> <name>` (`name @ pat`).
     BindAt {
         is_mut: bool,
@@ -611,6 +670,7 @@ pub enum Pattern {
     },
     Path(Vec<String>),
     Or(Vec<Pattern>),
+    Macro(MacroCall),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -652,13 +712,26 @@ pub enum Literal {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct StructFieldInit {
+    pub attrs: Vec<Attribute>,
+    pub name: String,
+    pub value: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Lit(Literal),
+    Infer,
+    Attributed {
+        attrs: Vec<Attribute>,
+        expr: Box<Expr>,
+    },
     InterpString(Vec<InterpExprPart>),
     Ident(String),
     This,
     SelfType,
     Path {
+        global: bool,
         segments: Vec<PathExprSegment>,
     },
     QualifiedMember {
@@ -740,11 +813,11 @@ pub enum Expr {
     TupleLit(Vec<Expr>),
     StructLit {
         path: Vec<String>,
-        fields: Vec<(String, Option<Expr>)>,
+        fields: Vec<StructFieldInit>,
     },
     StructUpdate {
         base: Box<Expr>,
-        fields: Vec<(String, Option<Expr>)>,
+        fields: Vec<StructFieldInit>,
     },
     Lambda {
         is_async: bool,
@@ -752,6 +825,30 @@ pub enum Expr {
         params: Vec<Param>,
         ret_ty: Option<Type>,
         body: LambdaBody,
+    },
+    Return(Option<Box<Expr>>),
+    Break {
+        label: Option<String>,
+        value: Option<Box<Expr>>,
+    },
+    Continue {
+        label: Option<String>,
+    },
+    IfExpr {
+        cond: Box<Condition>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+    },
+    While {
+        label: Option<String>,
+        cond: Box<Condition>,
+        body: Block,
+    },
+    Foreach {
+        label: Option<String>,
+        pat: Pattern,
+        iter: Box<Expr>,
+        body: Block,
     },
     Match(MatchExpr),
     Loop {
@@ -786,7 +883,10 @@ pub enum ConstBody {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InterpExprPart {
     Literal(String),
-    Expr { expr: Expr, format: Option<String> },
+    Expr {
+        expr: Box<Expr>,
+        format: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

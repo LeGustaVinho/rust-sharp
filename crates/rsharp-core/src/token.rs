@@ -249,6 +249,7 @@ pub enum TokenKind {
     CharLit(String),
     InterpString(Vec<InterpPart>),
     DocComment(String),
+    InnerDocComment(String),
     /// Verbatim inline `rust { ... }` block payload.
     RustBlock(String),
     // Punctuation & operators
@@ -304,6 +305,7 @@ pub enum TokenKind {
     Shr,
     ShrEq,
     Dollar,
+    Hash,
     Eof,
 }
 
