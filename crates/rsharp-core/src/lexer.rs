@@ -165,7 +165,7 @@ impl<'a> Lexer<'a> {
         self.bump(); // '*' or '!'
         let body_start = self.pos;
         let mut depth = 1usize;
-        while depth > 0 {
+        loop {
             match (self.peek(), self.peek_at(1)) {
                 (Some('/'), Some('*')) => {
                     self.bump();
@@ -203,7 +203,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        Ok(())
     }
 
     fn skip_block_comment(&mut self) -> Result<()> {

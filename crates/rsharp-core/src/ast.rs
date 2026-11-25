@@ -239,7 +239,12 @@ pub struct TraitDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TraitItem {
-    Fn(Item),
+    Fn {
+        docs: Vec<String>,
+        attrs: Vec<Attribute>,
+        vis: Visibility,
+        decl: FnDecl,
+    },
     AssocType {
         attrs: Vec<Attribute>,
         name: String,
@@ -271,7 +276,12 @@ pub struct ImplDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImplItem {
-    Fn(Item),
+    Fn {
+        docs: Vec<String>,
+        attrs: Vec<Attribute>,
+        vis: Visibility,
+        decl: FnDecl,
+    },
     AssocType {
         attrs: Vec<Attribute>,
         name: String,

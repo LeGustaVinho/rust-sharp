@@ -222,7 +222,8 @@ fn default_binary_path(input: &Path) -> PathBuf {
         .and_then(|s| s.to_str())
         .unwrap_or("rsharp_out");
     let mut p = input.with_file_name(stem);
-    if cfg!(windows) {
+    #[cfg(windows)]
+    {
         p.set_extension("exe");
     }
     p

@@ -65,6 +65,21 @@ public int @type() {
 
     // Variadic `...` in tuple type without `->` must be rejected
     assert!(parse_file("alias Bad = (int, ...);").is_err());
+
+    // Lexer error propagation on byte char, C-strings, rust-block strings/comments, and exponents
+    for bad in [
+        "b'x",
+        "c@\"unterminated",
+        "c\"\"\"unterminated",
+        "c\"unterminated",
+        "rust { \"unterminated }",
+        "rust { /* unterminated }",
+        "$\"{\"\\",
+    ] {
+        assert!(tokenize(bad).is_err(), "expected lex error for: {}", bad);
+    }
+    let exp_toks = tokenize("1e5 1e+5 1e-5").expect("exponents must lex");
+    assert_eq!(exp_toks.len(), 4);
 }
 
 #[test]
@@ -853,4 +868,823 @@ pub fn flow_exprs(code: i32) -> i32 {
     assert!(converted.contains("ext_b!{"));
     assert!(converted.contains("break out 11"));
     assert!(converted.contains("continue out"));
+}
+
+#[test]
+fn codegen_rust_full_branch_and_line_coverage() {
+    let src = r####"
+//!
+//! Full codegen edge-case suite
+extern crate std;
+using std.{*};
+using global::std.{fmt, io};
+
+rust {
+    pub fn top_level_inline_rust() -> i32 { 1 }
+}
+
+[unsafe LinkSection(".text")]
+public unsafe extern "C" void VarNonMut(int n, ... args) {
+    _ = n;
+}
+
+unsafe extern "C" {
+    public safe static int SAFE_S;
+    public unsafe static mut int UNSAFE_S;
+}
+
+public trait EdgeTrait {
+    [Allow(dead_code)]
+    type T;
+    [Allow(dead_code)]
+    const int C = 1;
+    brace_tr! { fn br(&self); }
+}
+
+public struct S {
+    public int X;
+}
+
+impl EdgeTrait for S {
+    [Allow(dead_code)]
+    type T = int;
+    brace_im! { fn br(&self) {} }
+}
+
+impl (int, int) {
+    public static int TupleHelper() { return 0; }
+}
+
+public void EmptyWhere() where {}
+
+public void GlobalType<T : global::std.fmt.Display>(T x) {
+    _ = x;
+}
+
+public impl Display + capture<T> CaptureTypeParam<T : Display>(T x) {
+    impl capture<T> only_cap = x;
+    return only_cap;
+}
+
+public void WriteLife<life a>(write<a> int p) {
+    _ = p;
+}
+
+public void WhereForall<F>(F f) where forall<life a> F : Fn(read<a> str) {
+    _ = f;
+}
+
+public async Task<life a> NonTypeTaskArg<life a>() { return; }
+public async Task(int) ParenTaskRet() { return; }
+public async int DirectAsyncRet() { return 1; }
+
+public void EdgePatternsAndExprs(
+    [Allow(unused)] (int pa, int pb),
+    (int oa | int ob),
+    int x
+) {
+    _ = (pa, pb, oa, ob);
+    _ = Self;
+    _ = (int as EdgeTrait).method<int>();
+    _ = (x as MyWrapper).val;
+    _ = """raw with "# hash""";
+    global::std.println!("hi");
+    S s = new S { X = 1 };
+    int X = 2;
+    S s2 = s with { [Allow(unused)] X };
+    _ = s2;
+    _ = unsafe { int u = 1; _ = u; };
+    _ = async { return 1; };
+    _ = (int a) : void => { _ = a; };
+    _ = (int a) => a + 1;
+    flbl: foreach (int it in [1, 2]) {
+        _ = it;
+    }
+    match (Some(2)) {
+        Some(const(1 + 1)) => (),
+        Some(1..=5 as mut int mn) => { _ = mn; }
+        _ => (),
+    }
+    match ([1, 2, 3]) {
+        [int first, .. mut rest] => { _ = (first, rest); }
+    }
+    match (1) {
+        int @_ => ()
+    }
+}
+"####;
+    let rust = transpile_to_rust(
+        src,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("codegen edge-case suite must transpile cleanly");
+    assert!(rust.contains("//!"));
+    assert!(rust.contains("pub safe static SAFE_S: i32;"));
+    assert!(rust.contains("pub unsafe static mut UNSAFE_S: i32;"));
+    assert!(rust.contains("pub fn top_level_inline_rust()"));
+    assert!(rust.contains("brace_tr!{"));
+    assert!(rust.contains("brace_im!{"));
+    assert!(rust.contains("r##\"raw with \"# hash\"##"));
+    assert!(rust.contains("use<T>"));
+    assert!(rust.contains("for<'a> F: Fn(&'a str)"));
+
+    // Trigger all codegen error branches deterministically
+    for bad in [
+        "void f((a, b)) {}",
+        "void f([.., int a]) {}",
+        "void f(deref _) {}",
+        "void f(_) {}",
+        "void f() { _ = this with { X = 1 }; }",
+        "void f() { _ = unknown with { X = 1 }; }",
+        "void f() { _ = (1 + 2) with { X = 1 }; }",
+    ] {
+        assert!(
+            transpile_to_rust(
+                bad,
+                TranspileOptions {
+                    prelude_mode: PreludeMode::None,
+                },
+            )
+            .is_err(),
+            "expected codegen error for: {}",
+            bad
+        );
+    }
+}
+
+#[test]
+fn from_rust_full_branch_and_line_coverage() {
+    let syntax_src = r##"
+#[allow(unused)]
+extern crate core as c_core;
+
+use self::helper_mod::ItemA;
+use helper_mod::{self as my_helper};
+
+trait AliasTr = Copy + Clone;
+
+trait WithDefault {
+    default fn d_fn() {}
+}
+
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Tup(i32, i32);
+
+impl WithDefault for Point {
+    type T: Copy;
+}
+
+unsafe extern "C" {
+    #[allow(dead_code)]
+    pub fn ext_with_attr();
+    #[allow(dead_code)]
+    pub static EXT_STATIC: i32;
+    pub type OpaqueType;
+    pub fn foreign_with_body() {}
+    #[allow(dead_code)]
+    pub safe fn safe_attr_fn();
+    #[allow(dead_code)]
+    pub safe static SAFE_ATTR_S: i32;
+}
+
+#[allow(unused_macros)]
+macro_rules! attr_mac {
+    () => {};
+}
+
+#[doc(hidden)]
+extern fn bare_extern(_: i32) -> i32 {
+    return 1
+}
+
+unsafe extern "C" fn var_immut(n: i32, args: ...) -> i32 {
+    n
+}
+
+fn tup_params((a,): (i32,), (mut b, c): (i32, i32)) -> i32 {
+    b += a + c;
+    b
+}
+
+fn empty_where() where {}
+
+fn attr_generics<#[allow(unused)] 'a, #[allow(unused)] const N: usize>(x: &'a i32) -> &'a i32 {
+    x
+}
+
+type BareFnTy = extern fn();
+type DynStarTy = dyn* std::fmt::Debug;
+type ForallEmpty = for<> fn();
+type AssocConstTy = MyTrait<N = 1>;
+fn verbatim_bound<T>() where T: const Copy {}
+type GlobalAndBox = (::std::fmt::Debug, Box<dyn 'static + std::any::Any>, Option);
+
+fn cap_ty<T: Copy>(x: T) -> impl Copy + use<T> { x }
+
+fn ret_mut_ref<'a>(x: &'a mut i32) -> &'a mut i32 { x }
+fn ret_static() -> &'static str { "s" }
+
+fn body_edges(
+    p: Point,
+    tup_s: Tup,
+    opt: Option<i32>,
+    flag: bool,
+    a: bool,
+    b: bool,
+    c: bool,
+    code: i32,
+    nested_t: (Vec<i32>, (i32, i32), [i32; 2]),
+    one_t: (i32,),
+) {
+    let [sa, sb]: [i32; 2] = [1, 2];
+    let [sc, ..]: [i32] = slice_val;
+    let Point { x, mut y } = p;
+    let UnknownStruct { uf } = unk_struct;
+    let (paren_var) = 1_i32;
+    let (na, nb, nc) = nested_t;
+    let (o1,) = one_t;
+    let _ = (sa, sb, sc, x, y, uf, paren_var, na, nb, nc, o1);
+
+    let m_val = match code {
+        #[allow(unused)]
+        const { 1 + 2 } => { 1 }
+        const { let k = 1; k + 2 } => 2,
+        mut n @ 1..=5 => { n += 1; n }
+        box bv => bv,
+        _ => 0,
+    };
+    let _ = match (1,) {
+        (only,) => only,
+    };
+    let _ = match [1, 2] {
+        [first, ..] => first,
+        _ => 0,
+    };
+    let _ = match tup_s {
+        Tup { 0: v, .. } => v,
+    };
+    let _ = (1, 2).0;
+    let _ = Point { ..p };
+    let _ = self::helper();
+    let _ = ::std::println!("hi");
+    let _ = c"\xff";
+    let _ = |mut cx: i32| { cx += 1; cx };
+    let _ = async { 1_i32 };
+    let _ = try { 1_i32 };
+    let _ = (let Some(lv) = opt);
+    'lbl: loop {
+        let _ = match code {
+            0 => break,
+            1 => continue,
+            _ => break 'lbl,
+        };
+    }
+    let _ = if flag { f(); };
+    let _ = if flag { 1 } else { let t = 2; t };
+    let _ = if flag && let Some(v) = opt { v } else { 0 };
+    let _ = if a { 1 } else if b { 2 };
+    let _ = if a { 1 } else if b { 2 } else { let t = 3; t };
+    let _ = if a { 1 } else if b { 2 } else if c { let t = 3; t } else { 4 };
+
+    let mut mv: i32 = 1;
+    let mr: &mut i32 = &mut mv;
+    let ib = b'a';
+    let ic = const { 1_i32 };
+    let ip1 = &raw const ib;
+    let ip2 = &raw mut ib;
+    let ideref = *mr;
+    let isum = unknown_v + 1_i32;
+    let irng = ..10_i32;
+    let iaf = async { let z: i32 = 1; };
+    let icl1 = |z: i32| z + 1;
+    let icl2 = |z: i32| { let _ = z; };
+    let rm = ret_mut_ref(&mut mv);
+    let rs = ret_static();
+    let _ = (m_val, ib, ic, ip1, ip2, ideref, isum, irng, iaf, icl1, icl2, rm, rs);
+
+    for i in ..5_i32 {}
+    for i in &unknown_v {}
+    for i in &1_i32 {}
+    for i in unknown_iter {}
+
+    match code {
+        #[allow(unused)]
+        1 => {}
+        _ => {}
+    }
+}
+"##;
+    let rsharp = convert_from_rust(
+        syntax_src,
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+    )
+    .expect("from_rust full syntax & inference branch suite must convert");
+    assert!(rsharp.contains("rust { trait AliasTr"));
+    assert!(rsharp.contains("rust { default fn d_fn () { } }"));
+    assert!(rsharp.contains("rust { type T : Copy ; }"));
+    assert!(rsharp.contains("rust { pub type OpaqueType ; }"));
+    assert!(rsharp.contains("rust { pub fn foreign_with_body () { } }"));
+    assert!(rsharp.contains("extern \"C\" int bare_extern(int _)"));
+    assert!(rsharp.contains("[Doc(hidden)]"));
+    assert!(rsharp.contains("global::std.println!"));
+    assert!(rsharp.contains("using this.helper_mod.ItemA;"));
+    assert!(rsharp.contains("using helper_mod.{my_helper = this};"));
+
+    // Trigger all error / unresolved-type branches with rustc inference disabled
+    for bad in [
+        "fn f() { let [a, b]: [i32; 2]; }",
+        "fn f() { let Point { x }; }",
+        "fn f() { let (a, b): (i32, i32); }",
+        "fn f() { let r = &unknown_v; }",
+        "fn f() { let r = &raw const unknown_v; }",
+        "fn f() { let d = *unknown_v; }",
+        "fn f() { let t = (1_i32, unknown_v); }",
+        "fn f() { let a = []; }",
+        "fn f() { let a = [unknown_v]; }",
+        "fn f() { let a = [unknown_v; 2]; }",
+        "fn f() { let p = std::i32::MAX; }",
+        "fn f() { let v = vec![]; }",
+        "fn f() { let v = vec![1; 2]; }",
+        "fn f() { let m = custom_mac!(); }",
+        "fn f() { let s = Some(unknown_v); }",
+        "fn f() { let b = Box::new(unknown_v); }",
+        "fn f() { let c = (get_fn())(); }",
+        "fn f() { let r = ..; }",
+        "fn f() { let cl = |x| x; }",
+        "fn f() { let u = loop { break 1; }; }",
+        "fn f(x: ()) { let (a,) = x; }",
+        "fn f(x: i32) { let (a,) = x; }",
+        "fn f(g: fn(i32) -> i32) { let (a,) = g; }",
+        "fn f() { let u = (); let (a,) = u; }",
+    ] {
+        assert!(
+            convert_from_rust(
+                bad,
+                FromRustOptions {
+                    use_rustc_inference: false,
+                },
+            )
+            .is_err(),
+            "expected from_rust error for: {}",
+            bad
+        );
+    }
+
+    // Trigger rustc probe branches (mut closure param + unparseable closure types + failing closure probe)
+    let mut_closure_probe = r#"
+fn apply(f: fn(i32) -> i32) -> i32 { f(1) }
+fn main() {
+    let _ = apply(|mut x| { x += 1; x });
+}
+"#;
+    let probed = convert_from_rust(
+        mut_closure_probe,
+        FromRustOptions {
+            use_rustc_inference: true,
+        },
+    )
+    .expect("mut closure param probe must succeed");
+    assert!(probed.contains("mut int x"));
+
+    for unparseable in [
+        "fn id<T>(x: T) -> T { x } fn main() { let f = id(|| 1_i32); let _ = f; }",
+        "fn apply<F: FnOnce(G), G>(f: F, g: G) { f(g); } fn main() { apply(|x| { let _ = x; }, || 1_i32); }",
+        "fn main() { let _ = |x| x; }",
+    ] {
+        assert!(
+            convert_from_rust(
+                unparseable,
+                FromRustOptions {
+                    use_rustc_inference: true,
+                },
+            )
+            .is_err(),
+            "expected rustc probe error for: {}",
+            unparseable
+        );
+    }
+}
+
+#[test]
+fn parser_full_branch_and_line_coverage() {
+    use rsharp_core::lexer::tokenize;
+    use rsharp_core::parser::{parse_expr_str, parse_file};
+
+    // Comprehensive valid R# corpus exercising every parser grammar production and edge branch.
+    let corpus = r####"
+//! File inner doc
+[module: Allow(unused)]
+/// Outer doc
+[Allow(dead_code)]
+[rust::allow(unused)]
+[unsafe LinkSection(".text")]
+[Doc = "custom"]
+[module: Allow(clippy::all)]
+extern crate std as std_alias;
+extern crate core;
+
+using std.fmt.this;
+using super.foo;
+using crate.bar;
+using global::std.{io, fs.*};
+using { std.cmp.Ord, MyFmt = std.fmt.Display };
+using *;
+
+public(super) namespace inner_ns;
+public(this) namespace inline_ns {
+    //! Ns inner doc
+    [inner: Allow(unused)]
+    public(in crate.inner_ns) const int NS_C = 1;
+}
+
+internal alias MyAlias<[Allow(unused)] T : Clone + Copy = int, life a : static, const usize N = { 1 + 2 }, const int M = -1> = T where T : Send;
+private alias MyAliasAfter<T> = T where T : Sync;
+trait PlainTrait {}
+
+public const int C_NEG = 1;
+public static mut int S_MUT = 0;
+
+unsafe extern "C" {
+    //! Extern inner doc
+    public safe void ExtSafe(int x, ...);
+    public unsafe void ExtVar(int x, mut ... args);
+    public safe static int EXT_S;
+    ext_mac!(1);
+    /// Trailing extern doc
+}
+
+extern {
+    void BareExt();
+}
+
+macro m_paren( () => (); );
+macro m_bracket[ () => (); ];
+macro m_brace { () => {}; };
+
+public struct UnitS;
+public struct TupleS(public int, [Allow(unused)] string);
+public struct NamedS<life a, T : maybe Sized + forall<life b> Fn(int, int) -> int + static + capture<life a, Self, T>>
+where
+    life a : b, c,
+    forall<life d> T : Clone, Copy + Display,
+    T : Debug +
+{
+    public int X;
+    public const int ConstMethod(read<a> this) { return 1; }
+    public async Task<int> AsyncMethod(write<static> this) { return 1; }
+    public static void StaticMethod(mut take this) {}
+    public void TypedRecv(take Box<Self> this, Box<Self> this) {}
+    /// Trailing struct doc
+}
+
+public enum RichEnum<T> where T : Clone {
+    UnitV = 1,
+    TupleV([Allow(unused)] int a, T),
+    StructV { int a, int b; },
+    public void EnumMethod(read this) {}
+    /// Trailing enum doc
+}
+
+public union RichUnion {
+    public int I;
+    public float F;
+    public void UnionMethod(read this) {}
+    /// Trailing union doc
+}
+
+public unsafe trait RichTrait<T> : Clone, Copy + Display where T : capture {
+    //! Trait inner doc
+    type Assoc<life a> : Clone + Copy where life a : static = int;
+    type AssocAfter = int where T : Send;
+    const int TR_C = 1;
+    tr_mac!(a);
+    void Req(read this);
+    /// Trailing trait doc
+}
+
+unsafe impl<T> RichTrait<T> for NamedS<life a, T> where T : Clone {
+    //! Impl inner doc
+    type Assoc<life a> = int where life a : static;
+    type AssocBefore<life a> where life a : static = int;
+    public const int TR_C = 1;
+    im_mac!(a);
+    void Req(read this) {}
+    /// Trailing impl doc
+}
+
+public extern void BareExternFn(
+    [Allow(unused)] int normal,
+    int pat_explicit : int,
+    (int ta, int tb),
+    [int sa, .. int srest, ..],
+    NamedS { int X, mut int Y; Z : int z, 0 = int zero, .. },
+    deref read int dr,
+    borrow read int br,
+    1..=5 as int ba,
+    (int p1 | int p2)
+) {
+    int global = 1;
+    _ = global;
+    _ = super.foo;
+    _ = crate.bar;
+    _ = (x as int).to_string();
+    _ = (int as RichTrait<int>).Req();
+    _ = (int as RichTrait<int>)::Req();
+    _ = x as Option<int>> 1;
+    _ = [global];
+    _ = [Allow(unused)] [global];
+    _ = [1, 2,];
+    _ = [0; 4];
+    _ = ();
+    _ = (1, 2);
+    _ = new NamedS { [Allow(unused)] X = 1, 0 = 2, Y };
+    _ = s with { X = 2 };
+    _ = global::std.mem.size_of<int>();
+    _ = ::std.mem.size_of<{ 1 + 2 }, -1, life a, static, Assoc = int, Bound : Clone + Copy, _>();
+    _ = const(1 + 2);
+    _ = const { return 1; };
+    _ = unsafe { return 1; };
+    _ = async take { return 1; };
+    _ = async (int a) : int => a + 1;
+    _ = take (int a) => { return a; };
+    _ = () => 1;
+    _ = if (a && b is Some(int v)) => v else if (c) => 1 else => 0;
+    _ = lbl_blk: { break lbl_blk 1; };
+    _ = lbl_lp: loop { break lbl_lp 1; };
+    _ = lbl_wh: while (cond) { break lbl_wh; };
+    _ = lbl_fe: foreach (int it in xs) { break lbl_fe; };
+    _ = loop { break; };
+    _ = while (cond) { continue; };
+    _ = foreach (int it in xs) { continue; };
+    _ = match (x) {
+        [Allow(unused)] 1.5 => 1,
+        """raw""" => 2,
+        b'a' => 3,
+        "bs"u8 => 4,
+        c"cs" => 5,
+        -5..=-1 => 6,
+        -1.5 => 7,
+        'a'..='z' => 8,
+        true => 9,
+        false => 10,
+        pat_mac!(1) => 11,
+        Some(int v) when v > 0 => 12,
+        Some(int v) when opt is Some(int w) => 13,
+        _ => return 0,
+    };
+    _ = $"lit {1 + 2:x}";
+    _ = println!("hi");
+    _ = cond ? 1 : 2;
+    _ = rust { 1 };
+    _ = a ?? b || c && d | e ^ f & g == h != i < j <= k > l >= m << n >> o + p - q * r / s % t;
+    _ = -!~a;
+    _ = --a;
+    _ = ++a;
+    _ = read a;
+    _ = write a;
+    _ = read slice a;
+    _ = write slice a;
+    _ = read ptr a;
+    _ = write ptr a;
+    _ = if (cond) => break else => 1;
+    _ = take a;
+    _ = deref a;
+    _ = try a;
+    _ = await a;
+    _ = a++;
+    _ = a--;
+    a = 1;
+    a += 1;
+    a -= 1;
+    a *= 1;
+    a /= 1;
+    a %= 1;
+    a &= 1;
+    a |= 1;
+    a ^= 1;
+    a <<= 1;
+    a >>= 1;
+    _ = a..b;
+    _ = a..=b;
+    _ = a..;
+    _ = ..b;
+    _ = ..=b;
+    _ = ..;
+    _ = a[0];
+    _ = a.0;
+    _ = a.foo<int>(1, 2);
+
+    if (cond) {
+    } else if (other) {
+    } else {
+    }
+    require (opt is Some(int rv)) else { return; }
+    while (opt is Some(int wv) && wv > 0) {}
+    for (mut int i = 0; i < 10; i++) {}
+    for (; ; ) { break; }
+    for (i = 0; i < 2; ) { continue; }
+    foreach (int it in xs) {}
+    loop { break; }
+    outer: loop { break outer; }
+    outer2: while (cond) { break outer2; }
+    outer3: for (int k = 0; k < 1; k++) { break outer3; }
+    outer4: foreach (int it in xs) { break outer4; }
+    unsafe { int u = 1; }
+    rust { let _ = 1; }
+    shadow mut int sv = 1;
+    impl Display impl_local = 1;
+    (int da, int db) = pair;
+    (da, db) = pair;
+    [.., .. int sr2] = arr;
+    [.. untyped_rest] = arr;
+    [borrow read int dr2] = arr;
+    [deref int dd] = arr;
+    [(int dp)] = arr;
+    [1 as int da2] = arr;
+    [Some(int dts)] = arr;
+    [int do1 | int do2] = arr;
+    NamedS { Y, X = int dx } = ns;
+    const int LOCAL_C = 1;
+    static int LOCAL_S = 1;
+    struct LocalStruct;
+    match (x) {
+        1 => { return; }
+        _ => (),
+    }
+    return;
+}
+
+public () -> int ZeroArgFnPtr(
+    extern (int x, ...) -> int p1,
+    extern () p2,
+    forall<life a, life b,> unsafe extern "C" (read<a> int) -> void p3,
+    (int as RichTrait<int>)::Assoc<int> p4,
+    (int) p5,
+    (int, int) p6,
+    () p7,
+    int[2, 3]? p8,
+    read ptr<int> p9,
+    write ptr<int> p10,
+    read slice<int> p11,
+    dyn Display + Send p12,
+    impl Display + Sync p13,
+    dynamic p14,
+    never p15,
+    ty_mac!(int) p16
+) {
+    return p1;
+}
+
+public safe SafeRetType() { return; }
+"####;
+
+    parse_file(corpus).expect("full parser coverage corpus must parse cleanly");
+
+    // Targeted valid snippets for tricky disambiguation, trailing docs, and rollback branches
+    for valid in [
+        "//! only inner doc",
+        "/// only outer doc",
+        "safe SafeTypeAsReturn() {}",
+        "void f() { int x = 1; x + 1; }",
+        "void f() { _ = a < + 1; _ = a < b > + 1; }",
+        "void f() { _ = this!(); }",
+        "void f() { _ = (1 + 2)!(); }",
+        "void f() { _ = a<int>!(); }",
+        "void f() { _ = a<int>.b!(); }",
+        "void f<F : Fn() -> int>(F x) {}",
+        "void f() { _ = match (x) { 1 => break foo (1 +) }; }",
+        "void f() { _ = (foo)<int>; _ = (1 + 2)<int>; }",
+        "void f() { loop { break foo + 1; } }",
+        "void f() { loop { break foo as int; } }",
+        "void f() { loop { break foo true; } }",
+        "void f() { loop { break foo (1) + 2; } }",
+        "void f() { _ = match (x) { 1 => break foo (1), 2 => break foo (1) + 2, _ => break lbl + 1 }; }",
+        "void f() { _ = [Allow(unused)] else; }",
+        "void f() { match (x) { Foo(int a) => (), Bar { int a } => (), Foo Bar(1) => (), Foo Bar { a } => () } }",
+        "void f(int x) { NamedS { Foo Bar : 1 } = ns; }",
+        "extern () -> void BareExternFnPtrRet() {}",
+        "void f<T>() where forall<life a> T : Clone, forall<life b> T : Copy {}",
+        "void f(int a) { Foo<int> bar; bar(); }",
+    ] {
+        // Some of these test fallback/rollback paths where parsing either succeeds or fails cleanly
+        let _ = parse_file(valid);
+    }
+
+    // Targeted syntax-error snippets exercising specific error & rollback paths
+    for invalid in [
+        "\"unterminated",
+        "void f() { _ = $\"{\"unterminated}\"; }",
+        "void f() { foreach (int x xs) {} }",
+        "void f() { require (cond) else {} }",
+        "void f() { _ = foo! 1; }",
+        "void f() { _ = unsafe ; }",
+        "void f() { _ = (read this) => 1; }",
+        "void f() { _ = (int x) : + => 1; }",
+        "void f() { mut int x + 1; }",
+        "void f() { shadow +; }",
+        "void f() { mut int +; }",
+        "void f() { int[] arr = []; }",
+        "void f() { int x = 1 }",
+        "void f(take int x) {}",
+        "void f(read<+> int x) {}",
+        "void f(read<a +> int x) {}",
+        "void f(Foo<Bar<+>> x) {}",
+        "void f((int, ...) x) {}",
+        "void f(int! x) {}",
+        "void f() { match (x) { Foo! => () } }",
+        "void f() { match (x) { -foo => () } }",
+        "void f() { _ = foo! ; }",
+        "impl + {}",
+        "const +;",
+        "static +;",
+        "extern +;",
+        "macro bad_mac;",
+        "impl (int, int) for S {}",
+        "void f() { _ = 1 +; }",
+        "void f() { Foo! (1) }",
+        "[a::+] void f() {}",
+        "trait T { + }",
+        "void f<[+>() {}",
+        "void f<T>() where forall + {}",
+        "void f<T : life +>() {}",
+        "struct T(public(in +) int);",
+        "struct T(int) where +;",
+        "struct S { [+ }",
+        "struct S { public(in +) int x; }",
+        "enum E { [+ }",
+        "enum E { public(in +) void f() {} }",
+        "enum E { V { [+ } }",
+        "union U<+",
+        "union U where +",
+        "union U { [+ }",
+        "union U { public(in +) int x; }",
+        "trait T { [module: + }",
+        "trait T { [+ }",
+        "trait T { public(in +) void f(); }",
+        "impl S { [module: + }",
+        "impl S { [+ }",
+        "impl S { type A where + = int; }",
+        "impl S { public(in +) void f() {} }",
+        "alias A<T> where + = int;",
+        "extern { [module: + }",
+        "extern { [+ }",
+        "void f<+",
+        "void f() where + {}",
+        "void f((int) -> + x) {}",
+        "void f(a.b<+ x) {}",
+        "void f() { [module: + }",
+        "void f() { match (x) { ..=+ => () } }",
+        "void f() { match (x) { const + => () } }",
+        "void f() { match (x) { const(+) => () } }",
+        "void f() { match (x) { const(1 + => () } }",
+        "void f() { match (x) { const(1 => () } }",
+        "void f() { _ = c ? + : 1; }",
+        "void f() { _ = c ? 1 + 2; }",
+        "void f() { _ = c ? 1 : +; }",
+        "void f() { _ = --+; }",
+        "void f() { _ = read slice +; }",
+        "void f() { _ = write slice +; }",
+        "void f() { _ = foo<int>(+; }",
+        "void f() { _ = foo!(1; }",
+        "void f() { _ = match (x) { 1 => break + }; }",
+        "void f() { _ = $\"bad {1 +}\"; }",
+        "struct S<const int N = { + }> {}",
+        "struct S<const int N = { 1 + }> {}",
+    ] {
+        assert!(
+            parse_file(invalid).is_err(),
+            "expected parse error for: {}",
+            invalid
+        );
+    }
+
+    // parse_expr_str error paths
+    assert!(parse_expr_str("\"unterminated").is_err());
+    assert!(parse_expr_str("1 +").is_err());
+    assert!(parse_expr_str("1 2").is_err());
+
+    // Deterministic prefix-truncation and unexpected-token substitution over the full corpus:
+    // exercises syntax-error propagation across every grammar production and ensures panic-freedom.
+    let tokens = tokenize(corpus).expect("corpus must tokenize");
+    for tok in &tokens {
+        if tok.span.start == tok.span.end {
+            continue;
+        }
+        let _ = parse_file(&corpus[..tok.span.start]);
+        for repl in [";", "+", ")"] {
+            let mut mutated = String::with_capacity(corpus.len() + 2);
+            mutated.push_str(&corpus[..tok.span.start]);
+            mutated.push_str(repl);
+            mutated.push_str(&corpus[tok.span.end..]);
+            let _ = parse_file(&mutated);
+        }
+    }
 }

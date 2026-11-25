@@ -1,10 +1,16 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{RSharpError, Result};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(windows)]
+const PROG_EXE: &str = "prog.exe";
+#[cfg(not(windows))]
+const PROG_EXE: &str = "prog";
 
 /// Result of executing a compiled R# program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,28 +20,71 @@ pub struct RunOutput {
     pub stderr: String,
 }
 
-fn unique_temp_dir(prefix: &str) -> Result<PathBuf> {
+fn prepare_temp_rust_file(
+    base: &Path,
+    prefix: &str,
+    file_name: &str,
+    content: &str,
+) -> Result<(PathBuf, PathBuf)> {
+    let dir = create_temp_dir_in(base, prefix)?;
+    let rs_path = dir.join(file_name);
+    write_temp_file(&rs_path, content)?;
+    Ok((dir, rs_path))
+}
+
+fn create_temp_dir_in(base: &Path, prefix: &str) -> Result<PathBuf> {
     let id = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("{}_{}_{}", prefix, std::process::id(), id));
+    let dir = base.join(format!("{}_{}_{}", prefix, std::process::id(), id));
     std::fs::create_dir_all(&dir)
         .map_err(|e| RSharpError::io(format!("Failed to create temp dir: {}", e)))?;
     Ok(dir)
 }
 
+fn write_temp_file(path: &Path, content: &str) -> Result<()> {
+    std::fs::write(path, content)
+        .map_err(|e| RSharpError::io(format!("Failed to write temp Rust file: {}", e)))
+}
+
+fn run_rustc_cmd(rustc_bin: &OsStr, args: &[&OsStr]) -> Result<Output> {
+    Command::new(rustc_bin)
+        .args(args)
+        .output()
+        .map_err(|e| RSharpError::compile(format!("Failed to invoke rustc: {}", e)))
+}
+
+fn run_binary_cmd(bin_path: &Path) -> Result<Output> {
+    Command::new(bin_path)
+        .output()
+        .map_err(|e| RSharpError::io(format!("Failed to execute compiled binary: {}", e)))
+}
+
 /// Compiles generated Rust source code into a native executable at `out_bin`.
 pub fn compile_rust_to_bin(rust_source: &str, out_bin: &Path) -> Result<()> {
-    let dir = unique_temp_dir("rsharp_build")?;
-    let rs_path = dir.join("main.rs");
-    std::fs::write(&rs_path, rust_source)
-        .map_err(|e| RSharpError::io(format!("Failed to write temp Rust file: {}", e)))?;
+    compile_rust_to_bin_in(
+        &std::env::temp_dir(),
+        OsStr::new("rustc"),
+        rust_source,
+        out_bin,
+    )
+}
 
-    let output = Command::new("rustc")
-        .arg("--edition=2024")
-        .arg(&rs_path)
-        .arg("-o")
-        .arg(out_bin)
-        .output()
-        .map_err(|e| RSharpError::compile(format!("Failed to invoke rustc: {}", e)))?;
+fn compile_rust_to_bin_in(
+    temp_base: &Path,
+    rustc_bin: &OsStr,
+    rust_source: &str,
+    out_bin: &Path,
+) -> Result<()> {
+    let (dir, rs_path) = prepare_temp_rust_file(temp_base, "rsharp_build", "main.rs", rust_source)?;
+
+    let output = run_rustc_cmd(
+        rustc_bin,
+        &[
+            OsStr::new("--edition=2024"),
+            rs_path.as_os_str(),
+            OsStr::new("-o"),
+            out_bin.as_os_str(),
+        ],
+    )?;
 
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -48,23 +97,32 @@ pub fn compile_rust_to_bin(rust_source: &str, out_bin: &Path) -> Result<()> {
 
 /// Type-checks generated Rust source via `rustc --emit=metadata` without producing an executable.
 pub fn check_rust_source(rust_source: &str, is_lib: bool) -> Result<()> {
-    let dir = unique_temp_dir("rsharp_check")?;
-    let rs_path = dir.join("check.rs");
-    let meta_path = dir.join("check.rmeta");
-    std::fs::write(&rs_path, rust_source)
-        .map_err(|e| RSharpError::io(format!("Failed to write temp Rust file: {}", e)))?;
+    check_rust_source_in(
+        &std::env::temp_dir(),
+        OsStr::new("rustc"),
+        rust_source,
+        is_lib,
+    )
+}
 
-    let mut cmd = Command::new("rustc");
-    cmd.arg("--edition=2024").arg("--emit=metadata");
+fn check_rust_source_in(
+    temp_base: &Path,
+    rustc_bin: &OsStr,
+    rust_source: &str,
+    is_lib: bool,
+) -> Result<()> {
+    let (dir, rs_path) =
+        prepare_temp_rust_file(temp_base, "rsharp_check", "check.rs", rust_source)?;
+    let meta_path = dir.join("check.rmeta");
+
+    let mut args = vec![OsStr::new("--edition=2024"), OsStr::new("--emit=metadata")];
     if is_lib {
-        cmd.arg("--crate-type=lib");
+        args.push(OsStr::new("--crate-type=lib"));
     }
-    let output = cmd
-        .arg(&rs_path)
-        .arg("-o")
-        .arg(&meta_path)
-        .output()
-        .map_err(|e| RSharpError::compile(format!("Failed to invoke rustc: {}", e)))?;
+    args.push(rs_path.as_os_str());
+    args.push(OsStr::new("-o"));
+    args.push(meta_path.as_os_str());
+    let output = run_rustc_cmd(rustc_bin, &args)?;
 
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -77,18 +135,23 @@ pub fn check_rust_source(rust_source: &str, is_lib: bool) -> Result<()> {
 
 /// Compiles and executes generated Rust source, returning stdout, stderr, and exit code.
 pub fn compile_and_run_rust(rust_source: &str) -> Result<RunOutput> {
-    let dir = unique_temp_dir("rsharp_run")?;
-    let exe_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin_path = dir.join(exe_name);
-    let res = compile_rust_to_bin(rust_source, &bin_path);
+    compile_and_run_rust_in(&std::env::temp_dir(), OsStr::new("rustc"), rust_source)
+}
+
+fn compile_and_run_rust_in(
+    temp_base: &Path,
+    rustc_bin: &OsStr,
+    rust_source: &str,
+) -> Result<RunOutput> {
+    let dir = create_temp_dir_in(temp_base, "rsharp_run")?;
+    let bin_path = dir.join(PROG_EXE);
+    let res = compile_rust_to_bin_in(temp_base, rustc_bin, rust_source, &bin_path);
     if let Err(e) = res {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(e);
     }
 
-    let run = Command::new(&bin_path)
-        .output()
-        .map_err(|e| RSharpError::io(format!("Failed to execute compiled binary: {}", e)))?;
+    let run = run_binary_cmd(&bin_path)?;
 
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -110,7 +173,14 @@ pub fn probe_closure_param_type(rust_source: &str, param_name: &str, seq: usize)
             )
         })?;
 
-    run_type_probe(&injected, rust_source, param_name, &marker)
+    run_type_probe_in(
+        &std::env::temp_dir(),
+        OsStr::new("rustc"),
+        &injected,
+        rust_source,
+        param_name,
+        &marker,
+    )
 }
 
 /// Probes `rustc` to recover the inferred concrete type of an unannotated local `let <var_name> = ...;`.
@@ -120,28 +190,36 @@ pub fn probe_local_type(rust_source: &str, var_name: &str, seq: usize) -> Result
         RSharpError::unresolved_type(var_name, "Could not locate binding site for type probe")
     })?;
 
-    run_type_probe(&injected, rust_source, var_name, &marker)
+    run_type_probe_in(
+        &std::env::temp_dir(),
+        OsStr::new("rustc"),
+        &injected,
+        rust_source,
+        var_name,
+        &marker,
+    )
 }
 
-fn run_type_probe(injected: &str, orig_source: &str, name: &str, marker: &str) -> Result<String> {
-    let dir = unique_temp_dir("rsharp_probe")?;
-    let rs_path = dir.join("probe.rs");
+fn run_type_probe_in(
+    temp_base: &Path,
+    rustc_bin: &OsStr,
+    injected: &str,
+    orig_source: &str,
+    name: &str,
+    marker: &str,
+) -> Result<String> {
+    let (dir, rs_path) = prepare_temp_rust_file(temp_base, "rsharp_probe", "probe.rs", injected)?;
     let meta_path = dir.join("probe.rmeta");
-    std::fs::write(&rs_path, injected)
-        .map_err(|e| RSharpError::io(format!("Failed to write probe file: {}", e)))?;
 
     let is_lib = !orig_source.contains("fn main(") && !orig_source.contains("fn main (");
-    let mut cmd = Command::new("rustc");
-    cmd.arg("--edition=2024").arg("--emit=metadata");
+    let mut args = vec![OsStr::new("--edition=2024"), OsStr::new("--emit=metadata")];
     if is_lib {
-        cmd.arg("--crate-type=lib");
+        args.push(OsStr::new("--crate-type=lib"));
     }
-    let output = cmd
-        .arg(&rs_path)
-        .arg("-o")
-        .arg(&meta_path)
-        .output()
-        .map_err(|e| RSharpError::compile(format!("Failed to invoke rustc: {}", e)))?;
+    args.push(rs_path.as_os_str());
+    args.push(OsStr::new("-o"));
+    args.push(meta_path.as_os_str());
+    let output = run_rustc_cmd(rustc_bin, &args)?;
 
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -155,9 +233,11 @@ fn run_type_probe(injected: &str, orig_source: &str, name: &str, marker: &str) -
 }
 
 fn inject_closure_param_probe(source: &str, param_name: &str, marker: &str) -> Option<String> {
-    let needle = format!("|{}|", param_name);
-    let start = source.find(&needle)?;
-    let body_start = start + needle.len();
+    let patterns = [format!("|mut {}|", param_name), format!("|{}|", param_name)];
+    let (start, needle_len) = patterns
+        .iter()
+        .find_map(|pat| source.find(pat).map(|pos| (pos, pat.len())))?;
+    let body_start = start + needle_len;
     let rest = &source[body_start..];
     let trimmed_offset = rest.len() - rest.trim_start().len();
     let abs = body_start + trimmed_offset;
@@ -268,5 +348,109 @@ fn extract_backticked_type(line: &str) -> Option<String> {
         None
     } else {
         Some(ty.replace("{integer}", "i32").replace("{float}", "f64"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rustc_runner_covers_all_error_and_parsing_branches() {
+        let dir = create_temp_dir_in(&std::env::temp_dir(), "rsharp_unit_runner").unwrap();
+        let blocking_file = dir.join("not_a_dir");
+        std::fs::write(&blocking_file, "x").unwrap();
+        let bad_rustc = OsStr::new("__rsharp_nonexistent_rustc__");
+        let dummy_bin = dir.join("dummy_out");
+
+        // create_temp_dir_in failure & propagation through every *_in entry point
+        assert!(create_temp_dir_in(&blocking_file, "p").is_err());
+        assert!(compile_rust_to_bin_in(&blocking_file, bad_rustc, "", &dummy_bin).is_err());
+        assert!(check_rust_source_in(&blocking_file, bad_rustc, "", true).is_err());
+        assert!(compile_and_run_rust_in(&blocking_file, bad_rustc, "").is_err());
+        assert!(run_type_probe_in(&blocking_file, bad_rustc, "", "", "x", "M").is_err());
+
+        // write_temp_file failure & run_rustc_cmd / run_binary_cmd spawn failures
+        assert!(prepare_temp_rust_file(&dir, "p", "missing_sub/a.rs", "").is_err());
+        assert!(compile_rust_to_bin_in(&dir, bad_rustc, "fn main() {}", &dummy_bin).is_err());
+        assert!(check_rust_source_in(&dir, bad_rustc, "fn f() {}", true).is_err());
+        assert!(run_type_probe_in(&dir, bad_rustc, "fn f() {}", "fn f() {}", "x", "M").is_err());
+        assert!(run_binary_cmd(&dir.join("missing_binary_xyz")).is_err());
+        assert!(compile_and_run_rust_in(&dir, OsStr::new("rustc"), "fn main( {").is_err());
+
+        // Trigger run_binary_cmd failure inside compile_and_run_rust_in by using a valid dummy
+        // executable as rustc that exits 0 without producing the target binary.
+        let noop_exe = dir.join(PROG_EXE);
+        compile_rust_to_bin("fn main() {}", &noop_exe).unwrap();
+        assert!(compile_and_run_rust_in(&dir, noop_exe.as_os_str(), "fn main() {}").is_err());
+
+        // Exercise success and remaining error paths on *_in helpers inside this crate instantiation
+        assert!(check_rust_source_in(&dir, OsStr::new("rustc"), "fn main() {}", false).is_ok());
+        assert!(check_rust_source_in(&dir, OsStr::new("rustc"), "fn bad( {", true).is_err());
+        assert_eq!(
+            compile_and_run_rust_in(&dir, OsStr::new("rustc"), "fn main() {}")
+                .unwrap()
+                .exit_code,
+            0
+        );
+        assert_eq!(
+            run_type_probe_in(
+                &dir,
+                OsStr::new("rustc"),
+                "fn main() { let x = 1_i32; struct M; let _: M = x; }",
+                "fn main() {}",
+                "x",
+                "M",
+            )
+            .unwrap(),
+            "i32"
+        );
+        assert!(
+            run_type_probe_in(
+                &dir,
+                OsStr::new("rustc"),
+                "fn f() {}",
+                "fn f() {}",
+                "x",
+                "M"
+            )
+            .is_err()
+        );
+
+        // find_expr_end: nested delimiters, closing delim at depth 0, comma/semicolon, and EOF
+        assert_eq!(find_expr_end("foo(a, [b, {c}]), rest"), 16);
+        assert_eq!(find_expr_end("x + 1)"), 5);
+        assert_eq!(find_expr_end("x + 1; next"), 5);
+        assert_eq!(find_expr_end("x + 1"), 5);
+
+        // extract_found_type & extract_backticked_type edge cases
+        assert_eq!(
+            extract_found_type("expected `M`, found `i64`\n", "M"),
+            Some("i64".to_string())
+        );
+        assert_eq!(
+            extract_found_type("expected `M`, found integer\n", "M"),
+            Some("i32".to_string())
+        );
+        assert_eq!(
+            extract_found_type("expected `M`, found floating-point number\n", "M"),
+            Some("f64".to_string())
+        );
+        assert_eq!(
+            extract_found_type("expected `M`, found unknown\n", "M"),
+            None
+        );
+        assert_eq!(
+            extract_found_type("expected struct `M`\n    found type `Vec<i32>`\n", "M"),
+            Some("Vec<i32>".to_string())
+        );
+        assert_eq!(
+            extract_found_type("expected struct `M`\n    found type ``\n", "M"),
+            None
+        );
+        assert_eq!(extract_backticked_type("`unclosed"), None);
+        assert_eq!(extract_backticked_type("``"), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

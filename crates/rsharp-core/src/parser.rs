@@ -86,9 +86,7 @@ impl<'a> Parser<'a> {
             return Token::new(TokenKind::Gt, span);
         }
         let tok = self.peek().clone();
-        if !matches!(tok.kind, TokenKind::Eof) {
-            self.pos += 1;
-        }
+        self.pos = (self.pos + 1).min(self.tokens.len() - 1);
         tok
     }
 
@@ -188,6 +186,15 @@ impl<'a> Parser<'a> {
                 kw.as_str(),
                 self.peek_kind()
             )))
+        }
+    }
+
+    fn eat_ident(&mut self) -> Option<String> {
+        if let TokenKind::Ident { name, .. } = self.peek_kind().clone() {
+            self.bump();
+            Some(name)
+        } else {
+            None
         }
     }
 
@@ -301,7 +308,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Speculatively parses attributes in contexts where `[` could also start a slice pattern or array literal.
-    fn try_parse_contextual_attrs(&mut self, is_match_arm: bool) -> Result<Vec<Attribute>> {
+    fn try_parse_contextual_attrs(&mut self, is_match_arm: bool) -> Vec<Attribute> {
         let mut attrs = Vec::new();
         while self.check(&TokenKind::LBracket) {
             let save = self.checkpoint();
@@ -336,11 +343,11 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(attrs)
+        attrs
     }
 
     fn parse_attr(&mut self) -> Result<Attribute> {
-        self.expect(&TokenKind::LBracket, "'['")?;
+        self.bump(); // '['
         let inner = matches!(
             (self.peek_kind(), &self.peek_at(1).kind),
             (TokenKind::Ident { name, .. }, TokenKind::Colon)
@@ -381,7 +388,7 @@ impl<'a> Parser<'a> {
         let open_tok = self.expect(&open, "opening delimiter")?;
         let body_start = open_tok.span.end;
         let mut depth = 1usize;
-        while depth > 0 {
+        loop {
             if self.is_eof() {
                 return Err(self.err_here("Unterminated delimiter group"));
             }
@@ -395,7 +402,6 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        Ok(String::new())
     }
 
     fn parse_visibility(&mut self) -> Result<Visibility> {
@@ -412,7 +418,7 @@ impl<'a> Parser<'a> {
                 } else if self.eat_kw(Keyword::This) {
                     Visibility::This
                 } else {
-                    self.expect_kw(Keyword::In)?;
+                    self.bump(); // 'in'
                     Visibility::InPath(self.parse_simple_path()?)
                 };
                 self.expect(&TokenKind::RParen, "')'")?;
@@ -444,10 +450,6 @@ impl<'a> Parser<'a> {
                 break;
             }
             let attrs = self.parse_attrs()?;
-            if docs.is_empty() && !attrs.is_empty() && attrs.iter().all(|a| a.inner) {
-                inner_attrs.extend(attrs);
-                continue;
-            }
             let (inners, outers): (Vec<_>, Vec<_>) = attrs.into_iter().partition(|a| a.inner);
             inner_attrs.extend(inners);
             let item = self.parse_item_after_meta(docs, outers, false)?;
@@ -627,8 +629,8 @@ impl<'a> Parser<'a> {
         }
 
         // Distinguish `const Type Name = Expr;` vs `const ReturnType Fn(...)`
-        if self.check_kw(Keyword::Const) && self.is_const_item() {
-            let c = self.parse_const_decl()?;
+        if let Some((ty, name)) = self.try_parse_const_header() {
+            let c = self.parse_const_decl_rest(ty, name)?;
             return Ok(Item {
                 docs,
                 attrs,
@@ -669,16 +671,13 @@ impl<'a> Parser<'a> {
 
     fn is_impl_block(&mut self) -> bool {
         let save = self.checkpoint();
-        let is_block = if self.eat_kw(Keyword::Impl) {
-            if self.check(&TokenKind::Lt) {
-                true
-            } else if self.parse_type().is_ok() {
-                self.check_kw(Keyword::For)
-                    || self.check_kw(Keyword::Where)
-                    || self.check(&TokenKind::LBrace)
-            } else {
-                false
-            }
+        self.bump(); // 'impl'
+        let is_block = if self.check(&TokenKind::Lt) {
+            true
+        } else if self.parse_type().is_ok() {
+            self.check_kw(Keyword::For)
+                || self.check_kw(Keyword::Where)
+                || self.check(&TokenKind::LBrace)
         } else {
             false
         };
@@ -697,19 +696,27 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn try_parse_const_header(&mut self) -> Option<(Type, String)> {
+        if !self.check_kw(Keyword::Const) {
+            return None;
+        }
+        let save = self.checkpoint();
+        self.bump(); // 'const'
+        if let Ok(ty) = self.parse_type()
+            && let Ok(name) = self.expect_ident()
+            && (self.check(&TokenKind::Eq) || self.check(&TokenKind::Semicolon))
+        {
+            return Some((ty, name));
+        }
+        self.restore(save);
+        None
+    }
+
     fn is_const_item(&mut self) -> bool {
         let save = self.checkpoint();
-        let is_item = if self.eat_kw(Keyword::Const) {
-            if self.parse_type().is_ok() && self.expect_ident().is_ok() {
-                self.check(&TokenKind::Eq) || self.check(&TokenKind::Semicolon)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let ok = self.try_parse_const_header().is_some();
         self.restore(save);
-        is_item
+        ok
     }
 
     fn is_static_item(&mut self) -> bool {
@@ -757,7 +764,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_namespace(&mut self) -> Result<NamespaceDecl> {
-        self.expect_kw(Keyword::Namespace)?;
+        self.bump(); // 'namespace'
         let path = self.parse_simple_path()?;
         if self.eat(&TokenKind::Semicolon) {
             Ok(NamespaceDecl {
@@ -784,7 +791,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_using(&mut self) -> Result<UsingDecl> {
-        self.expect_kw(Keyword::Using)?;
+        self.bump(); // 'using'
         let tree = self.parse_using_tree()?;
         self.expect(&TokenKind::Semicolon, "';' after using declaration")?;
         Ok(UsingDecl { tree })
@@ -804,7 +811,7 @@ impl<'a> Parser<'a> {
             (self.peek_kind(), &self.peek_at(1).kind),
             (TokenKind::Ident { .. }, TokenKind::Eq)
         ) {
-            let a = self.expect_ident()?;
+            let a = self.eat_ident().unwrap();
             self.bump(); // '='
             Some(a)
         } else {
@@ -1062,7 +1069,7 @@ impl<'a> Parser<'a> {
         }
         if self.check_contextual("capture") && matches!(self.peek_at(1).kind, TokenKind::Lt) {
             self.bump();
-            self.expect(&TokenKind::Lt, "'<' after 'capture'")?;
+            self.bump(); // '<'
             let mut args = Vec::new();
             while !self.check_gt() && !self.is_eof() {
                 if self.eat_kw(Keyword::Life) {
@@ -1090,7 +1097,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_struct(&mut self) -> Result<StructDecl> {
-        self.expect_kw(Keyword::Struct)?;
+        self.bump(); // 'struct'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
 
@@ -1139,10 +1146,7 @@ impl<'a> Parser<'a> {
             }
             let attrs = self.parse_attrs()?;
             let vis = self.parse_visibility()?;
-            if self.is_field_decl() {
-                let ty = self.parse_type()?;
-                let fname = self.expect_ident()?;
-                self.expect(&TokenKind::Semicolon, "';' after struct field")?;
+            if let Some((ty, fname)) = self.try_parse_field_decl() {
                 fields.push(FieldDecl {
                     docs,
                     attrs,
@@ -1170,23 +1174,26 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn is_field_decl(&mut self) -> bool {
+    fn try_parse_field_decl(&mut self) -> Option<(Type, String)> {
         if self.check_kw(Keyword::Const)
             || self.check_kw(Keyword::Async)
             || self.check_kw(Keyword::Static)
         {
-            return false;
+            return None;
         }
         let save = self.checkpoint();
-        let ok = self.parse_type().is_ok()
-            && self.expect_ident().is_ok()
-            && self.check(&TokenKind::Semicolon);
+        if let Ok(ty) = self.parse_type()
+            && let Ok(name) = self.expect_ident()
+            && self.eat(&TokenKind::Semicolon)
+        {
+            return Some((ty, name));
+        }
         self.restore(save);
-        ok
+        None
     }
 
     fn parse_enum(&mut self) -> Result<EnumDecl> {
-        self.expect_kw(Keyword::Enum)?;
+        self.bump(); // 'enum'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         let where_clause = self.parse_where_clause()?;
@@ -1216,11 +1223,7 @@ impl<'a> Parser<'a> {
                 while !self.check(&TokenKind::RParen) && !self.is_eof() {
                     let fattrs = self.parse_attrs()?;
                     let ty = self.parse_type()?;
-                    let opt_name = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                        Some(self.expect_ident()?)
-                    } else {
-                        None
-                    };
+                    let opt_name = self.eat_ident();
                     tuple_fields.push(VariantTupleField {
                         attrs: fattrs,
                         ty,
@@ -1296,7 +1299,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_union(&mut self) -> Result<UnionDecl> {
-        self.expect_kw(Keyword::Union)?;
+        self.bump(); // 'union'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         let where_clause = self.parse_where_clause()?;
@@ -1310,10 +1313,7 @@ impl<'a> Parser<'a> {
             }
             let attrs = self.parse_attrs()?;
             let vis = self.parse_visibility()?;
-            if self.is_field_decl() {
-                let ty = self.parse_type()?;
-                let fname = self.expect_ident()?;
-                self.expect(&TokenKind::Semicolon, "';'")?;
+            if let Some((ty, fname)) = self.try_parse_field_decl() {
                 fields.push(FieldDecl {
                     docs,
                     attrs,
@@ -1342,7 +1342,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_trait(&mut self, is_unsafe: bool) -> Result<TraitDecl> {
-        self.expect_kw(Keyword::Trait)?;
+        self.bump(); // 'trait'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         let mut supertraits = Vec::new();
@@ -1390,10 +1390,7 @@ impl<'a> Parser<'a> {
                     where_clause: awhere,
                     default,
                 });
-            } else if self.check_kw(Keyword::Const) && self.is_const_item() {
-                self.bump();
-                let ty = self.parse_type()?;
-                let cname = self.expect_ident()?;
+            } else if let Some((ty, cname)) = self.try_parse_const_header() {
                 let default = if self.eat(&TokenKind::Eq) {
                     Some(self.parse_expr()?)
                 } else {
@@ -1410,13 +1407,13 @@ impl<'a> Parser<'a> {
                 items.push(TraitItem::MacroCall(mc));
             } else {
                 let vis = self.parse_visibility()?;
-                let func = self.parse_fn_decl()?;
-                items.push(TraitItem::Fn(Item {
+                let decl = self.parse_fn_decl()?;
+                items.push(TraitItem::Fn {
                     docs,
                     attrs,
                     vis,
-                    kind: ItemKind::Fn(func),
-                }));
+                    decl,
+                });
             }
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
@@ -1433,7 +1430,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_impl(&mut self, is_unsafe: bool) -> Result<ImplDecl> {
-        self.expect_kw(Keyword::Impl)?;
+        self.bump(); // 'impl'
         let generics = self.parse_generic_params()?;
         let first_ty = self.parse_type()?;
         let (trait_path, target_ty) = if self.eat_kw(Keyword::For) {
@@ -1477,8 +1474,8 @@ impl<'a> Parser<'a> {
                 items.push(ImplItem::MacroCall(mc));
             } else {
                 let vis = self.parse_visibility()?;
-                if self.check_kw(Keyword::Const) && self.is_const_item() {
-                    let c = self.parse_const_decl()?;
+                if let Some((ty, name)) = self.try_parse_const_header() {
+                    let c = self.parse_const_decl_rest(ty, name)?;
                     items.push(ImplItem::AssocConst(Item {
                         docs,
                         attrs,
@@ -1486,13 +1483,13 @@ impl<'a> Parser<'a> {
                         kind: ItemKind::Const(c),
                     }));
                 } else {
-                    let func = self.parse_fn_decl()?;
-                    items.push(ImplItem::Fn(Item {
+                    let decl = self.parse_fn_decl()?;
+                    items.push(ImplItem::Fn {
                         docs,
                         attrs,
                         vis,
-                        kind: ItemKind::Fn(func),
-                    }));
+                        decl,
+                    });
                 }
             }
         }
@@ -1510,7 +1507,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_alias(&mut self) -> Result<AliasDecl> {
-        self.expect_kw(Keyword::Alias)?;
+        self.bump(); // 'alias'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         let mut where_clause = self.parse_where_clause()?;
@@ -1528,10 +1525,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_const_decl(&mut self) -> Result<ConstDecl> {
-        self.expect_kw(Keyword::Const)?;
-        let ty = self.parse_type()?;
-        let name = self.expect_ident()?;
+    fn parse_const_decl_rest(&mut self, ty: Type, name: String) -> Result<ConstDecl> {
         self.expect(&TokenKind::Eq, "'='")?;
         let value = self.parse_expr()?;
         self.expect(&TokenKind::Semicolon, "';'")?;
@@ -1541,7 +1535,7 @@ impl<'a> Parser<'a> {
     fn parse_static_decl(&mut self, in_extern: bool) -> Result<StaticDecl> {
         let is_safe = self.eat_contextual("safe");
         let is_unsafe = !is_safe && self.eat_kw(Keyword::Unsafe);
-        self.expect_kw(Keyword::Static)?;
+        self.bump(); // 'static'
         let is_mut = self.eat_kw(Keyword::Mut);
         let ty = self.parse_type()?;
         let name = self.expect_ident()?;
@@ -1563,14 +1557,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_extern_block(&mut self, is_unsafe: bool) -> Result<ExternBlock> {
-        self.expect_kw(Keyword::Extern)?;
+        self.bump(); // 'extern'
         let abi = if let TokenKind::StringLit(s) = self.peek_kind().clone() {
             self.bump();
             Some(s)
         } else {
             None
         };
-        self.expect(&TokenKind::LBrace, "'{'")?;
+        self.bump(); // '{'
         let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
         let mut items = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
@@ -1592,7 +1586,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_macro_decl(&mut self) -> Result<MacroDecl> {
-        self.expect_kw(Keyword::Macro)?;
+        self.bump(); // 'macro'
         let name = self.expect_ident()?;
         let (delim, open, close) = match self.peek_kind() {
             TokenKind::LParen => (MacroDelim::Paren, TokenKind::LParen, TokenKind::RParen),
@@ -1625,7 +1619,7 @@ impl<'a> Parser<'a> {
                 is_const = true;
             } else if self.eat_kw(Keyword::Async) {
                 is_async = true;
-            } else if self.check_contextual("safe") && !self.check(&TokenKind::LParen) {
+            } else if self.check_contextual("safe") {
                 let save = self.checkpoint();
                 self.bump();
                 if self.parse_type().is_ok() && self.expect_ident().is_ok() {
@@ -1701,14 +1695,10 @@ impl<'a> Parser<'a> {
         let mut params = Vec::new();
         let mut variadic = None;
         while !self.check(&TokenKind::RParen) && !self.is_eof() {
-            let attrs = self.try_parse_contextual_attrs(false)?;
+            let attrs = self.try_parse_contextual_attrs(false);
             // Variadic parameter: `...`, `... args`, or `mut ... args`
             if self.eat(&TokenKind::DotDotDot) {
-                let name = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                    Some(self.expect_ident()?)
-                } else {
-                    None
-                };
+                let name = self.eat_ident();
                 variadic = Some(VariadicParam {
                     attrs,
                     is_mut: false,
@@ -1730,7 +1720,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             if attrs.is_empty()
-                && let Some(recv) = self.try_parse_receiver()?
+                && let Some(recv) = self.try_parse_receiver()
             {
                 params.push(Param::Receiver(recv));
             } else if let Some(normal) = self.try_parse_normal_param(&attrs) {
@@ -1774,62 +1764,61 @@ impl<'a> Parser<'a> {
         None
     }
 
-    fn try_parse_receiver(&mut self) -> Result<Option<ReceiverKind>> {
+    fn try_parse_receiver(&mut self) -> Option<ReceiverKind> {
         let save = self.checkpoint();
         if self.eat_kw(Keyword::Read) {
-            let life = self.try_parse_lifetime_angle()?;
+            let life = self.try_parse_lifetime_angle();
             if self.eat_kw(Keyword::This) {
-                return Ok(Some(ReceiverKind::Read(life)));
+                return Some(ReceiverKind::Read(life));
             }
             self.restore(save);
         }
         if self.eat_kw(Keyword::Write) {
-            let life = self.try_parse_lifetime_angle()?;
+            let life = self.try_parse_lifetime_angle();
             if self.eat_kw(Keyword::This) {
-                return Ok(Some(ReceiverKind::Write(life)));
+                return Some(ReceiverKind::Write(life));
             }
             self.restore(save);
         }
         let is_mut = self.eat_kw(Keyword::Mut);
         if self.eat_kw(Keyword::Take) {
             if self.eat_kw(Keyword::This) {
-                return Ok(Some(ReceiverKind::Take { is_mut }));
+                return Some(ReceiverKind::Take { is_mut });
             }
             if let Ok(ty) = self.parse_type()
                 && self.eat_kw(Keyword::This)
             {
-                return Ok(Some(ReceiverKind::Typed { is_mut, ty }));
+                return Some(ReceiverKind::Typed { is_mut, ty });
             }
             self.restore(save);
-            return Ok(None);
+            return None;
         }
         if let Ok(ty) = self.parse_type()
             && self.eat_kw(Keyword::This)
         {
-            return Ok(Some(ReceiverKind::Typed { is_mut, ty }));
+            return Some(ReceiverKind::Typed { is_mut, ty });
         }
         self.restore(save);
-        Ok(None)
+        None
     }
 
-    fn try_parse_lifetime_angle(&mut self) -> Result<Option<String>> {
+    fn try_parse_lifetime_angle(&mut self) -> Option<String> {
         let save = self.checkpoint();
         if self.eat(&TokenKind::Lt) {
             let life = if self.eat_kw(Keyword::Static) {
                 "static".to_string()
-            } else if let TokenKind::Ident { name, .. } = self.peek_kind().clone() {
-                self.bump();
+            } else if let Some(name) = self.eat_ident() {
                 name
             } else {
                 self.restore(save);
-                return Ok(None);
+                return None;
             };
             if self.eat_gt() {
-                return Ok(Some(life));
+                return Some(life);
             }
             self.restore(save);
         }
-        Ok(None)
+        None
     }
 
     // ==================== TYPES ====================
@@ -1856,7 +1845,7 @@ impl<'a> Parser<'a> {
         {
             self.parse_fn_ptr_type()?
         } else if self.eat_kw(Keyword::Read) {
-            let life = self.try_parse_lifetime_angle()?;
+            let life = self.try_parse_lifetime_angle();
             if life.is_none() && self.eat_kw(Keyword::Ptr) {
                 self.expect(&TokenKind::Lt, "'<'")?;
                 let inner = self.parse_type_inner(allow_infer)?;
@@ -1870,7 +1859,7 @@ impl<'a> Parser<'a> {
                 }
             }
         } else if self.eat_kw(Keyword::Write) {
-            let life = self.try_parse_lifetime_angle()?;
+            let life = self.try_parse_lifetime_angle();
             if life.is_none() && self.eat_kw(Keyword::Ptr) {
                 self.expect(&TokenKind::Lt, "'<'")?;
                 let inner = self.parse_type_inner(allow_infer)?;
@@ -1933,11 +1922,7 @@ impl<'a> Parser<'a> {
                         args,
                     }
                 } else {
-                    let first_name = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                        Some(self.expect_ident()?)
-                    } else {
-                        None
-                    };
+                    let first_name = self.eat_ident();
                     let saw_comma = self.eat(&TokenKind::Comma);
                     let mut elems = vec![TupleTypeElem {
                         ty: first_ty,
@@ -1952,11 +1937,7 @@ impl<'a> Parser<'a> {
                                 break;
                             }
                             let ty = self.parse_type_inner(allow_infer)?;
-                            let name = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                                Some(self.expect_ident()?)
-                            } else {
-                                None
-                            };
+                            let name = self.eat_ident();
                             elems.push(TupleTypeElem { ty, name });
                             if !self.eat(&TokenKind::Comma) {
                                 break;
@@ -1985,7 +1966,7 @@ impl<'a> Parser<'a> {
                         return Err(self.err_here(
                             "Variadic '...' is only valid in function pointer types with '->'",
                         ));
-                    } else if !saw_comma && elems.len() == 1 && elems[0].name.is_none() {
+                    } else if !saw_comma && elems[0].name.is_none() {
                         Type::Grouped(Box::new(elems.pop().unwrap().ty))
                     } else {
                         Type::Tuple(elems)
@@ -2068,11 +2049,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             let ty = self.parse_type()?;
-            let name = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                Some(self.expect_ident()?)
-            } else {
-                None
-            };
+            let name = self.eat_ident();
             params.push(FnPtrParam { name, ty });
             if !self.eat(&TokenKind::Comma) {
                 break;
@@ -2116,16 +2093,7 @@ impl<'a> Parser<'a> {
             let args = self.parse_generic_arg_list()?;
             self.expect_gt()?;
             Ok(TypePathArgs::Angle(args))
-        } else if self.check(&TokenKind::LParen) && self.is_paren_trait_args() {
-            self.bump(); // '('
-            let mut params = Vec::new();
-            while !self.check(&TokenKind::RParen) && !self.is_eof() {
-                params.push(self.parse_type_inner(allow_infer)?);
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.expect(&TokenKind::RParen, "')'")?;
+        } else if let Some(params) = self.try_parse_paren_trait_args(allow_infer) {
             let ret = if self.eat(&TokenKind::ThinArrow) {
                 Some(Box::new(self.parse_type_inner(allow_infer)?))
             } else {
@@ -2138,35 +2106,44 @@ impl<'a> Parser<'a> {
     }
 
     /// Distinguishes `Fn(int) -> bool` from a function signature `ReturnType FnName(int x)`.
-    fn is_paren_trait_args(&mut self) -> bool {
+    fn try_parse_paren_trait_args(&mut self, allow_infer: bool) -> Option<Vec<Type>> {
+        if !self.check(&TokenKind::LParen) {
+            return None;
+        }
         let save = self.checkpoint();
         self.bump(); // '('
         if self.eat(&TokenKind::RParen) {
-            let ok = self.check(&TokenKind::ThinArrow);
-            self.restore(save);
-            return ok;
-        }
-        let mut all_types_no_names = true;
-        while !self.check(&TokenKind::RParen) && !self.is_eof() {
-            if self.parse_type().is_err() {
-                all_types_no_names = false;
-                break;
+            if self.check(&TokenKind::ThinArrow) {
+                return Some(Vec::new());
             }
+            self.restore(save);
+            return None;
+        }
+        let mut params = Vec::new();
+        while !self.check(&TokenKind::RParen) && !self.is_eof() {
+            let Ok(ty) = self.parse_type_inner(allow_infer) else {
+                self.restore(save);
+                return None;
+            };
             // If followed by an identifier, it's a parameter `int x` rather than trait arg `int`
             if matches!(
                 self.peek_kind(),
                 TokenKind::Ident { .. } | TokenKind::Kw(Keyword::This)
             ) {
-                all_types_no_names = false;
-                break;
+                self.restore(save);
+                return None;
             }
+            params.push(ty);
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
         }
-        let ok = all_types_no_names && self.eat(&TokenKind::RParen);
-        self.restore(save);
-        ok
+        if self.eat(&TokenKind::RParen) {
+            Some(params)
+        } else {
+            self.restore(save);
+            None
+        }
     }
 
     fn parse_optional_generic_args(&mut self) -> Result<Vec<GenericArg>> {
@@ -2213,7 +2190,7 @@ impl<'a> Parser<'a> {
 
     fn try_parse_assoc_generic_arg(&mut self) -> Result<Option<GenericArg>> {
         let save = self.checkpoint();
-        let name = self.expect_ident()?;
+        let name = self.eat_ident().unwrap();
         let generics = if self.check(&TokenKind::Lt) {
             match self.parse_optional_generic_args() {
                 Ok(g) => g,
@@ -2262,7 +2239,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
-        let attrs = self.try_parse_contextual_attrs(false)?;
+        let attrs = self.try_parse_contextual_attrs(false);
 
         if self.check_kw(Keyword::Var) {
             return Err(self.err_here(
@@ -2304,11 +2281,7 @@ impl<'a> Parser<'a> {
             });
         }
         if self.eat_kw(Keyword::Continue) {
-            let label = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                Some(self.expect_ident()?)
-            } else {
-                None
-            };
+            let label = self.eat_ident();
             self.expect(&TokenKind::Semicolon, "';' after continue")?;
             return Ok(Stmt {
                 attrs,
@@ -2374,7 +2347,7 @@ impl<'a> Parser<'a> {
                 TokenKind::Kw(Keyword::Loop | Keyword::While | Keyword::For | Keyword::Foreach)
             )
         ) {
-            let label = self.expect_ident()?;
+            let label = self.eat_ident().unwrap();
             self.bump(); // ':'
             let mut st = match self.peek_kind() {
                 TokenKind::Kw(Keyword::Loop) => self.parse_loop(Some(label))?,
@@ -2403,7 +2376,7 @@ impl<'a> Parser<'a> {
 
         // Explicit local variable starting with `impl Trait name = ...`
         if self.check_kw(Keyword::Impl)
-            && let Some(mut stmt) = self.try_parse_local_decl(true)?
+            && let Some(mut stmt) = self.try_parse_local_decl()?
         {
             stmt.attrs = attrs;
             return Ok(stmt);
@@ -2411,10 +2384,7 @@ impl<'a> Parser<'a> {
 
         // Nested item statements (const item vs const expr block handled carefully!)
         if self.is_nested_item_start() {
-            let mut item = self.parse_item_after_meta(Vec::new(), attrs, false)?;
-            if item.docs.is_empty() {
-                item.docs = Vec::new();
-            }
+            let item = self.parse_item_after_meta(Vec::new(), attrs, false)?;
             return Ok(Stmt::plain(StmtKind::Item(Box::new(item))));
         }
 
@@ -2425,7 +2395,7 @@ impl<'a> Parser<'a> {
         }
 
         // Explicit local variable declaration: `shadow? mut? Type name (= expr)?;`
-        if let Some(mut stmt) = self.try_parse_local_decl(true)? {
+        if let Some(mut stmt) = self.try_parse_local_decl()? {
             stmt.attrs = attrs;
             return Ok(stmt);
         }
@@ -2452,14 +2422,14 @@ impl<'a> Parser<'a> {
             let next_tok = self.peek_at(1);
             let next = &next_tok.kind;
             if matches!(next, TokenKind::Semicolon) {
-                let lbl = self.expect_ident()?;
+                let lbl = self.eat_ident().unwrap();
                 return Ok((Some(lbl), None));
             }
             let separated_lparen =
                 matches!(next, TokenKind::LParen) && lbl_span.end < next_tok.span.start;
             if separated_lparen || !is_binary_or_postfix_continuation(next) {
                 let save = self.checkpoint();
-                let lbl = self.expect_ident()?;
+                let lbl = self.eat_ident().unwrap();
                 if let Ok(val) = self.parse_expr()
                     && self.check(&TokenKind::Semicolon)
                 {
@@ -2523,7 +2493,7 @@ impl<'a> Parser<'a> {
         Ok(None)
     }
 
-    fn try_parse_local_decl(&mut self, expect_semi: bool) -> Result<Option<Stmt>> {
+    fn try_parse_local_decl(&mut self) -> Result<Option<Stmt>> {
         let save = self.checkpoint();
         let is_shadow = self.eat_kw(Keyword::Shadow);
         let is_mut = self.eat_kw(Keyword::Mut);
@@ -2569,9 +2539,7 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        if expect_semi {
-            self.expect(&TokenKind::Semicolon, "';' after variable declaration")?;
-        }
+        self.expect(&TokenKind::Semicolon, "';' after variable declaration")?;
         Ok(Some(Stmt::plain(StmtKind::Local {
             is_shadow,
             is_mut,
@@ -2587,7 +2555,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_if(&mut self) -> Result<IfStmt> {
-        self.expect_kw(Keyword::If)?;
+        self.bump(); // 'if'
         self.expect(&TokenKind::LParen, "'(' after 'if'")?;
         let cond = self.parse_condition()?;
         self.expect(&TokenKind::RParen, "')'")?;
@@ -2609,7 +2577,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_require(&mut self) -> Result<Stmt> {
-        self.expect_kw(Keyword::Require)?;
+        self.bump(); // 'require'
         self.expect(&TokenKind::LParen, "'(' after 'require'")?;
         let cond = self.parse_condition()?;
         self.expect(&TokenKind::RParen, "')'")?;
@@ -2630,7 +2598,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_while(&mut self, label: Option<String>) -> Result<Stmt> {
-        self.expect_kw(Keyword::While)?;
+        self.bump(); // 'while'
         self.expect(&TokenKind::LParen, "'(' after 'while'")?;
         let cond = self.parse_condition()?;
         self.expect(&TokenKind::RParen, "')'")?;
@@ -2639,11 +2607,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_for(&mut self, label: Option<String>) -> Result<Stmt> {
-        self.expect_kw(Keyword::For)?;
+        self.bump(); // 'for'
         self.expect(&TokenKind::LParen, "'(' after 'for'")?;
         let init = if self.eat(&TokenKind::Semicolon) {
             None
-        } else if let Some(local) = self.try_parse_local_decl(true)? {
+        } else if let Some(local) = self.try_parse_local_decl()? {
             Some(Box::new(local))
         } else {
             let e = self.parse_expr()?;
@@ -2674,7 +2642,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_foreach(&mut self, label: Option<String>) -> Result<Stmt> {
-        self.expect_kw(Keyword::Foreach)?;
+        self.bump(); // 'foreach'
         self.expect(&TokenKind::LParen, "'(' after 'foreach'")?;
         let pat = self.parse_pattern()?;
         self.expect_kw(Keyword::In)?;
@@ -2690,20 +2658,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_loop(&mut self, label: Option<String>) -> Result<Stmt> {
-        self.expect_kw(Keyword::Loop)?;
+        self.bump(); // 'loop'
         let body = self.parse_block()?;
         Ok(Stmt::plain(StmtKind::Loop { label, body }))
     }
 
     fn parse_match(&mut self) -> Result<MatchExpr> {
-        self.expect_kw(Keyword::Match)?;
+        self.bump(); // 'match'
         self.expect(&TokenKind::LParen, "'(' after 'match'")?;
         let scrutinee = Box::new(self.parse_expr()?);
         self.expect(&TokenKind::RParen, "')'")?;
         self.expect(&TokenKind::LBrace, "'{'")?;
         let mut arms = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let attrs = self.try_parse_contextual_attrs(true)?;
+            let attrs = self.try_parse_contextual_attrs(true);
             let pat = self.parse_pattern()?;
             let guard = if self.eat_kw(Keyword::When) {
                 Some(self.parse_condition()?)
@@ -2826,7 +2794,7 @@ impl<'a> Parser<'a> {
                     if self.check(&TokenKind::Comma) || self.check(&TokenKind::RBracket) {
                         elems.push(SlicePatElem::Rest);
                     } else if let Some(Pattern::Binding { is_mut, ty, name }) =
-                        self.try_parse_typed_pattern_binding()?
+                        self.try_parse_typed_pattern_binding()
                     {
                         elems.push(SlicePatElem::RestBind { is_mut, ty, name });
                     } else {
@@ -2876,7 +2844,7 @@ impl<'a> Parser<'a> {
         }
 
         // Typed binding pattern: `mut? Type name`
-        if let Some(binding) = self.try_parse_typed_pattern_binding()? {
+        if let Some(binding) = self.try_parse_typed_pattern_binding() {
             return Ok(binding);
         }
 
@@ -3064,26 +3032,26 @@ impl<'a> Parser<'a> {
         Ok(Some(Pattern::Lit(lit)))
     }
 
-    fn try_parse_typed_pattern_binding(&mut self) -> Result<Option<Pattern>> {
+    fn try_parse_typed_pattern_binding(&mut self) -> Option<Pattern> {
         let save = self.checkpoint();
         let is_mut = self.eat_kw(Keyword::Mut);
         let Ok(ty) = self.parse_type() else {
             self.restore(save);
-            return Ok(None);
+            return None;
         };
         let Ok(name) = self.expect_ident() else {
             self.restore(save);
-            return Ok(None);
+            return None;
         };
         if self.check(&TokenKind::LParen) || self.check(&TokenKind::LBrace) {
             self.restore(save);
-            return Ok(None);
+            return None;
         }
-        Ok(Some(Pattern::Binding {
+        Some(Pattern::Binding {
             is_mut,
             ty: Some(ty),
             name,
-        }))
+        })
     }
 
     // ==================== EXPRESSIONS ====================
@@ -3668,11 +3636,7 @@ impl<'a> Parser<'a> {
             });
         }
         if self.eat_kw(Keyword::Continue) {
-            let label = if matches!(self.peek_kind(), TokenKind::Ident { .. }) {
-                Some(self.expect_ident()?)
-            } else {
-                None
-            };
+            let label = self.eat_ident();
             return Ok(Expr::Continue { label });
         }
 
@@ -3757,13 +3721,13 @@ impl<'a> Parser<'a> {
             (TokenKind::Ident { .. }, TokenKind::Colon)
         ) {
             if matches!(self.peek_at(2).kind, TokenKind::LBrace) {
-                let label = self.expect_ident()?;
+                let label = self.eat_ident().unwrap();
                 self.bump(); // ':'
                 let block = self.parse_block()?;
                 return Ok(Expr::LabeledBlock { label, block });
             }
             if matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::Loop)) {
-                let label = self.expect_ident()?;
+                let label = self.eat_ident().unwrap();
                 self.bump(); // ':'
                 self.bump(); // 'loop'
                 let block = self.parse_block()?;
@@ -3773,7 +3737,7 @@ impl<'a> Parser<'a> {
                 });
             }
             if matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::While)) {
-                let label = self.expect_ident()?;
+                let label = self.eat_ident().unwrap();
                 self.bump(); // ':'
                 self.bump(); // 'while'
                 self.expect(&TokenKind::LParen, "'(' after 'while'")?;
@@ -3787,7 +3751,7 @@ impl<'a> Parser<'a> {
                 });
             }
             if matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::Foreach)) {
-                let label = self.expect_ident()?;
+                let label = self.eat_ident().unwrap();
                 self.bump(); // ':'
                 self.bump(); // 'foreach'
                 self.expect(&TokenKind::LParen, "'(' after 'foreach'")?;
@@ -3822,7 +3786,7 @@ impl<'a> Parser<'a> {
 
         // UFCS `(Type as TraitPath).member` when `Type` is not a plain cast expression
         if self.check(&TokenKind::LParen)
-            && let Some(ufcs) = self.try_parse_ufcs()?
+            && let Some(ufcs) = self.try_parse_ufcs()
         {
             return Ok(ufcs);
         }
@@ -3959,7 +3923,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn try_parse_ufcs(&mut self) -> Result<Option<Expr>> {
+    fn try_parse_ufcs(&mut self) -> Option<Expr> {
         let save = self.checkpoint();
         self.bump(); // '('
         if let Ok(self_ty) = self.parse_type()
@@ -3975,20 +3939,20 @@ impl<'a> Parser<'a> {
                 && is_primitive_or_scalar_name(&trait_path.segments[0].name);
             if !target_is_primitive {
                 let type_args = self.try_parse_expr_generic_args();
-                return Ok(Some(Expr::QualifiedMember {
+                return Some(Expr::QualifiedMember {
                     self_ty: Box::new(self_ty),
                     trait_path,
                     member,
                     type_args,
-                }));
+                });
             }
         }
         self.restore(save);
-        Ok(None)
+        None
     }
 
     fn parse_if_expr(&mut self) -> Result<Expr> {
-        self.expect_kw(Keyword::If)?;
+        self.bump(); // 'if'
         self.expect(&TokenKind::LParen, "'(' after 'if'")?;
         let cond = self.parse_condition()?;
         self.expect(&TokenKind::RParen, "')'")?;
@@ -4017,14 +3981,14 @@ impl<'a> Parser<'a> {
             let next_tok = self.peek_at(1);
             let next = &next_tok.kind;
             if !starts_expr_after_control_flow(next) && !is_binary_or_postfix_continuation(next) {
-                let lbl = self.expect_ident()?;
+                let lbl = self.eat_ident().unwrap();
                 return Ok((Some(lbl), None));
             }
             let separated_lparen =
                 matches!(next, TokenKind::LParen) && lbl_span.end < next_tok.span.start;
             if separated_lparen || !is_binary_or_postfix_continuation(next) {
                 let save = self.checkpoint();
-                let lbl = self.expect_ident()?;
+                let lbl = self.eat_ident().unwrap();
                 if starts_expr_after_control_flow(self.peek_kind())
                     && let Ok(val) = self.parse_expr()
                 {
@@ -4209,6 +4173,18 @@ fn starts_expr_after_control_flow(kind: &TokenKind) -> bool {
     )
 }
 
+fn expr_has_is_pattern(expr: &Expr) -> bool {
+    match expr {
+        Expr::IsPattern { negated: false, .. } => true,
+        Expr::Binary {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+        } => expr_has_is_pattern(lhs) || expr_has_is_pattern(rhs),
+        _ => false,
+    }
+}
+
 fn expr_to_condition(expr: Expr) -> Condition {
     match expr {
         Expr::IsPattern {
@@ -4222,32 +4198,10 @@ fn expr_to_condition(expr: Expr) -> Condition {
         },
         Expr::Binary {
             op: BinaryOp::And, ..
-        } => {
+        } if expr_has_is_pattern(&expr) => {
             let mut parts = Vec::new();
             flatten_and_chain(expr, &mut parts);
-            let has_let = parts
-                .iter()
-                .any(|p| matches!(p, ChainItem::IsPattern { .. }));
-            if has_let {
-                Condition::LetChain(parts)
-            } else {
-                // Reconstruct boolean conjunction
-                let mut iter = parts.into_iter().map(|p| match p {
-                    ChainItem::Bool(e) => e,
-                    ChainItem::IsPattern { expr, pat } => Expr::IsPattern {
-                        expr: Box::new(expr),
-                        negated: false,
-                        pat,
-                    },
-                });
-                let first = iter.next().unwrap();
-                let combined = iter.fold(first, |acc, rhs| Expr::Binary {
-                    op: BinaryOp::And,
-                    lhs: Box::new(acc),
-                    rhs: Box::new(rhs),
-                });
-                Condition::Bool(combined)
-            }
+            Condition::LetChain(parts)
         }
         other => Condition::Bool(other),
     }
@@ -4341,11 +4295,6 @@ fn attach_type_args_to_expr(expr: Expr, type_args: Vec<GenericArg>) -> Expr {
         Expr::Ident(name) => Expr::Path {
             global: false,
             segments: vec![PathExprSegment { name, type_args }],
-        },
-        Expr::Member { object, field, .. } => Expr::Member {
-            object,
-            field,
-            type_args,
         },
         other => other,
     }

@@ -181,6 +181,23 @@ fn test_cli_error_paths() {
     assert_eq!(run_cli(&args(&["build", &bad_str])).exit_code, 1);
     assert_eq!(run_cli(&args(&["to-rust", &bad_str])).exit_code, 1);
     assert_eq!(run_cli(&args(&["from-rust", &bad_str])).exit_code, 1);
+
+    // Unwritable output paths for to-rust and from-rust
+    let unwritable = temp_file("missing_subdir_xyz")
+        .join("nested")
+        .join("out.txt");
+    let unwritable_str = unwritable.to_string_lossy().to_string();
+    assert_eq!(
+        run_cli(&args(&["to-rust", &rsh_str, "-o", &unwritable_str])).exit_code,
+        1
+    );
+    let ok_rs = temp_file("valid_for_write_err.rs");
+    std::fs::write(&ok_rs, "fn main() {}").unwrap();
+    let ok_rs_str = ok_rs.to_string_lossy().to_string();
+    assert_eq!(
+        run_cli(&args(&["from-rust", &ok_rs_str, "-o", &unwritable_str])).exit_code,
+        1
+    );
 }
 
 #[test]

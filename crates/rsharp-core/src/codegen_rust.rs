@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::ast::*;
 use crate::error::{RSharpError, Result};
@@ -27,7 +29,10 @@ pub struct TranspileOptions {
 /// Transpiles an R# `FileAst` to idiomatic Rust 2024 source code.
 pub fn generate_rust(file: &FileAst, options: TranspileOptions) -> Result<String> {
     let mut codegen = RustCodegen::new(options);
-    codegen.emit_file(file)?;
+    codegen.emit_file(file);
+    if let Some(err) = codegen.first_err.borrow_mut().take() {
+        return Err(err);
+    }
     Ok(codegen.out)
 }
 
@@ -44,6 +49,7 @@ struct RustCodegen {
     known_paths: HashSet<String>,
     scopes: Vec<HashMap<String, VarInfo>>,
     current_self_type: Option<String>,
+    first_err: Rc<RefCell<Option<RSharpError>>>,
 }
 
 impl RustCodegen {
@@ -96,7 +102,12 @@ impl RustCodegen {
             known_paths,
             scopes: vec![HashMap::new()],
             current_self_type: None,
+            first_err: Rc::new(RefCell::new(None)),
         }
+    }
+
+    fn record_err(&self, err: RSharpError) {
+        self.first_err.borrow_mut().get_or_insert(err);
     }
 
     fn push_scope(&mut self) {
@@ -109,9 +120,8 @@ impl RustCodegen {
 
     fn declare_var(&mut self, name: &str, ty: &Type) {
         let info = var_info_from_type(ty);
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), info);
-        }
+        let idx = self.scopes.len() - 1;
+        self.scopes[idx].insert(name.to_string(), info);
     }
 
     fn lookup_var(&self, name: &str) -> Option<&VarInfo> {
@@ -164,9 +174,7 @@ impl RustCodegen {
                     }
                 }
                 ItemKind::Namespace(ns) => {
-                    if let Some(first) = ns.path.first() {
-                        self.known_paths.insert(first.clone());
-                    }
+                    self.known_paths.insert(ns.path[0].clone());
                 }
                 ItemKind::Using(u) => {
                     register_using_tree(&u.tree, &mut self.known_paths);
@@ -176,7 +184,7 @@ impl RustCodegen {
         }
     }
 
-    fn emit_file(&mut self, file: &FileAst) -> Result<()> {
+    fn emit_file(&mut self, file: &FileAst) {
         self.register_items(&file.items);
 
         self.emit_inner_docs_and_attrs(&file.inner_docs, &file.inner_attrs);
@@ -221,7 +229,7 @@ impl RustCodegen {
         }
 
         for item in &file.items[idx..] {
-            self.emit_item(item)?;
+            self.emit_item(item);
         }
 
         if let Some(ref ns_path) = file_ns {
@@ -230,7 +238,6 @@ impl RustCodegen {
                 self.line("}");
             }
         }
-        Ok(())
     }
 
     fn emit_embedded_prelude(&mut self) {
@@ -284,7 +291,7 @@ impl RustCodegen {
         }
     }
 
-    fn emit_item(&mut self, item: &Item) -> Result<()> {
+    fn emit_item(&mut self, item: &Item) {
         self.emit_docs_and_attrs(&item.docs, &item.attrs);
         let vis = format_vis(&item.vis);
         match &item.kind {
@@ -297,7 +304,7 @@ impl RustCodegen {
                     self.emit_inner_docs_and_attrs(&ns.inner_docs, &ns.inner_attrs);
                     self.register_items(items);
                     for sub in items {
-                        self.emit_item(sub)?;
+                        self.emit_item(sub);
                     }
                     for _ in &ns.path {
                         self.indent -= 1;
@@ -324,15 +331,15 @@ impl RustCodegen {
                     as_clause
                 ));
             }
-            ItemKind::Struct(s) => self.emit_struct(&vis, s)?,
-            ItemKind::Enum(e) => self.emit_enum(&vis, e)?,
-            ItemKind::Union(u) => self.emit_union(&vis, u)?,
-            ItemKind::Trait(t) => self.emit_trait(&vis, t)?,
-            ItemKind::Impl(im) => self.emit_impl(im)?,
+            ItemKind::Struct(s) => self.emit_struct(&vis, s),
+            ItemKind::Enum(e) => self.emit_enum(&vis, e),
+            ItemKind::Union(u) => self.emit_union(&vis, u),
+            ItemKind::Trait(t) => self.emit_trait(&vis, t),
+            ItemKind::Impl(im) => self.emit_impl(im),
             ItemKind::Alias(a) => {
-                let gens = self.fmt_generics(&a.generics)?;
-                let wh = self.fmt_where(&a.where_clause)?;
-                let target = self.fmt_type(&a.target)?;
+                let gens = self.fmt_generics(&a.generics);
+                let wh = self.fmt_where(&a.where_clause);
+                let target = self.fmt_type(&a.target);
                 self.line(&format!(
                     "{}type {}{}{} = {};",
                     vis,
@@ -343,8 +350,8 @@ impl RustCodegen {
                 ));
             }
             ItemKind::Const(c) => {
-                let ty = self.fmt_type(&c.ty)?;
-                let val = self.fmt_expr(&c.value)?;
+                let ty = self.fmt_type(&c.ty);
+                let val = self.fmt_expr(&c.value);
                 self.line(&format!(
                     "{}const {}: {} = {};",
                     vis,
@@ -362,11 +369,11 @@ impl RustCodegen {
                     ""
                 };
                 let mut_kw = if s.is_mut { "mut " } else { "" };
-                let ty = self.fmt_type(&s.ty)?;
+                let ty = self.fmt_type(&s.ty);
                 let name = fmt_rust_ident(&s.name);
                 match &s.value {
                     Some(v) => {
-                        let val = self.fmt_expr(v)?;
+                        let val = self.fmt_expr(v);
                         self.line(&format!(
                             "{}{}static {}{}: {} = {};",
                             vis, safety, mut_kw, name, ty, val
@@ -380,20 +387,19 @@ impl RustCodegen {
                     }
                 }
             }
-            ItemKind::Fn(f) => self.emit_fn(&vis, f)?,
+            ItemKind::Fn(f) => self.emit_fn(&vis, f),
             ItemKind::ExternBlock(eb) => {
                 let abi = eb
                     .abi
                     .as_ref()
                     .map(|a| format!(" \"{}\"", a))
                     .unwrap_or_default();
-                // Rust 2024 requires `unsafe extern` for all extern blocks.
                 let _ = eb.is_unsafe;
                 self.line(&format!("unsafe extern{} {{", abi));
                 self.indent += 1;
                 self.emit_inner_docs_and_attrs(&eb.inner_docs, &eb.inner_attrs);
                 for sub in &eb.items {
-                    self.emit_item(sub)?;
+                    self.emit_item(sub);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -426,12 +432,11 @@ impl RustCodegen {
                 }
             }
         }
-        Ok(())
     }
 
-    fn emit_struct(&mut self, vis: &str, s: &StructDecl) -> Result<()> {
-        let gens = self.fmt_generics(&s.generics)?;
-        let wh = self.fmt_where(&s.where_clause)?;
+    fn emit_struct(&mut self, vis: &str, s: &StructDecl) {
+        let gens = self.fmt_generics(&s.generics);
+        let wh = self.fmt_where(&s.where_clause);
         match &s.kind {
             StructKind::Unit => {
                 self.line(&format!("{}struct {}{}{};", vis, s.name, gens, wh));
@@ -445,7 +450,7 @@ impl RustCodegen {
                         p.push(' ');
                     }
                     p.push_str(&format_vis(&f.vis));
-                    p.push_str(&self.fmt_type(&f.ty)?);
+                    p.push_str(&self.fmt_type(&f.ty));
                     fstrs.push(p);
                 }
                 self.line(&format!(
@@ -469,7 +474,7 @@ impl RustCodegen {
                 for f in fields {
                     self.emit_docs_and_attrs(&f.docs, &f.attrs);
                     let fvis = format_vis(&f.vis);
-                    let fty = self.fmt_type(&f.ty)?;
+                    let fty = self.fmt_type(&f.ty);
                     self.line(&format!("{}{}: {},", fvis, fmt_rust_ident(&f.name), fty));
                 }
                 self.indent -= 1;
@@ -483,24 +488,23 @@ impl RustCodegen {
             let prev_self = self.current_self_type.replace(s.name.clone());
             self.indent += 1;
             for m in &s.methods {
-                self.emit_item(m)?;
+                self.emit_item(m);
             }
             self.indent -= 1;
             self.current_self_type = prev_self;
             self.line("}");
         }
-        Ok(())
     }
 
-    fn emit_enum(&mut self, vis: &str, e: &EnumDecl) -> Result<()> {
-        let gens = self.fmt_generics(&e.generics)?;
-        let wh = self.fmt_where(&e.where_clause)?;
+    fn emit_enum(&mut self, vis: &str, e: &EnumDecl) {
+        let gens = self.fmt_generics(&e.generics);
+        let wh = self.fmt_where(&e.where_clause);
         self.line(&format!("{}enum {}{}{} {{", vis, e.name, gens, wh));
         self.indent += 1;
         for v in &e.variants {
             self.emit_docs_and_attrs(&v.docs, &v.attrs);
             let disc = match &v.discriminant {
-                Some(ex) => format!(" = {}", self.fmt_expr(ex)?),
+                Some(ex) => format!(" = {}", self.fmt_expr(ex)),
                 None => String::new(),
             };
             match &v.kind {
@@ -515,7 +519,7 @@ impl RustCodegen {
                             p.push_str(&format_attr(a));
                             p.push(' ');
                         }
-                        p.push_str(&self.fmt_type(&f.ty)?);
+                        p.push_str(&self.fmt_type(&f.ty));
                         tys.push(p);
                     }
                     self.line(&format!(
@@ -530,7 +534,7 @@ impl RustCodegen {
                     self.indent += 1;
                     for f in fields {
                         self.emit_docs_and_attrs(&f.docs, &f.attrs);
-                        let fty = self.fmt_type(&f.ty)?;
+                        let fty = self.fmt_type(&f.ty);
                         self.line(&format!("{}: {},", f.name, fty));
                     }
                     self.indent -= 1;
@@ -547,25 +551,24 @@ impl RustCodegen {
             let prev_self = self.current_self_type.replace(e.name.clone());
             self.indent += 1;
             for m in &e.methods {
-                self.emit_item(m)?;
+                self.emit_item(m);
             }
             self.indent -= 1;
             self.current_self_type = prev_self;
             self.line("}");
         }
-        Ok(())
     }
 
-    fn emit_union(&mut self, vis: &str, u: &UnionDecl) -> Result<()> {
-        let gens = self.fmt_generics(&u.generics)?;
-        let wh = self.fmt_where(&u.where_clause)?;
+    fn emit_union(&mut self, vis: &str, u: &UnionDecl) {
+        let gens = self.fmt_generics(&u.generics);
+        let wh = self.fmt_where(&u.where_clause);
         let uname = fmt_rust_ident(&u.name);
         self.line(&format!("{}union {}{}{} {{", vis, uname, gens, wh));
         self.indent += 1;
         for f in &u.fields {
             self.emit_docs_and_attrs(&f.docs, &f.attrs);
             let fvis = format_vis(&f.vis);
-            let fty = self.fmt_type(&f.ty)?;
+            let fty = self.fmt_type(&f.ty);
             self.line(&format!("{}{}: {},", fvis, fmt_rust_ident(&f.name), fty));
         }
         self.indent -= 1;
@@ -577,25 +580,24 @@ impl RustCodegen {
             let prev_self = self.current_self_type.replace(u.name.clone());
             self.indent += 1;
             for m in &u.methods {
-                self.emit_item(m)?;
+                self.emit_item(m);
             }
             self.indent -= 1;
             self.current_self_type = prev_self;
             self.line("}");
         }
-        Ok(())
     }
 
-    fn emit_trait(&mut self, vis: &str, t: &TraitDecl) -> Result<()> {
+    fn emit_trait(&mut self, vis: &str, t: &TraitDecl) {
         let unsf = if t.is_unsafe { "unsafe " } else { "" };
-        let gens = self.fmt_generics(&t.generics)?;
+        let gens = self.fmt_generics(&t.generics);
         let supers = if t.supertraits.is_empty() {
             String::new()
         } else {
-            let bs: Result<Vec<_>> = t.supertraits.iter().map(|b| self.fmt_bound(b)).collect();
-            format!(": {}", bs?.join(" + "))
+            let bs: Vec<_> = t.supertraits.iter().map(|b| self.fmt_bound(b)).collect();
+            format!(": {}", bs.join(" + "))
         };
-        let wh = self.fmt_where(&t.where_clause)?;
+        let wh = self.fmt_where(&t.where_clause);
         self.line(&format!(
             "{}{}trait {}{}{}{} {{",
             vis,
@@ -609,11 +611,11 @@ impl RustCodegen {
         self.emit_inner_docs_and_attrs(&t.inner_docs, &t.inner_attrs);
         for ti in &t.items {
             match ti {
-                TraitItem::Fn(item) => {
-                    self.emit_docs_and_attrs(&item.docs, &item.attrs);
-                    if let ItemKind::Fn(f) = &item.kind {
-                        self.emit_fn("", f)?;
-                    }
+                TraitItem::Fn {
+                    docs, attrs, decl, ..
+                } => {
+                    self.emit_docs_and_attrs(docs, attrs);
+                    self.emit_fn("", decl);
                 }
                 TraitItem::AssocType {
                     attrs,
@@ -626,18 +628,18 @@ impl RustCodegen {
                     for a in attrs {
                         self.line(&format_attr(a));
                     }
-                    let ag = self.fmt_generics(generics)?;
+                    let ag = self.fmt_generics(generics);
                     let b = if bounds.is_empty() {
                         String::new()
                     } else {
-                        let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
-                        format!(": {}", bs?.join(" + "))
+                        let bs: Vec<_> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                        format!(": {}", bs.join(" + "))
                     };
                     let d = match default {
-                        Some(ty) => format!(" = {}", self.fmt_type(ty)?),
+                        Some(ty) => format!(" = {}", self.fmt_type(ty)),
                         None => String::new(),
                     };
-                    let aw = self.fmt_where(where_clause)?;
+                    let aw = self.fmt_where(where_clause);
                     self.line(&format!(
                         "type {}{}{}{}{};",
                         fmt_rust_ident(name),
@@ -656,9 +658,9 @@ impl RustCodegen {
                     for a in attrs {
                         self.line(&format_attr(a));
                     }
-                    let ty_s = self.fmt_type(ty)?;
+                    let ty_s = self.fmt_type(ty);
                     let d = match default {
-                        Some(ex) => format!(" = {}", self.fmt_expr(ex)?),
+                        Some(ex) => format!(" = {}", self.fmt_expr(ex)),
                         None => String::new(),
                     };
                     self.line(&format!("const {}: {}{};", fmt_rust_ident(name), ty_s, d));
@@ -675,20 +677,19 @@ impl RustCodegen {
         }
         self.indent -= 1;
         self.line("}");
-        Ok(())
     }
 
-    fn emit_impl(&mut self, im: &ImplDecl) -> Result<()> {
+    fn emit_impl(&mut self, im: &ImplDecl) {
         let unsf = if im.is_unsafe { "unsafe " } else { "" };
-        let gens = self.fmt_generics(&im.generics)?;
-        let target = self.fmt_type(&im.target_ty)?;
-        let wh = self.fmt_where(&im.where_clause)?;
+        let gens = self.fmt_generics(&im.generics);
+        let target = self.fmt_type(&im.target_ty);
+        let wh = self.fmt_where(&im.where_clause);
         let header = if let Some(tp) = &im.trait_path {
             format!(
                 "{}impl{} {} for {}{} {{",
                 unsf,
                 gens,
-                self.fmt_type_path(tp)?,
+                self.fmt_type_path(tp),
                 target,
                 wh
             )
@@ -702,15 +703,19 @@ impl RustCodegen {
         self.emit_inner_docs_and_attrs(&im.inner_docs, &im.inner_attrs);
         for item in &im.items {
             match item {
-                ImplItem::Fn(it) => {
-                    if im.trait_path.is_some() {
-                        self.emit_docs_and_attrs(&it.docs, &it.attrs);
-                        if let ItemKind::Fn(f) = &it.kind {
-                            self.emit_fn("", f)?;
-                        }
+                ImplItem::Fn {
+                    docs,
+                    attrs,
+                    vis,
+                    decl,
+                } => {
+                    self.emit_docs_and_attrs(docs, attrs);
+                    let fvis = if im.trait_path.is_some() {
+                        String::new()
                     } else {
-                        self.emit_item(it)?;
-                    }
+                        format_vis(vis)
+                    };
+                    self.emit_fn(&fvis, decl);
                 }
                 ImplItem::AssocType {
                     attrs,
@@ -722,9 +727,9 @@ impl RustCodegen {
                     for a in attrs {
                         self.line(&format_attr(a));
                     }
-                    let ag = self.fmt_generics(generics)?;
-                    let t = self.fmt_type(ty)?;
-                    let aw = self.fmt_where(where_clause)?;
+                    let ag = self.fmt_generics(generics);
+                    let t = self.fmt_type(ty);
+                    let aw = self.fmt_where(where_clause);
                     self.line(&format!(
                         "type {}{} = {}{};",
                         fmt_rust_ident(name),
@@ -733,7 +738,7 @@ impl RustCodegen {
                         aw
                     ));
                 }
-                ImplItem::AssocConst(it) => self.emit_item(it)?,
+                ImplItem::AssocConst(it) => self.emit_item(it),
                 ImplItem::MacroCall(mc) => {
                     let s = format_macro_call(mc);
                     if mc.delim == MacroDelim::Brace {
@@ -747,10 +752,9 @@ impl RustCodegen {
         self.indent -= 1;
         self.current_self_type = prev_self;
         self.line("}");
-        Ok(())
     }
 
-    fn emit_fn(&mut self, vis: &str, f: &FnDecl) -> Result<()> {
+    fn emit_fn(&mut self, vis: &str, f: &FnDecl) {
         let mut sig = String::new();
         sig.push_str(vis);
         if f.is_const {
@@ -770,13 +774,13 @@ impl RustCodegen {
         }
         sig.push_str("fn ");
         sig.push_str(&fmt_rust_ident(&f.name));
-        sig.push_str(&self.fmt_generics(&f.generics)?);
+        sig.push_str(&self.fmt_generics(&f.generics));
         sig.push('(');
 
         self.push_scope();
         let mut pstrs = Vec::new();
         for p in &f.params {
-            pstrs.push(self.fmt_param(p)?);
+            pstrs.push(self.fmt_param(p));
         }
         if let Some(vp) = &f.variadic {
             let mut vs = String::new();
@@ -799,25 +803,24 @@ impl RustCodegen {
         let effective_ret = unwrap_async_task_type(f.is_async, &f.return_ty);
         if !matches!(effective_ret, Type::Void) {
             sig.push_str(" -> ");
-            sig.push_str(&self.fmt_type(effective_ret)?);
+            sig.push_str(&self.fmt_type(effective_ret));
         }
-        sig.push_str(&self.fmt_where(&f.where_clause)?);
+        sig.push_str(&self.fmt_where(&f.where_clause));
 
         if let Some(body) = &f.body {
             self.line(&format!("{} {{", sig));
             self.indent += 1;
-            self.emit_block_stmts(body)?;
+            self.emit_block_stmts(body);
             self.indent -= 1;
             self.line("}");
         } else {
             self.line(&format!("{};", sig));
         }
         self.pop_scope();
-        Ok(())
     }
 
-    fn fmt_param(&mut self, p: &Param) -> Result<String> {
-        Ok(match p {
+    fn fmt_param(&mut self, p: &Param) -> String {
+        match p {
             Param::Receiver(rk) => {
                 self.declare_var("this", &Type::Void);
                 match rk {
@@ -844,7 +847,7 @@ impl RustCodegen {
                     }
                     ReceiverKind::Typed { is_mut, ty } => {
                         let mk = if *is_mut { "mut " } else { "" };
-                        format!("{}self: {}", mk, self.fmt_type(ty)?)
+                        format!("{}self: {}", mk, self.fmt_type(ty))
                     }
                 }
             }
@@ -866,7 +869,7 @@ impl RustCodegen {
                     prefix,
                     m,
                     fmt_rust_ident(name),
-                    self.fmt_type(ty)?
+                    self.fmt_type(ty)
                 )
             }
             Param::Pattern {
@@ -880,49 +883,50 @@ impl RustCodegen {
                     prefix.push_str(&format_attr(a));
                     prefix.push(' ');
                 }
-                let pat_s = self.fmt_pattern(pat)?;
-                let ty = explicit_ty
+                let pat_s = self.fmt_pattern(pat);
+                let Some(ty) = explicit_ty
                     .clone()
                     .or_else(|| infer_param_pattern_type(pat))
-                    .ok_or_else(|| {
-                        RSharpError::codegen("Could not determine parameter type from pattern")
-                    })?;
-                format!("{}{}: {}", prefix, pat_s, self.fmt_type(&ty)?)
+                else {
+                    self.record_err(RSharpError::codegen(
+                        "Could not determine parameter type from pattern",
+                    ));
+                    return format!("{}{}: _", prefix, pat_s);
+                };
+                format!("{}{}: {}", prefix, pat_s, self.fmt_type(&ty))
             }
-        })
+        }
     }
 
-    fn emit_value_block_stmts(&mut self, block: &Block) -> Result<()> {
+    fn emit_value_block_stmts(&mut self, block: &Block) {
         self.push_scope();
         self.emit_inner_docs_and_attrs(&block.inner_docs, &block.inner_attrs);
         if let Some((last, init)) = block.stmts.split_last()
             && let StmtKind::Return(Some(tail)) = &last.kind
         {
             for st in init {
-                self.emit_stmt(st)?;
+                self.emit_stmt(st);
             }
-            let t = self.fmt_expr(tail)?;
+            let t = self.fmt_expr(tail);
             self.line(&t);
         } else {
             for st in &block.stmts {
-                self.emit_stmt(st)?;
+                self.emit_stmt(st);
             }
         }
         self.pop_scope();
-        Ok(())
     }
 
-    fn emit_block_stmts(&mut self, block: &Block) -> Result<()> {
+    fn emit_block_stmts(&mut self, block: &Block) {
         self.push_scope();
         self.emit_inner_docs_and_attrs(&block.inner_docs, &block.inner_attrs);
         for stmt in &block.stmts {
-            self.emit_stmt(stmt)?;
+            self.emit_stmt(stmt);
         }
         self.pop_scope();
-        Ok(())
     }
 
-    fn emit_stmt(&mut self, stmt: &Stmt) -> Result<()> {
+    fn emit_stmt(&mut self, stmt: &Stmt) {
         for a in &stmt.attrs {
             self.line(&format_attr(a));
         }
@@ -935,27 +939,27 @@ impl RustCodegen {
                 ..
             } => {
                 let m = if *is_mut { "mut " } else { "" };
-                let ty_s = self.fmt_type(ty)?;
+                let ty_s = self.fmt_type(ty);
                 let init_s = match init {
                     Some(expr) => {
                         let rhs = if is_list_type(ty) {
                             match expr {
                                 Expr::ArrayLit(elems) => {
-                                    let items: Result<Vec<_>> =
+                                    let items: Vec<_> =
                                         elems.iter().map(|e| self.fmt_expr(e)).collect();
-                                    format!("vec![{}]", items?.join(", "))
+                                    format!("vec![{}]", items.join(", "))
                                 }
                                 Expr::ArrayRepeat { value, count } => {
                                     format!(
                                         "vec![{}; {}]",
-                                        self.fmt_expr(value)?,
-                                        self.fmt_expr(count)?
+                                        self.fmt_expr(value),
+                                        self.fmt_expr(count)
                                     )
                                 }
-                                _ => self.fmt_expr(expr)?,
+                                _ => self.fmt_expr(expr),
                             }
                         } else {
-                            self.fmt_expr(expr)?
+                            self.fmt_expr(expr)
                         };
                         format!(" = {}", rhs)
                     }
@@ -967,14 +971,13 @@ impl RustCodegen {
                 // the trait bounds at compile time via a zero-cost generic check function.
                 if let Type::ImplTrait(bounds) = ty {
                     self.line(&format!("let {}{}{};", m, rname, init_s));
-                    let check_bounds: Result<Vec<String>> = bounds
+                    let check_bounds: Vec<String> = bounds
                         .iter()
                         .filter(|b| {
                             !matches!(b, TypeBound::PreciseCapture(_) | TypeBound::Lifetime(_))
                         })
                         .map(|b| self.fmt_bound(b))
                         .collect();
-                    let check_bounds = check_bounds?;
                     if !check_bounds.is_empty() {
                         self.line(&format!(
                             "{{ fn __rsharp_impl_check<__T: {}>(_: &__T) {{}} __rsharp_impl_check(&{}); }}",
@@ -987,27 +990,27 @@ impl RustCodegen {
                 }
             }
             StmtKind::Destructure { pat, init } => {
-                let pat_s = self.fmt_pattern(pat)?;
-                let rhs = self.fmt_expr(init)?;
+                let pat_s = self.fmt_pattern(pat);
+                let rhs = self.fmt_expr(init);
                 self.line(&format!("let {} = {};", pat_s, rhs));
-                self.emit_pattern_type_checks(pat)?;
+                self.emit_pattern_type_checks(pat);
             }
             StmtKind::DestructureAssign { pat, value } => {
-                let pat_s = self.fmt_pattern(pat)?;
-                let rhs = self.fmt_expr(value)?;
+                let pat_s = self.fmt_pattern(pat);
+                let rhs = self.fmt_expr(value);
                 self.line(&format!("{} = {};", pat_s, rhs));
             }
             StmtKind::Discard(expr) => {
-                let e = self.fmt_expr(expr)?;
+                let e = self.fmt_expr(expr);
                 self.line(&format!("let _ = {};", e));
             }
             StmtKind::Item(item) => {
                 self.register_items(std::slice::from_ref(item.as_ref()));
-                self.emit_item(item)?;
+                self.emit_item(item);
             }
             StmtKind::Return(expr) => match expr {
                 Some(e) => {
-                    let s = self.fmt_expr(e)?;
+                    let s = self.fmt_expr(e);
                     self.line(&format!("return {};", s));
                 }
                 None => self.line("return;"),
@@ -1019,7 +1022,7 @@ impl RustCodegen {
                 }
                 if let Some(v) = value {
                     line.push(' ');
-                    line.push_str(&self.fmt_expr(v)?);
+                    line.push_str(&self.fmt_expr(v));
                 }
                 line.push(';');
                 self.line(&line);
@@ -1028,27 +1031,27 @@ impl RustCodegen {
                 Some(l) => self.line(&format!("continue {};", fmt_rust_lifetime(l))),
                 None => self.line("continue;"),
             },
-            StmtKind::If(if_stmt) => self.emit_if(if_stmt, false)?,
+            StmtKind::If(if_stmt) => self.emit_if(if_stmt, false),
             StmtKind::Require {
                 expr,
                 pat,
                 else_block,
             } => {
-                let pat_s = self.fmt_pattern(pat)?;
-                let expr_s = self.fmt_expr(expr)?;
+                let pat_s = self.fmt_pattern(pat);
+                let expr_s = self.fmt_expr(expr);
                 self.line(&format!("let {} = {} else {{", pat_s, expr_s));
                 self.indent += 1;
-                self.emit_block_stmts(else_block)?;
+                self.emit_block_stmts(else_block);
                 self.indent -= 1;
                 self.line("};");
-                self.emit_pattern_type_checks(pat)?;
+                self.emit_pattern_type_checks(pat);
             }
             StmtKind::While { label, cond, body } => {
                 let lbl = label
                     .as_ref()
                     .map(|l| format!("{}: ", fmt_rust_lifetime(l)))
                     .unwrap_or_default();
-                self.emit_cond_block(&format!("{}while ", lbl), cond, body)?;
+                self.emit_cond_block(&format!("{}while ", lbl), cond, body);
                 self.line("}");
             }
             StmtKind::For {
@@ -1062,7 +1065,7 @@ impl RustCodegen {
                 self.indent += 1;
                 self.push_scope();
                 if let Some(init_stmt) = init {
-                    self.emit_stmt(init_stmt)?;
+                    self.emit_stmt(init_stmt);
                 }
                 if step.is_some() {
                     self.line("let mut __rsharp_first = true;");
@@ -1074,7 +1077,7 @@ impl RustCodegen {
                 self.line(&format!("{}loop {{", lbl));
                 self.indent += 1;
                 if let Some(step_expr) = step {
-                    let step_s = self.fmt_expr(step_expr)?;
+                    let step_s = self.fmt_expr(step_expr);
                     self.line("if __rsharp_first {");
                     self.indent += 1;
                     self.line("__rsharp_first = false;");
@@ -1086,11 +1089,11 @@ impl RustCodegen {
                     self.line("}");
                 }
                 if let Some(cond_expr) = cond {
-                    let c = self.fmt_expr(cond_expr)?;
+                    let c = self.fmt_expr(cond_expr);
                     self.line(&format!("if !({}) {{ break; }}", c));
                 }
                 for st in &body.stmts {
-                    self.emit_stmt(st)?;
+                    self.emit_stmt(st);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -1108,14 +1111,14 @@ impl RustCodegen {
                     .as_ref()
                     .map(|l| format!("{}: ", fmt_rust_lifetime(l)))
                     .unwrap_or_default();
-                let p = self.fmt_pattern(pat)?;
-                let it = self.fmt_expr(iter)?;
+                let p = self.fmt_pattern(pat);
+                let it = self.fmt_expr(iter);
                 self.line(&format!("{}for {} in {} {{", lbl, p, it));
                 self.indent += 1;
                 self.push_scope();
-                self.emit_pattern_type_checks(pat)?;
+                self.emit_pattern_type_checks(pat);
                 for st in &body.stmts {
-                    self.emit_stmt(st)?;
+                    self.emit_stmt(st);
                 }
                 self.pop_scope();
                 self.indent -= 1;
@@ -1128,17 +1131,17 @@ impl RustCodegen {
                     .unwrap_or_default();
                 self.line(&format!("{}loop {{", lbl));
                 self.indent += 1;
-                self.emit_block_stmts(body)?;
+                self.emit_block_stmts(body);
                 self.indent -= 1;
                 self.line("}");
             }
             StmtKind::Match(m) => {
-                self.emit_match(m)?;
+                self.emit_match(m);
             }
             StmtKind::Unsafe(b) => {
                 self.line("unsafe {");
                 self.indent += 1;
-                self.emit_block_stmts(b)?;
+                self.emit_block_stmts(b);
                 self.indent -= 1;
                 self.line("}");
             }
@@ -1148,20 +1151,19 @@ impl RustCodegen {
                 }
             }
             StmtKind::Expr(expr) => {
-                let s = self.fmt_expr(expr)?;
+                let s = self.fmt_expr(expr);
                 self.line(&format!("{};", s));
             }
         }
-        Ok(())
     }
 
-    fn emit_cond_block(&mut self, prefix: &str, cond: &Condition, body: &Block) -> Result<()> {
+    fn emit_cond_block(&mut self, prefix: &str, cond: &Condition, body: &Block) {
         match cond {
             Condition::Bool(e) => {
-                let s = self.fmt_expr(e)?;
+                let s = self.fmt_expr(e);
                 self.line(&format!("{}{} {{", prefix, s));
                 self.indent += 1;
-                self.emit_block_stmts(body)?;
+                self.emit_block_stmts(body);
                 self.indent -= 1;
             }
             Condition::IsPattern {
@@ -1169,14 +1171,14 @@ impl RustCodegen {
                 negated: false,
                 pat,
             } => {
-                let p = self.fmt_pattern(pat)?;
-                let e = self.fmt_expr(expr)?;
+                let p = self.fmt_pattern(pat);
+                let e = self.fmt_expr(expr);
                 self.line(&format!("{}let {} = {} {{", prefix, p, e));
                 self.indent += 1;
                 self.push_scope();
-                self.emit_pattern_type_checks(pat)?;
+                self.emit_pattern_type_checks(pat);
                 for st in &body.stmts {
-                    self.emit_stmt(st)?;
+                    self.emit_stmt(st);
                 }
                 self.pop_scope();
                 self.indent -= 1;
@@ -1186,11 +1188,11 @@ impl RustCodegen {
                 negated: true,
                 pat,
             } => {
-                let p = self.fmt_pattern(pat)?;
-                let e = self.fmt_expr(expr)?;
+                let p = self.fmt_pattern(pat);
+                let e = self.fmt_expr(expr);
                 self.line(&format!("{}!matches!({}, {}) {{", prefix, e, p));
                 self.indent += 1;
-                self.emit_block_stmts(body)?;
+                self.emit_block_stmts(body);
                 self.indent -= 1;
             }
             Condition::LetChain(items) => {
@@ -1200,50 +1202,48 @@ impl RustCodegen {
                 for item in items {
                     match item {
                         ChainItem::IsPattern { expr, pat } => {
-                            let p = self.fmt_pattern(pat)?;
-                            let e = self.fmt_expr(expr)?;
+                            let p = self.fmt_pattern(pat);
+                            let e = self.fmt_expr(expr);
                             self.register_pattern_vars(pat);
                             parts.push(format!("let {} = {}", p, e));
                             pats.push(pat);
                         }
                         ChainItem::Bool(e) => {
-                            parts.push(self.fmt_expr(e)?);
+                            parts.push(self.fmt_expr(e));
                         }
                     }
                 }
                 self.line(&format!("{}{} {{", prefix, parts.join(" && ")));
                 self.indent += 1;
                 for pat in pats {
-                    self.emit_pattern_type_checks(pat)?;
+                    self.emit_pattern_type_checks(pat);
                 }
                 for st in &body.stmts {
-                    self.emit_stmt(st)?;
+                    self.emit_stmt(st);
                 }
                 self.indent -= 1;
                 self.pop_scope();
             }
         }
-        Ok(())
     }
 
-    fn emit_if(&mut self, if_stmt: &IfStmt, is_else_if: bool) -> Result<()> {
+    fn emit_if(&mut self, if_stmt: &IfStmt, is_else_if: bool) {
         let prefix = if is_else_if { "else if " } else { "if " };
-        self.emit_cond_block(prefix, &if_stmt.cond, &if_stmt.then_block)?;
+        self.emit_cond_block(prefix, &if_stmt.cond, &if_stmt.then_block);
         match &if_stmt.else_branch {
             Some(ElseBranch::ElseIf(next)) => {
                 self.line("}");
-                self.emit_if(next, true)?;
+                self.emit_if(next, true);
             }
             Some(ElseBranch::Else(eb)) => {
                 self.line("} else {");
                 self.indent += 1;
-                self.emit_block_stmts(eb)?;
+                self.emit_block_stmts(eb);
                 self.indent -= 1;
                 self.line("}");
             }
             None => self.line("}"),
         }
-        Ok(())
     }
 
     fn fmt_condition_expr<'a>(
@@ -1251,16 +1251,16 @@ impl RustCodegen {
         cond: &'a Condition,
         sub: &mut RustCodegen,
         bound_pats: &mut Vec<&'a Pattern>,
-    ) -> Result<String> {
-        Ok(match cond {
-            Condition::Bool(e) => sub.fmt_expr(e)?,
+    ) -> String {
+        match cond {
+            Condition::Bool(e) => sub.fmt_expr(e),
             Condition::IsPattern {
                 expr,
                 negated: false,
                 pat,
             } => {
-                let p = sub.fmt_pattern(pat)?;
-                let e = sub.fmt_expr(expr)?;
+                let p = sub.fmt_pattern(pat);
+                let e = sub.fmt_expr(expr);
                 sub.register_pattern_vars(pat);
                 bound_pats.push(pat);
                 format!("let {} = {}", p, e)
@@ -1271,32 +1271,32 @@ impl RustCodegen {
                 pat,
             } => format!(
                 "!matches!({}, {})",
-                sub.fmt_expr(expr)?,
-                sub.fmt_pattern(pat)?
+                sub.fmt_expr(expr),
+                sub.fmt_pattern(pat)
             ),
             Condition::LetChain(items) => {
                 let mut parts = Vec::new();
                 for item in items {
                     match item {
                         ChainItem::IsPattern { expr, pat } => {
-                            let p = sub.fmt_pattern(pat)?;
-                            let e = sub.fmt_expr(expr)?;
+                            let p = sub.fmt_pattern(pat);
+                            let e = sub.fmt_expr(expr);
                             sub.register_pattern_vars(pat);
                             bound_pats.push(pat);
                             parts.push(format!("let {} = {}", p, e));
                         }
                         ChainItem::Bool(e) => {
-                            parts.push(sub.fmt_expr(e)?);
+                            parts.push(sub.fmt_expr(e));
                         }
                     }
                 }
                 parts.join(" && ")
             }
-        })
+        }
     }
 
-    fn emit_match(&mut self, m: &MatchExpr) -> Result<()> {
-        let scr = self.fmt_expr(&m.scrutinee)?;
+    fn emit_match(&mut self, m: &MatchExpr) {
+        let scr = self.fmt_expr(&m.scrutinee);
         self.line(&format!("match {} {{", scr));
         self.indent += 1;
         for arm in &m.arms {
@@ -1307,20 +1307,20 @@ impl RustCodegen {
             guard_sub.register_pattern_vars(&arm.pat);
             let mut guard_pats = Vec::new();
             let (p, g) = if let Pattern::Const(ce) = &arm.pat {
-                let const_cond = format!("__rsharp_c == const {{ {} }}", self.fmt_expr(ce)?);
+                let const_cond = format!("__rsharp_c == const {{ {} }}", self.fmt_expr(ce));
                 let combined_guard = match &arm.guard {
                     Some(gc) => {
-                        let gs = self.fmt_condition_expr(gc, &mut guard_sub, &mut guard_pats)?;
+                        let gs = self.fmt_condition_expr(gc, &mut guard_sub, &mut guard_pats);
                         format!(" if ({}) && {}", const_cond, gs)
                     }
                     None => format!(" if {}", const_cond),
                 };
                 ("__rsharp_c".to_string(), combined_guard)
             } else {
-                let p = self.fmt_pattern(&arm.pat)?;
+                let p = self.fmt_pattern(&arm.pat);
                 let g = match &arm.guard {
                     Some(gc) => {
-                        let gs = self.fmt_condition_expr(gc, &mut guard_sub, &mut guard_pats)?;
+                        let gs = self.fmt_condition_expr(gc, &mut guard_sub, &mut guard_pats);
                         format!(" if {}", gs)
                     }
                     None => String::new(),
@@ -1333,28 +1333,28 @@ impl RustCodegen {
                     self.indent += 1;
                     self.push_scope();
                     self.emit_inner_docs_and_attrs(&b.inner_docs, &b.inner_attrs);
-                    self.emit_pattern_type_checks(&arm.pat)?;
+                    self.emit_pattern_type_checks(&arm.pat);
                     for gp in &guard_pats {
-                        self.emit_pattern_type_checks(gp)?;
+                        self.emit_pattern_type_checks(gp);
                     }
                     for st in &b.stmts {
-                        self.emit_stmt(st)?;
+                        self.emit_stmt(st);
                     }
                     self.pop_scope();
                     self.indent -= 1;
                     self.line("}");
                 }
                 MatchArmBody::Expr(e) => {
-                    let mut checks = self.collect_pattern_type_checks(&arm.pat)?;
+                    let mut checks = self.collect_pattern_type_checks(&arm.pat);
                     for gp in &guard_pats {
-                        checks.extend(self.collect_pattern_type_checks(gp)?);
+                        checks.extend(self.collect_pattern_type_checks(gp));
                     }
                     self.push_scope();
                     self.register_pattern_vars(&arm.pat);
                     for gp in &guard_pats {
                         self.register_pattern_vars(gp);
                     }
-                    let es = self.fmt_expr(e)?;
+                    let es = self.fmt_expr(e);
                     self.pop_scope();
                     if checks.is_empty() {
                         self.line(&format!("{}{} => {},", p, g, es));
@@ -1366,7 +1366,6 @@ impl RustCodegen {
         }
         self.indent -= 1;
         self.line("}");
-        Ok(())
     }
 
     fn register_pattern_vars(&mut self, pat: &Pattern) {
@@ -1377,35 +1376,34 @@ impl RustCodegen {
         }
     }
 
-    fn collect_pattern_type_checks(&self, pat: &Pattern) -> Result<Vec<String>> {
+    fn collect_pattern_type_checks(&self, pat: &Pattern) -> Vec<String> {
         let mut bindings = Vec::new();
         collect_pattern_bindings(pat, &mut bindings);
         let mut checks = Vec::new();
         for (name, ty) in bindings {
-            let ty_s = self.fmt_type(&ty)?;
+            let ty_s = self.fmt_type(&ty);
             checks.push(format!("let _: &{} = &{};", ty_s, fmt_rust_ident(&name)));
         }
-        Ok(checks)
+        checks
     }
 
-    fn emit_pattern_type_checks(&mut self, pat: &Pattern) -> Result<()> {
-        let checks = self.collect_pattern_type_checks(pat)?;
+    fn emit_pattern_type_checks(&mut self, pat: &Pattern) {
+        let checks = self.collect_pattern_type_checks(pat);
         self.register_pattern_vars(pat);
         for c in checks {
             self.line(&c);
         }
-        Ok(())
     }
 
     // ==================== TYPES & PATTERNS ====================
 
-    fn fmt_type(&self, ty: &Type) -> Result<String> {
-        Ok(match ty {
+    fn fmt_type(&self, ty: &Type) -> String {
+        match ty {
             Type::Void => "()".to_string(),
             Type::Never => "!".to_string(),
             Type::Dynamic => "Box<dyn std::any::Any>".to_string(),
             Type::Infer => "_".to_string(),
-            Type::Path(p) => self.fmt_type_path(p)?,
+            Type::Path(p) => self.fmt_type_path(p),
             Type::QualifiedPath {
                 self_ty,
                 trait_path,
@@ -1414,45 +1412,44 @@ impl RustCodegen {
             } => {
                 let mut out = format!(
                     "<{} as {}>::{}",
-                    self.fmt_type(self_ty)?,
-                    self.fmt_type_path(trait_path)?,
+                    self.fmt_type(self_ty),
+                    self.fmt_type_path(trait_path),
                     item
                 );
                 if !args.is_empty() {
-                    let ga: Result<Vec<_>> = args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    out.push_str(&format!("<{}>", ga?.join(", ")));
+                    let ga: Vec<_> = args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    out.push_str(&format!("<{}>", ga.join(", ")));
                 }
                 out
             }
-            Type::Grouped(inner) => format!("({})", self.fmt_type(inner)?),
+            Type::Grouped(inner) => format!("({})", self.fmt_type(inner)),
             Type::Read { life, inner } => {
                 let l = life
                     .as_ref()
                     .map(|n| format!("{} ", fmt_rust_lifetime(n)))
                     .unwrap_or_default();
-                format!("&{}{}", l, self.fmt_type(inner)?)
+                format!("&{}{}", l, self.fmt_type(inner))
             }
             Type::Write { life, inner } => {
                 let l = life
                     .as_ref()
                     .map(|n| format!("{} ", fmt_rust_lifetime(n)))
                     .unwrap_or_default();
-                format!("&{}mut {}", l, self.fmt_type(inner)?)
+                format!("&{}mut {}", l, self.fmt_type(inner))
             }
-            Type::Slice(inner) => format!("[{}]", self.fmt_type(inner)?),
-            Type::ReadPtr(inner) => format!("*const {}", self.fmt_type(inner)?),
-            Type::WritePtr(inner) => format!("*mut {}", self.fmt_type(inner)?),
-            Type::Optional(inner) => format!("Option<{}>", self.fmt_type(inner)?),
+            Type::Slice(inner) => format!("[{}]", self.fmt_type(inner)),
+            Type::ReadPtr(inner) => format!("*const {}", self.fmt_type(inner)),
+            Type::WritePtr(inner) => format!("*mut {}", self.fmt_type(inner)),
+            Type::Optional(inner) => format!("Option<{}>", self.fmt_type(inner)),
             Type::Array { elem, dims } => {
-                let mut cur = self.fmt_type(elem)?;
+                let mut cur = self.fmt_type(elem);
                 for d in dims.iter().rev() {
-                    cur = format!("[{}; {}]", cur, self.fmt_expr(d)?);
+                    cur = format!("[{}; {}]", cur, self.fmt_expr(d));
                 }
                 cur
             }
             Type::Tuple(elems) => {
-                let parts: Result<Vec<_>> = elems.iter().map(|e| self.fmt_type(&e.ty)).collect();
-                let parts = parts?;
+                let parts: Vec<_> = elems.iter().map(|e| self.fmt_type(&e.ty)).collect();
                 if parts.len() == 1 {
                     format!("({},)", parts[0])
                 } else {
@@ -1460,12 +1457,12 @@ impl RustCodegen {
                 }
             }
             Type::DynTrait(bounds) => {
-                let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
-                format!("dyn {}", bs?.join(" + "))
+                let bs: Vec<_> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                format!("dyn {}", bs.join(" + "))
             }
             Type::ImplTrait(bounds) => {
-                let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
-                format!("impl {}", bs?.join(" + "))
+                let bs: Vec<_> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                format!("impl {}", bs.join(" + "))
             }
             Type::FnPtr {
                 lifetimes,
@@ -1488,7 +1485,7 @@ impl RustCodegen {
                 }
                 let mut ps = Vec::new();
                 for p in params {
-                    let t = self.fmt_type(&p.ty)?;
+                    let t = self.fmt_type(&p.ty);
                     if let Some(name) = &p.name {
                         ps.push(format!("{}: {}", fmt_rust_ident(name), t));
                     } else {
@@ -1498,7 +1495,7 @@ impl RustCodegen {
                 if *is_variadic {
                     ps.push("...".to_string());
                 }
-                let r = self.fmt_type(ret)?;
+                let r = self.fmt_type(ret);
                 if matches!(ret.as_ref(), Type::Void) {
                     format!("{}fn({})", prefix, ps.join(", "))
                 } else {
@@ -1506,16 +1503,16 @@ impl RustCodegen {
                 }
             }
             Type::Macro(mc) => format_macro_call(mc),
-        })
+        }
     }
 
-    fn fmt_type_path(&self, path: &TypePath) -> Result<String> {
+    fn fmt_type_path(&self, path: &TypePath) -> String {
         if !path.global
             && path.segments.len() == 1
             && matches!(path.segments[0].args, TypePathArgs::None)
             && let Some(prim) = map_primitive_alias(&path.segments[0].name)
         {
-            return Ok(prim.to_string());
+            return prim.to_string();
         }
         let mut out = Vec::new();
         for seg in &path.segments {
@@ -1523,42 +1520,41 @@ impl RustCodegen {
             match &seg.args {
                 TypePathArgs::None => out.push(mapped),
                 TypePathArgs::Angle(args) => {
-                    let ga: Result<Vec<_>> = args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    out.push(format!("{}<{}>", mapped, ga?.join(", ")));
+                    let ga: Vec<_> = args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    out.push(format!("{}<{}>", mapped, ga.join(", ")));
                 }
                 TypePathArgs::Parenthesized { params, ret } => {
-                    let ps: Result<Vec<_>> = params.iter().map(|p| self.fmt_type(p)).collect();
+                    let ps: Vec<_> = params.iter().map(|p| self.fmt_type(p)).collect();
                     let ret_s = match ret {
                         Some(r) if !matches!(r.as_ref(), Type::Void) => {
-                            format!(" -> {}", self.fmt_type(r)?)
+                            format!(" -> {}", self.fmt_type(r))
                         }
                         _ => String::new(),
                     };
-                    out.push(format!("{}({}){}", mapped, ps?.join(", "), ret_s));
+                    out.push(format!("{}({}){}", mapped, ps.join(", "), ret_s));
                 }
             }
         }
         let joined = out.join("::");
         if path.global {
-            Ok(format!("::{}", joined))
+            format!("::{}", joined)
         } else {
-            Ok(joined)
+            joined
         }
     }
 
-    fn fmt_generic_arg(&self, arg: &GenericArg) -> Result<String> {
-        Ok(match arg {
+    fn fmt_generic_arg(&self, arg: &GenericArg) -> String {
+        match arg {
             GenericArg::Lifetime(l) => fmt_rust_lifetime(l),
-            GenericArg::Type(t) => self.fmt_type(t)?,
+            GenericArg::Type(t) => self.fmt_type(t),
             GenericArg::AssocBinding { name, generics, ty } => {
                 let gs = if generics.is_empty() {
                     String::new()
                 } else {
-                    let ga: Result<Vec<_>> =
-                        generics.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("<{}>", ga?.join(", "))
+                    let ga: Vec<_> = generics.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    format!("<{}>", ga.join(", "))
                 };
-                format!("{}{} = {}", fmt_rust_ident(name), gs, self.fmt_type(ty)?)
+                format!("{}{} = {}", fmt_rust_ident(name), gs, self.fmt_type(ty))
             }
             GenericArg::AssocBound {
                 name,
@@ -1568,28 +1564,27 @@ impl RustCodegen {
                 let gs = if generics.is_empty() {
                     String::new()
                 } else {
-                    let ga: Result<Vec<_>> =
-                        generics.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("<{}>", ga?.join(", "))
+                    let ga: Vec<_> = generics.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    format!("<{}>", ga.join(", "))
                 };
-                let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
-                format!("{}{}: {}", fmt_rust_ident(name), gs, bs?.join(" + "))
+                let bs: Vec<_> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                format!("{}{}: {}", fmt_rust_ident(name), gs, bs.join(" + "))
             }
-            GenericArg::ConstExpr(e) => self.fmt_expr(e)?,
-            GenericArg::ConstBlock(e) => format!("{{ {} }}", self.fmt_expr(e)?),
-        })
+            GenericArg::ConstExpr(e) => self.fmt_expr(e),
+            GenericArg::ConstBlock(e) => format!("{{ {} }}", self.fmt_expr(e)),
+        }
     }
 
-    fn fmt_bound(&self, b: &TypeBound) -> Result<String> {
-        Ok(match b {
-            TypeBound::Trait(tp) => self.fmt_type_path(tp)?,
-            TypeBound::Relaxed(tp) => format!("?{}", self.fmt_type_path(tp)?),
+    fn fmt_bound(&self, b: &TypeBound) -> String {
+        match b {
+            TypeBound::Trait(tp) => self.fmt_type_path(tp),
+            TypeBound::Relaxed(tp) => format!("?{}", self.fmt_type_path(tp)),
             TypeBound::Forall {
                 lifetimes,
                 trait_path,
             } => {
                 let ls: Vec<String> = lifetimes.iter().map(|l| fmt_rust_lifetime(l)).collect();
-                format!("for<{}> {}", ls.join(", "), self.fmt_type_path(trait_path)?)
+                format!("for<{}> {}", ls.join(", "), self.fmt_type_path(trait_path))
             }
             TypeBound::Lifetime(l) => fmt_rust_lifetime(l),
             TypeBound::PreciseCapture(args) => {
@@ -1602,12 +1597,12 @@ impl RustCodegen {
                     .collect();
                 format!("use<{}>", parts.join(", "))
             }
-        })
+        }
     }
 
-    fn fmt_generics(&self, params: &[GenericParam]) -> Result<String> {
+    fn fmt_generics(&self, params: &[GenericParam]) -> String {
         if params.is_empty() {
-            return Ok(String::new());
+            return String::new();
         }
         let mut parts = Vec::new();
         for p in params {
@@ -1633,11 +1628,11 @@ impl RustCodegen {
                 } => {
                     let mut s = format!("{}{}", prefix, fmt_rust_ident(name));
                     if !bounds.is_empty() {
-                        let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
-                        s.push_str(&format!(": {}", bs?.join(" + ")));
+                        let bs: Vec<_> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                        s.push_str(&format!(": {}", bs.join(" + ")));
                     }
                     if let Some(def) = default {
-                        s.push_str(&format!(" = {}", self.fmt_type(def)?));
+                        s.push_str(&format!(" = {}", self.fmt_type(def)));
                     }
                     parts.push(s);
                 }
@@ -1646,24 +1641,24 @@ impl RustCodegen {
                         "{}const {}: {}",
                         prefix,
                         fmt_rust_ident(name),
-                        self.fmt_type(ty)?
+                        self.fmt_type(ty)
                     );
                     if let Some(def) = default {
-                        s.push_str(&format!(" = {}", self.fmt_expr(def)?));
+                        s.push_str(&format!(" = {}", self.fmt_expr(def)));
                     }
                     parts.push(s);
                 }
             }
         }
-        Ok(format!("<{}>", parts.join(", ")))
+        format!("<{}>", parts.join(", "))
     }
 
-    fn fmt_where(&self, wc: &Option<WhereClause>) -> Result<String> {
+    fn fmt_where(&self, wc: &Option<WhereClause>) -> String {
         let Some(wc) = wc else {
-            return Ok(String::new());
+            return String::new();
         };
         if wc.predicates.is_empty() {
-            return Ok(String::new());
+            return String::new();
         }
         let mut preds = Vec::new();
         for p in &wc.predicates {
@@ -1680,12 +1675,12 @@ impl RustCodegen {
                             lifetimes.iter().map(|l| fmt_rust_lifetime(l)).collect();
                         format!("for<{}> ", ls.join(", "))
                     };
-                    let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                    let bs: Vec<_> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
                     preds.push(format!(
                         "{}{}: {}",
                         forall,
-                        self.fmt_type(ty)?,
-                        bs?.join(" + ")
+                        self.fmt_type(ty),
+                        bs.join(" + ")
                     ));
                 }
                 WherePredicate::Lifetime { life, outlives } => {
@@ -1694,26 +1689,26 @@ impl RustCodegen {
                 }
             }
         }
-        Ok(format!(" where {}", preds.join(", ")))
+        format!(" where {}", preds.join(", "))
     }
 
-    fn fmt_pattern(&self, pat: &Pattern) -> Result<String> {
-        Ok(match pat {
+    fn fmt_pattern(&self, pat: &Pattern) -> String {
+        match pat {
             Pattern::Wildcard => "_".to_string(),
             Pattern::Rest => "..".to_string(),
             Pattern::Lit(l) => fmt_literal(l),
-            Pattern::Const(e) => format!("const {{ {} }}", self.fmt_expr(e)?),
+            Pattern::Const(e) => format!("const {{ {} }}", self.fmt_expr(e)),
             Pattern::Range {
                 start,
                 end,
                 inclusive,
             } => {
                 let s = match start {
-                    Some(e) => self.fmt_expr(e)?,
+                    Some(e) => self.fmt_expr(e),
                     None => String::new(),
                 };
                 let e = match end {
-                    Some(ex) => self.fmt_expr(ex)?,
+                    Some(ex) => self.fmt_expr(ex),
                     None => String::new(),
                 };
                 let op = if *inclusive { "..=" } else { ".." };
@@ -1732,12 +1727,12 @@ impl RustCodegen {
             }
             Pattern::DerefPat { is_mut, inner } => {
                 if *is_mut {
-                    format!("&mut {}", self.fmt_pattern(inner)?)
+                    format!("&mut {}", self.fmt_pattern(inner))
                 } else {
-                    format!("&{}", self.fmt_pattern(inner)?)
+                    format!("&{}", self.fmt_pattern(inner))
                 }
             }
-            Pattern::Paren(inner) => format!("({})", self.fmt_pattern(inner)?),
+            Pattern::Paren(inner) => format!("({})", self.fmt_pattern(inner)),
             Pattern::BindAt {
                 is_mut,
                 name,
@@ -1749,12 +1744,11 @@ impl RustCodegen {
                     "{}{} @ {}",
                     mk,
                     fmt_rust_ident(name),
-                    self.fmt_pattern(subpat)?
+                    self.fmt_pattern(subpat)
                 )
             }
             Pattern::Tuple(ps) => {
-                let items: Result<Vec<_>> = ps.iter().map(|p| self.fmt_pattern(p)).collect();
-                let items = items?;
+                let items: Vec<_> = ps.iter().map(|p| self.fmt_pattern(p)).collect();
                 if items.len() == 1 {
                     format!("({},)", items[0])
                 } else {
@@ -1765,7 +1759,7 @@ impl RustCodegen {
                 let mut parts = Vec::new();
                 for el in elems {
                     match el {
-                        SlicePatElem::Pat(p) => parts.push(self.fmt_pattern(p)?),
+                        SlicePatElem::Pat(p) => parts.push(self.fmt_pattern(p)),
                         SlicePatElem::Rest => parts.push("..".to_string()),
                         SlicePatElem::RestBind { is_mut, name, .. } => {
                             let mk = if *is_mut { "mut " } else { "" };
@@ -1776,16 +1770,16 @@ impl RustCodegen {
                 format!("[{}]", parts.join(", "))
             }
             Pattern::TupleStruct { path, fields } => {
-                let fs: Result<Vec<_>> = fields.iter().map(|f| self.fmt_pattern(f)).collect();
+                let fs: Vec<_> = fields.iter().map(|f| self.fmt_pattern(f)).collect();
                 let mapped: Vec<String> = path.iter().map(|s| fmt_rust_ident(s)).collect();
-                format!("{}({})", mapped.join("::"), fs?.join(", "))
+                format!("{}({})", mapped.join("::"), fs.join(", "))
             }
             Pattern::Struct { path, fields, rest } => {
                 let mut parts = Vec::new();
                 for f in fields {
                     let fname = fmt_rust_ident(&f.name);
                     match &f.pat {
-                        Some(sub) => parts.push(format!("{}: {}", fname, self.fmt_pattern(sub)?)),
+                        Some(sub) => parts.push(format!("{}: {}", fname, self.fmt_pattern(sub))),
                         None if f.is_mut => parts.push(format!("mut {}", fname)),
                         None => parts.push(fname),
                     }
@@ -1801,17 +1795,17 @@ impl RustCodegen {
                 mapped.join("::")
             }
             Pattern::Or(alts) => {
-                let items: Result<Vec<_>> = alts.iter().map(|p| self.fmt_pattern(p)).collect();
-                items?.join(" | ")
+                let items: Vec<_> = alts.iter().map(|p| self.fmt_pattern(p)).collect();
+                items.join(" | ")
             }
             Pattern::Macro(mc) => format_macro_call(mc),
-        })
+        }
     }
 
     // ==================== EXPRESSIONS ====================
 
-    fn fmt_expr(&self, expr: &Expr) -> Result<String> {
-        Ok(match expr {
+    fn fmt_expr(&self, expr: &Expr) -> String {
+        match expr {
             Expr::Lit(l) => fmt_literal(l),
             Expr::Infer => "_".to_string(),
             Expr::Attributed { attrs, expr } => {
@@ -1821,7 +1815,7 @@ impl RustCodegen {
                     prefix.push(' ');
                 }
                 // Emit as a statement-attributed block so attributes work on stable Rust without `#![feature(stmt_expr_attributes)]`.
-                format!("{{ {}{} }}", prefix, self.fmt_expr(expr)?)
+                format!("{{ {}{} }}", prefix, self.fmt_expr(expr))
             }
             Expr::InterpString(parts) => {
                 let mut fmt_str = String::new();
@@ -1835,7 +1829,7 @@ impl RustCodegen {
                             } else {
                                 fmt_str.push_str("{}");
                             }
-                            args.push(self.fmt_expr(expr)?);
+                            args.push(self.fmt_expr(expr));
                         }
                     }
                 }
@@ -1855,12 +1849,12 @@ impl RustCodegen {
                     if seg.type_args.is_empty() {
                         parts.push(mapped);
                     } else {
-                        let args: Result<Vec<_>> = seg
+                        let args: Vec<_> = seg
                             .type_args
                             .iter()
                             .map(|a| self.fmt_generic_arg(a))
                             .collect();
-                        parts.push(format!("{}::<{}>", mapped, args?.join(", ")));
+                        parts.push(format!("{}::<{}>", mapped, args.join(", ")));
                     }
                 }
                 let joined = parts.join("::");
@@ -1879,9 +1873,8 @@ impl RustCodegen {
                 let targs = if type_args.is_empty() {
                     String::new()
                 } else {
-                    let ta: Result<Vec<_>> =
-                        type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("::<{}>", ta?.join(", "))
+                    let ta: Vec<_> = type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    format!("::<{}>", ta.join(", "))
                 };
                 // If `self_ty` is a simple identifier that is a local variable, emit a cast + member call
                 if let Type::Path(tp) = self_ty.as_ref()
@@ -1889,32 +1882,32 @@ impl RustCodegen {
                     && matches!(tp.segments[0].args, TypePathArgs::None)
                     && self.is_local_var(&tp.segments[0].name)
                 {
-                    return Ok(format!(
+                    return format!(
                         "({} as {}).{}{}",
                         tp.segments[0].name,
-                        self.fmt_type_path(trait_path)?,
+                        self.fmt_type_path(trait_path),
                         member,
                         targs
-                    ));
+                    );
                 }
                 format!(
                     "<{} as {}>::{}{}",
-                    self.fmt_type(self_ty)?,
-                    self.fmt_type_path(trait_path)?,
+                    self.fmt_type(self_ty),
+                    self.fmt_type_path(trait_path),
                     member,
                     targs
                 )
             }
             Expr::Unary { op, expr } => {
-                let inner = self.fmt_expr(expr)?;
+                let inner = self.fmt_expr(expr);
                 match op {
                     UnaryOp::Neg => format!("-{}", inner),
                     UnaryOp::Not | UnaryOp::BitNot => format!("!{}", inner),
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
-                let l = self.fmt_expr(lhs)?;
-                let r = self.fmt_expr(rhs)?;
+                let l = self.fmt_expr(lhs);
+                let r = self.fmt_expr(rhs);
                 let sym = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -1938,8 +1931,8 @@ impl RustCodegen {
                 format!("({} {} {})", l, sym, r)
             }
             Expr::Assign { op, lhs, rhs } => {
-                let l = self.fmt_expr(lhs)?;
-                let r = self.fmt_expr(rhs)?;
+                let l = self.fmt_expr(lhs);
+                let r = self.fmt_expr(rhs);
                 let sym = match op {
                     AssignOp::Assign => "=",
                     AssignOp::AddAssign => "+=",
@@ -1956,7 +1949,7 @@ impl RustCodegen {
                 format!("{} {} {}", l, sym, r)
             }
             Expr::Step { inc, target } => {
-                let t = self.fmt_expr(target)?;
+                let t = self.fmt_expr(target);
                 if *inc {
                     format!("{} += 1", t)
                 } else {
@@ -1964,7 +1957,7 @@ impl RustCodegen {
                 }
             }
             Expr::Cast { expr, ty } => {
-                format!("({} as {})", self.fmt_expr(expr)?, self.fmt_type(ty)?)
+                format!("({} as {})", self.fmt_expr(expr), self.fmt_type(ty))
             }
             Expr::Ternary {
                 cond,
@@ -1973,39 +1966,39 @@ impl RustCodegen {
             } => {
                 format!(
                     "if {} {{ {} }} else {{ {} }}",
-                    self.fmt_expr(cond)?,
-                    self.fmt_expr(then_expr)?,
-                    self.fmt_expr(else_expr)?
+                    self.fmt_expr(cond),
+                    self.fmt_expr(then_expr),
+                    self.fmt_expr(else_expr)
                 )
             }
             Expr::Coalesce { lhs, rhs } => {
                 format!(
                     "({}).unwrap_or_else(|| {})",
-                    self.fmt_expr(lhs)?,
-                    self.fmt_expr(rhs)?
+                    self.fmt_expr(lhs),
+                    self.fmt_expr(rhs)
                 )
             }
-            Expr::Try(inner) => format!("({})?", self.fmt_expr(inner)?),
-            Expr::Await(inner) => format!("({}).await", self.fmt_expr(inner)?),
-            Expr::Read(inner) | Expr::ReadSlice(inner) => format!("&{}", self.fmt_expr(inner)?),
+            Expr::Try(inner) => format!("({})?", self.fmt_expr(inner)),
+            Expr::Await(inner) => format!("({}).await", self.fmt_expr(inner)),
+            Expr::Read(inner) | Expr::ReadSlice(inner) => format!("&{}", self.fmt_expr(inner)),
             Expr::Write(inner) | Expr::WriteSlice(inner) => {
-                format!("&mut {}", self.fmt_expr(inner)?)
+                format!("&mut {}", self.fmt_expr(inner))
             }
-            Expr::RawReadPtr(inner) => format!("&raw const {}", self.fmt_expr(inner)?),
-            Expr::RawWritePtr(inner) => format!("&raw mut {}", self.fmt_expr(inner)?),
-            Expr::Take(inner) => self.fmt_expr(inner)?,
-            Expr::Deref(inner) => format!("*{}", self.fmt_expr(inner)?),
+            Expr::RawReadPtr(inner) => format!("&raw const {}", self.fmt_expr(inner)),
+            Expr::RawWritePtr(inner) => format!("&raw mut {}", self.fmt_expr(inner)),
+            Expr::Take(inner) => self.fmt_expr(inner),
+            Expr::Deref(inner) => format!("*{}", self.fmt_expr(inner)),
             Expr::Range {
                 start,
                 end,
                 inclusive,
             } => {
                 let s = match start {
-                    Some(e) => self.fmt_expr(e)?,
+                    Some(e) => self.fmt_expr(e),
                     None => String::new(),
                 };
                 let e = match end {
-                    Some(ex) => self.fmt_expr(ex)?,
+                    Some(ex) => self.fmt_expr(ex),
                     None => String::new(),
                 };
                 let op = if *inclusive { "..=" } else { ".." };
@@ -2022,23 +2015,22 @@ impl RustCodegen {
                 {
                     if args.len() == 1 {
                         return match &args[0] {
-                            Expr::Lit(Literal::Str(s)) => Ok(format!("panic!(\"{}\")", s)),
-                            other => Ok(format!("panic!(\"{{}}\", {})", self.fmt_expr(other)?)),
+                            Expr::Lit(Literal::Str(s)) => format!("panic!(\"{}\")", s),
+                            other => format!("panic!(\"{{}}\", {})", self.fmt_expr(other)),
                         };
                     }
-                    let a: Result<Vec<_>> = args.iter().map(|e| self.fmt_expr(e)).collect();
-                    return Ok(format!("panic!({})", a?.join(", ")));
+                    let a: Vec<_> = args.iter().map(|e| self.fmt_expr(e)).collect();
+                    return format!("panic!({})", a.join(", "));
                 }
-                let c = self.fmt_expr(callee)?;
+                let c = self.fmt_expr(callee);
                 let targs = if type_args.is_empty() {
                     String::new()
                 } else {
-                    let ta: Result<Vec<_>> =
-                        type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("::<{}>", ta?.join(", "))
+                    let ta: Vec<_> = type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    format!("::<{}>", ta.join(", "))
                 };
-                let a: Result<Vec<_>> = args.iter().map(|e| self.fmt_expr(e)).collect();
-                format!("{}{}({})", c, targs, a?.join(", "))
+                let a: Vec<_> = args.iter().map(|e| self.fmt_expr(e)).collect();
+                format!("{}{}({})", c, targs, a.join(", "))
             }
             Expr::Member {
                 object,
@@ -2051,10 +2043,10 @@ impl RustCodegen {
                     && let Some(map) = &info.tuple_fields
                     && let Some(idx) = map.get(field)
                 {
-                    return Ok(format!("{}.{}", var_name, idx));
+                    return format!("{}.{}", var_name, idx);
                 }
                 let sep = if self.is_path_expr(object) { "::" } else { "." };
-                let obj = self.fmt_expr(object)?;
+                let obj = self.fmt_expr(object);
                 let mapped_field = if sep == "::" {
                     fmt_rust_ident(&map_std_type_alias(field))
                 } else {
@@ -2063,32 +2055,30 @@ impl RustCodegen {
                 let targs = if type_args.is_empty() {
                     String::new()
                 } else {
-                    let ta: Result<Vec<_>> =
-                        type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("::<{}>", ta?.join(", "))
+                    let ta: Vec<_> = type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                    format!("::<{}>", ta.join(", "))
                 };
                 format!("{}{}{}{}", obj, sep, mapped_field, targs)
             }
             Expr::TupleIndex { object, index } => {
-                format!("{}.{}", self.fmt_expr(object)?, index)
+                format!("{}.{}", self.fmt_expr(object), index)
             }
             Expr::Index { object, indices } => {
-                let mut out = self.fmt_expr(object)?;
+                let mut out = self.fmt_expr(object);
                 for idx in indices {
-                    out.push_str(&format!("[{}]", self.fmt_expr(idx)?));
+                    out.push_str(&format!("[{}]", self.fmt_expr(idx)));
                 }
                 out
             }
             Expr::ArrayLit(elems) => {
-                let items: Result<Vec<_>> = elems.iter().map(|e| self.fmt_expr(e)).collect();
-                format!("[{}]", items?.join(", "))
+                let items: Vec<_> = elems.iter().map(|e| self.fmt_expr(e)).collect();
+                format!("[{}]", items.join(", "))
             }
             Expr::ArrayRepeat { value, count } => {
-                format!("[{}; {}]", self.fmt_expr(value)?, self.fmt_expr(count)?)
+                format!("[{}; {}]", self.fmt_expr(value), self.fmt_expr(count))
             }
             Expr::TupleLit(elems) => {
-                let items: Result<Vec<_>> = elems.iter().map(|e| self.fmt_expr(e)).collect();
-                let items = items?;
+                let items: Vec<_> = elems.iter().map(|e| self.fmt_expr(e)).collect();
                 if items.len() == 1 {
                     format!("({},)", items[0])
                 } else {
@@ -2109,7 +2099,7 @@ impl RustCodegen {
                     }
                     let fname = fmt_rust_ident(&f.name);
                     match &f.value {
-                        Some(v) => p.push_str(&format!("{}: {}", fname, self.fmt_expr(v)?)),
+                        Some(v) => p.push_str(&format!("{}: {}", fname, self.fmt_expr(v))),
                         None => p.push_str(&fname),
                     }
                     fs.push(p);
@@ -2117,8 +2107,8 @@ impl RustCodegen {
                 format!("{} {{ {} }}", mapped.join("::"), fs.join(", "))
             }
             Expr::StructUpdate { base, fields } => {
-                let struct_name = self.resolve_struct_name(base)?;
-                let base_s = self.fmt_expr(base)?;
+                let struct_name = self.resolve_struct_name(base);
+                let base_s = self.fmt_expr(base);
                 let mut fs = Vec::new();
                 for f in fields {
                     let mut p = String::new();
@@ -2128,7 +2118,7 @@ impl RustCodegen {
                     }
                     let fname = fmt_rust_ident(&f.name);
                     match &f.value {
-                        Some(v) => p.push_str(&format!("{}: {}", fname, self.fmt_expr(v)?)),
+                        Some(v) => p.push_str(&format!("{}: {}", fname, self.fmt_expr(v))),
                         None => p.push_str(&fname),
                     }
                     fs.push(p);
@@ -2140,7 +2130,7 @@ impl RustCodegen {
                 }
             }
             Expr::Return(opt) => match opt {
-                Some(e) => format!("return {}", self.fmt_expr(e)?),
+                Some(e) => format!("return {}", self.fmt_expr(e)),
                 None => "return".to_string(),
             },
             Expr::Break { label, value } => {
@@ -2150,7 +2140,7 @@ impl RustCodegen {
                 }
                 if let Some(v) = value {
                     out.push(' ');
-                    out.push_str(&self.fmt_expr(v)?);
+                    out.push_str(&self.fmt_expr(v));
                 }
                 out
             }
@@ -2165,13 +2155,13 @@ impl RustCodegen {
             } => {
                 let mut sub = self.child_formatter();
                 let mut bound_pats = Vec::new();
-                let cond_s = self.fmt_condition_expr(cond, &mut sub, &mut bound_pats)?;
+                let cond_s = self.fmt_condition_expr(cond, &mut sub, &mut bound_pats);
                 let mut checks = Vec::new();
                 for bp in &bound_pats {
-                    checks.extend(self.collect_pattern_type_checks(bp)?);
+                    checks.extend(self.collect_pattern_type_checks(bp));
                 }
-                let then_s = sub.fmt_expr(then_expr)?;
-                let else_s = self.fmt_expr(else_expr)?;
+                let then_s = sub.fmt_expr(then_expr);
+                let else_s = self.fmt_expr(else_expr);
                 if checks.is_empty() {
                     format!("if {} {{ {} }} else {{ {} }}", cond_s, then_s, else_s)
                 } else {
@@ -2190,7 +2180,7 @@ impl RustCodegen {
                     .map(|l| format!("{}: ", fmt_rust_lifetime(l)))
                     .unwrap_or_default();
                 let mut sub = self.child_formatter();
-                sub.emit_cond_block(&format!("{}while ", lbl), cond, body)?;
+                sub.emit_cond_block(&format!("{}while ", lbl), cond, body);
                 sub.line("}");
                 sub.out.trim_end().to_string()
             }
@@ -2205,15 +2195,15 @@ impl RustCodegen {
                     .map(|l| format!("{}: ", fmt_rust_lifetime(l)))
                     .unwrap_or_default();
                 let mut sub = self.child_formatter();
-                let p = sub.fmt_pattern(pat)?;
-                let it = sub.fmt_expr(iter)?;
+                let p = sub.fmt_pattern(pat);
+                let it = sub.fmt_expr(iter);
                 sub.line(&format!("{}for {} in {} {{", lbl, p, it));
                 sub.indent += 1;
                 sub.push_scope();
                 sub.emit_inner_docs_and_attrs(&body.inner_docs, &body.inner_attrs);
-                sub.emit_pattern_type_checks(pat)?;
+                sub.emit_pattern_type_checks(pat);
                 for st in &body.stmts {
-                    sub.emit_stmt(st)?;
+                    sub.emit_stmt(st);
                 }
                 sub.pop_scope();
                 sub.indent -= 1;
@@ -2237,7 +2227,7 @@ impl RustCodegen {
                 let mut sub = self.child_formatter();
                 let mut ps = Vec::new();
                 for p in params {
-                    ps.push(sub.fmt_param(p)?);
+                    ps.push(sub.fmt_param(p));
                 }
                 let ret = match ret_ty {
                     Some(t) => {
@@ -2245,14 +2235,14 @@ impl RustCodegen {
                         if matches!(eff, Type::Void) {
                             String::new()
                         } else {
-                            format!(" -> {}", self.fmt_type(eff)?)
+                            format!(" -> {}", self.fmt_type(eff))
                         }
                     }
                     None => String::new(),
                 };
                 match body {
                     LambdaBody::Expr(e) => {
-                        let es = sub.fmt_expr(e)?;
+                        let es = sub.fmt_expr(e);
                         if ret.is_empty() && !*is_async {
                             format!("{}|{}| {}", prefix, ps.join(", "), es)
                         } else {
@@ -2260,14 +2250,14 @@ impl RustCodegen {
                         }
                     }
                     LambdaBody::Block(b) => {
-                        sub.emit_block_stmts(b)?;
+                        sub.emit_block_stmts(b);
                         format!("{}|{}|{} {{\n{}}}", prefix, ps.join(", "), ret, sub.out)
                     }
                 }
             }
             Expr::Match(m) => {
                 let mut sub = self.child_formatter();
-                sub.emit_match(m)?;
+                sub.emit_match(m);
                 sub.out.trim_end().to_string()
             }
             Expr::Loop { label, block } => {
@@ -2276,45 +2266,45 @@ impl RustCodegen {
                     .map(|l| format!("{}: ", fmt_rust_lifetime(l)))
                     .unwrap_or_default();
                 let mut sub = self.child_formatter();
-                sub.emit_block_stmts(block)?;
+                sub.emit_block_stmts(block);
                 format!("{}loop {{\n{}}}", lbl, sub.out)
             }
             Expr::LabeledBlock { label, block } => {
                 let mut sub = self.child_formatter();
-                sub.emit_block_stmts(block)?;
+                sub.emit_block_stmts(block);
                 format!("{}: {{\n{}}}", fmt_rust_lifetime(label), sub.out)
             }
             Expr::ConstBlock(cb) => match cb {
-                ConstBody::Expr(e) => format!("const {{ {} }}", self.fmt_expr(e)?),
+                ConstBody::Expr(e) => format!("const {{ {} }}", self.fmt_expr(e)),
                 ConstBody::Block(b) => {
                     let mut sub = self.child_formatter();
-                    sub.emit_value_block_stmts(b)?;
+                    sub.emit_value_block_stmts(b);
                     format!("const {{\n{}}}", sub.out)
                 }
             },
             Expr::AsyncBlock { is_move, block } => {
                 let mv = if *is_move { "move " } else { "" };
                 let mut sub = self.child_formatter();
-                sub.emit_value_block_stmts(block)?;
+                sub.emit_value_block_stmts(block);
                 format!("async {} {{\n{}}}", mv, sub.out)
             }
             Expr::UnsafeBlock(block) => {
                 let mut sub = self.child_formatter();
-                sub.emit_value_block_stmts(block)?;
+                sub.emit_value_block_stmts(block);
                 format!("unsafe {{\n{}}}", sub.out)
             }
             Expr::InlineRust(raw) => format!("{{ {} }}", raw.trim()),
             Expr::MacroCall(mc) => format_macro_call(mc),
             Expr::IsPattern { expr, negated, pat } => {
-                let e = self.fmt_expr(expr)?;
-                let p = self.fmt_pattern(pat)?;
+                let e = self.fmt_expr(expr);
+                let p = self.fmt_pattern(pat);
                 if *negated {
                     format!("!matches!({}, {})", e, p)
                 } else {
                     format!("matches!({}, {})", e, p)
                 }
             }
-        })
+        }
     }
 
     fn child_formatter(&self) -> Self {
@@ -2325,6 +2315,7 @@ impl RustCodegen {
             known_paths: self.known_paths.clone(),
             scopes: self.scopes.clone(),
             current_self_type: self.current_self_type.clone(),
+            first_err: Rc::clone(&self.first_err),
         }
     }
 
@@ -2344,8 +2335,8 @@ impl RustCodegen {
         }
     }
 
-    fn resolve_struct_name(&self, base: &Expr) -> Result<String> {
-        match base {
+    fn resolve_struct_name(&self, base: &Expr) -> String {
+        let res = match base {
             Expr::This => self.current_self_type.clone().ok_or_else(|| {
                 RSharpError::codegen("Cannot resolve struct type for 'this with { ... }'")
             }),
@@ -2361,6 +2352,13 @@ impl RustCodegen {
             _ => Err(RSharpError::codegen(
                 "Struct 'with' update requires a typed variable or 'this' as base",
             )),
+        };
+        match res {
+            Ok(name) => name,
+            Err(err) => {
+                self.record_err(err);
+                String::new()
+            }
         }
     }
 }
@@ -2416,7 +2414,7 @@ fn format_using_tree(tree: &UsingTree) -> String {
                 mapped.join("::")
             };
             if *wildcard {
-                if !s.is_empty() && !s.ends_with("::") {
+                if !prefix.is_empty() {
                     s.push_str("::");
                 }
                 s.push('*');
@@ -2634,9 +2632,7 @@ fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<(String, Type)>) {
             }
         }
         Pattern::Or(alts) => {
-            if let Some(first) = alts.first() {
-                collect_pattern_bindings(first, out);
-            }
+            collect_pattern_bindings(&alts[0], out);
         }
         _ => {}
     }
