@@ -20,6 +20,13 @@ pub struct RunOutput {
     pub stderr: String,
 }
 
+/// Structured output from running `rustc --emit=metadata --error-format=json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustcJsonOutput {
+    pub success: bool,
+    pub messages: Vec<String>,
+}
+
 fn prepare_temp_rust_file(
     base: &Path,
     prefix: &str,
@@ -131,6 +138,58 @@ fn check_rust_source_in(
         return Err(RSharpError::compile(stderr));
     }
     Ok(())
+}
+
+/// Type-checks generated Rust source via `rustc --emit=metadata --error-format=json`,
+/// returning both success status and raw JSON diagnostic lines (errors and warnings).
+pub fn check_rust_source_json(rust_source: &str, is_lib: bool) -> Result<RustcJsonOutput> {
+    check_rust_source_json_in(
+        &std::env::temp_dir(),
+        OsStr::new("rustc"),
+        rust_source,
+        is_lib,
+    )
+}
+
+fn check_rust_source_json_in(
+    temp_base: &Path,
+    rustc_bin: &OsStr,
+    rust_source: &str,
+    is_lib: bool,
+) -> Result<RustcJsonOutput> {
+    let (dir, rs_path) =
+        prepare_temp_rust_file(temp_base, "rsharp_check_json", "check.rs", rust_source)?;
+    let meta_path = dir.join("check.rmeta");
+
+    let mut args = vec![
+        OsStr::new("--edition=2024"),
+        OsStr::new("--emit=metadata"),
+        OsStr::new("--error-format=json"),
+    ];
+    if is_lib {
+        args.push(OsStr::new("--crate-type=lib"));
+    }
+    args.push(rs_path.as_os_str());
+    args.push(OsStr::new("-o"));
+    args.push(meta_path.as_os_str());
+    let output = run_rustc_cmd(rustc_bin, &args)?;
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(RustcJsonOutput {
+        success: output.status.success(),
+        messages: parse_json_lines(&stderr),
+    })
+}
+
+fn parse_json_lines(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Compiles and executes generated Rust source, returning stdout, stderr, and exit code.
@@ -367,6 +426,7 @@ mod tests {
         assert!(create_temp_dir_in(&blocking_file, "p").is_err());
         assert!(compile_rust_to_bin_in(&blocking_file, bad_rustc, "", &dummy_bin).is_err());
         assert!(check_rust_source_in(&blocking_file, bad_rustc, "", true).is_err());
+        assert!(check_rust_source_json_in(&blocking_file, bad_rustc, "", true).is_err());
         assert!(compile_and_run_rust_in(&blocking_file, bad_rustc, "").is_err());
         assert!(run_type_probe_in(&blocking_file, bad_rustc, "", "", "x", "M").is_err());
 
@@ -374,6 +434,7 @@ mod tests {
         assert!(prepare_temp_rust_file(&dir, "p", "missing_sub/a.rs", "").is_err());
         assert!(compile_rust_to_bin_in(&dir, bad_rustc, "fn main() {}", &dummy_bin).is_err());
         assert!(check_rust_source_in(&dir, bad_rustc, "fn f() {}", true).is_err());
+        assert!(check_rust_source_json_in(&dir, bad_rustc, "fn f() {}", true).is_err());
         assert!(run_type_probe_in(&dir, bad_rustc, "fn f() {}", "fn f() {}", "x", "M").is_err());
         assert!(run_binary_cmd(&dir.join("missing_binary_xyz")).is_err());
         assert!(compile_and_run_rust_in(&dir, OsStr::new("rustc"), "fn main( {").is_err());
@@ -387,6 +448,22 @@ mod tests {
         // Exercise success and remaining error paths on *_in helpers inside this crate instantiation
         assert!(check_rust_source_in(&dir, OsStr::new("rustc"), "fn main() {}", false).is_ok());
         assert!(check_rust_source_in(&dir, OsStr::new("rustc"), "fn bad( {", true).is_err());
+        let json_ok = check_rust_source_json("fn main() {}", false).unwrap();
+        assert!(json_ok.success);
+        assert!(json_ok.messages.is_empty());
+        let json_err = check_rust_source_json_in(
+            &dir,
+            OsStr::new("rustc"),
+            "pub fn f() -> i32 { \"bad\" }",
+            true,
+        )
+        .unwrap();
+        assert!(!json_err.success);
+        assert!(json_err.messages.iter().any(|m| m.contains("E0308")));
+        assert_eq!(
+            parse_json_lines("\n {\"a\":1} \n\n{\"b\":2}\n"),
+            vec!["{\"a\":1}", "{\"b\":2}"]
+        );
         assert_eq!(
             compile_and_run_rust_in(&dir, OsStr::new("rustc"), "fn main() {}")
                 .unwrap()

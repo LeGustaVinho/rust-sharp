@@ -22,6 +22,7 @@ Usage:
   rsharp build <file.rsharp> [-o <out_bin>]
   rsharp run <file.rsharp>
   rsharp check <file.rsharp>
+  rsharp lsp
   rsharp --help
 ";
 
@@ -52,6 +53,7 @@ fn dispatch(args: &[String]) -> Result<CliOutput, String> {
         "build" => cmd_build(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "check" => cmd_check(&args[1..]),
+        "lsp" => cmd_lsp(&args[1..]),
         other => Err(format!("Unknown command '{}'. Run 'rsharp --help'.", other)),
     }
 }
@@ -212,6 +214,18 @@ fn cmd_check(args: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput {
         exit_code: 0,
         stdout: format!("OK {}\n", path.display()),
+        stderr: String::new(),
+    })
+}
+
+fn cmd_lsp(args: &[String]) -> Result<CliOutput, String> {
+    if let Some(flag) = args.first() {
+        return Err(format!("Unknown option '{}'", flag));
+    }
+    rsharp_lsp::run_stdio()?;
+    Ok(CliOutput {
+        exit_code: 0,
+        stdout: String::new(),
         stderr: String::new(),
     })
 }

@@ -211,4 +211,46 @@ fn test_cli_binary_entrypoint() {
     let fail = Command::new(bin).arg("not-a-command").output().unwrap();
     assert!(!fail.status.success());
     assert!(String::from_utf8_lossy(&fail.stderr).contains("error:"));
+
+    // Unknown option to `lsp` subcommand
+    assert_eq!(run_cli(&args(&["lsp", "--bad"])).exit_code, 1);
+
+    // End-to-end stdio LSP handshake (`initialize` -> `initialized` -> `shutdown` -> `exit`)
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(bin)
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let frame = |body: &str| format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#;
+        let inited = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+        let shutdown = r#"{"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}"#;
+        let exit = r#"{"jsonrpc":"2.0","method":"exit","params":null}"#;
+        stdin.write_all(frame(init).as_bytes()).unwrap();
+        stdin.write_all(frame(inited).as_bytes()).unwrap();
+        stdin.write_all(frame(shutdown).as_bytes()).unwrap();
+        stdin.write_all(frame(exit).as_bytes()).unwrap();
+    }
+    let lsp_out = child.wait_with_output().unwrap();
+    assert!(lsp_out.status.success(), "stderr: {}", String::from_utf8_lossy(&lsp_out.stderr));
+    let stdout = String::from_utf8_lossy(&lsp_out.stdout);
+    assert!(stdout.contains("semanticTokensProvider"));
+    assert!(stdout.contains("documentSymbolProvider"));
+
+    // Immediate EOF on `rsharp lsp` stdin exercises LSP initialize error propagation
+    let eof_child = Command::new(bin)
+        .arg("lsp")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert!(!eof_child.status.success());
+    assert!(String::from_utf8_lossy(&eof_child.stderr).contains("error:"));
 }

@@ -1,0 +1,139 @@
+{
+  "name": "rsharp-vscode",
+  "displayName": "R# Language Support",
+  "description": "C#-like syntax and semantic highlighting, live syntax checking, rustc borrow/type checking, and core IDE features for R# (.rsharp).",
+  "version": "0.1.0",
+  "publisher": "rsharp",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Snippets"
+  ],
+  "keywords": [
+    "rsharp",
+    "r#",
+    "rust",
+    "csharp",
+    "lsp"
+  ],
+  "activationEvents": [
+    "onLanguage:rsharp",
+    "onCommand:rsharp.convertFromRust"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "rsharp",
+        "aliases": [
+          "R#",
+          "rsharp",
+          "RSharp"
+        ],
+        "extensions": [
+          ".rsharp"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rsharp",
+        "scopeName": "source.rsharp",
+        "path": "./syntaxes/rsharp.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.rust.rsharp": "rust"
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "rsharp",
+        "path": "./snippets/rsharp.code-snippets"
+      }
+    ],
+    "configuration": {
+      "title": "R#",
+      "properties": {
+        "rsharp.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the `rsharp` CLI binary. Leave empty to auto-detect from workspace `target/release`, `target/debug`, or `PATH`."
+        },
+        "rsharp.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run full `rustc` semantic and borrow-checker diagnostics when saving `.rsharp` files."
+        },
+        "rsharp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the R# language server."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "rsharp.runFile",
+        "title": "R#: Run Current File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "rsharp.checkFile",
+        "title": "R#: Check Current File",
+        "icon": "$(check)"
+      },
+      {
+        "command": "rsharp.previewRust",
+        "title": "R#: Preview Generated Rust",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "rsharp.convertFromRust",
+        "title": "R#: Convert Rust File to R#"
+      },
+      {
+        "command": "rsharp.restartServer",
+        "title": "R#: Restart Language Server"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "when": "resourceLangId == rsharp",
+          "command": "rsharp.runFile",
+          "group": "navigation"
+        },
+        {
+          "when": "resourceLangId == rsharp",
+          "command": "rsharp.previewRust",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test --experimental-test-coverage --test-coverage-lines=100 --test-coverage-branches=100 --test-coverage-functions=100 --test-coverage-include=out/src/** out/test/*.test.js",
+    "package": "npm run compile && vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.7.0"
+  }
+}

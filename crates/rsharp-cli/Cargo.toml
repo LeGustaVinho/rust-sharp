@@ -11,3 +11,4 @@ path = "src/main.rs"
 
 [dependencies]
 rsharp-core = { path = "../rsharp-core" }
+rsharp-lsp = { path = "../rsharp-lsp" }

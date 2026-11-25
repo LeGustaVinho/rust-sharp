@@ -1,0 +1,145 @@
+{
+  "Main Function": {
+    "prefix": "main",
+    "body": [
+      "void main()",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "R# entry point function"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": [
+      "public ${1:void} ${2:Name}(${3})",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "Public R# function"
+  },
+  "Struct with Inline Methods": {
+    "prefix": "struct",
+    "body": [
+      "[Derive(Debug, Clone)]",
+      "public struct ${1:Name}",
+      "{",
+      "    public ${2:int} ${3:Value};",
+      "",
+      "    public static Self New(${2:int} ${4:value})",
+      "    {",
+      "        return new Self { ${3:Value} = ${4:value} };",
+      "    }",
+      "    $0",
+      "}"
+    ],
+    "description": "Public R# struct with constructor"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": [
+      "public enum ${1:Name}",
+      "{",
+      "    ${2:Variant},",
+      "    $0",
+      "}"
+    ],
+    "description": "Public R# enum"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": [
+      "public trait ${1:Name}",
+      "{",
+      "    ${2:void} ${3:Method}(read this);",
+      "    $0",
+      "}"
+    ],
+    "description": "Public R# trait"
+  },
+  "Impl Block": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Trait} for ${2:Type}",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "Trait implementation block"
+  },
+  "If Statement": {
+    "prefix": "if",
+    "body": [
+      "if (${1:condition})",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "If statement"
+  },
+  "If-Else Statement": {
+    "prefix": "ife",
+    "body": [
+      "if (${1:condition})",
+      "{",
+      "    $2",
+      "}",
+      "else",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "If-else statement"
+  },
+  "For Loop": {
+    "prefix": "for",
+    "body": [
+      "for (mut ${1:int} ${2:i} = 0; ${2:i} < ${3:length}; ${2:i}++)",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "C-style counted for loop"
+  },
+  "Foreach Loop": {
+    "prefix": "foreach",
+    "body": [
+      "foreach (read ${1:T} ${2:item} in ${3:items})",
+      "{",
+      "    $0",
+      "}"
+    ],
+    "description": "Typed foreach iterator loop"
+  },
+  "Match Expression": {
+    "prefix": "match",
+    "body": [
+      "match (${1:value})",
+      "{",
+      "    ${2:pattern} => ${3:expr},",
+      "    _ => ${0:fallback},",
+      "};"
+    ],
+    "description": "Pattern match block"
+  },
+  "Require Pattern Guard": {
+    "prefix": "require",
+    "body": [
+      "require (${1:expr} is ${2:Some(int val)}) else",
+      "{",
+      "    return${3};",
+      "}"
+    ],
+    "description": "Refutable pattern guard (Rust let-else)"
+  },
+  "Inline Rust Block": {
+    "prefix": "rust",
+    "body": [
+      "rust {",
+      "    $0",
+      "}"
+    ],
+    "description": "Embedded raw Rust block"
+  }
+}

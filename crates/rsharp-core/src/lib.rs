@@ -12,7 +12,7 @@ use std::path::Path;
 pub use codegen_rust::{PreludeMode, TranspileOptions};
 pub use error::{RSharpError, Result, Span};
 pub use from_rust::FromRustOptions;
-pub use rustc_runner::RunOutput;
+pub use rustc_runner::{RunOutput, RustcJsonOutput};
 
 /// Transpiles R# (`.rsharp`) source code directly to Rust source code.
 pub fn transpile_to_rust(source: &str, options: TranspileOptions) -> Result<String> {
@@ -47,6 +47,10 @@ pub fn run_rsharp(source: &str) -> Result<RunOutput> {
     rustc_runner::compile_and_run_rust(&rust_src)
 }
 
+fn is_library_rust_source(rust_src: &str) -> bool {
+    !rust_src.contains("fn main(") && !rust_src.contains("fn main (")
+}
+
 /// Transpiles and semantically checks an R# source string via `rustc --emit=metadata`.
 pub fn check_rsharp(source: &str) -> Result<()> {
     let rust_src = transpile_to_rust(
@@ -55,6 +59,36 @@ pub fn check_rsharp(source: &str) -> Result<()> {
             prelude_mode: PreludeMode::Embedded,
         },
     )?;
-    let is_lib = !rust_src.contains("fn main(") && !rust_src.contains("fn main (");
-    rustc_runner::check_rust_source(&rust_src, is_lib)
+    rustc_runner::check_rust_source(&rust_src, is_library_rust_source(&rust_src))
+}
+
+/// Transpiles and semantically checks an R# source string via `rustc --emit=metadata --error-format=json`,
+/// returning both the generated Rust source (for diagnostic mapping) and raw JSON diagnostic lines.
+pub fn check_rsharp_json(source: &str) -> Result<(String, RustcJsonOutput)> {
+    let rust_src = transpile_to_rust(
+        source,
+        TranspileOptions {
+            prelude_mode: PreludeMode::Embedded,
+        },
+    )?;
+    let is_lib = is_library_rust_source(&rust_src);
+    rustc_runner::check_rust_source_json(&rust_src, is_lib).map(|out| (rust_src, out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_rsharp_json_covers_ok_and_syntax_error() {
+        let (rust_src, ok) = check_rsharp_json("void main() { int x = 1; _ = x; }").unwrap();
+        assert!(ok.success);
+        assert!(rust_src.contains("fn main()"));
+
+        let (_, lib_err) = check_rsharp_json("public int Bad() { return \"nope\"; }").unwrap();
+        assert!(!lib_err.success);
+        assert!(lib_err.messages.iter().any(|m| m.contains("E0308")));
+
+        assert!(check_rsharp_json("void main() { var x = 1; }").is_err());
+    }
 }

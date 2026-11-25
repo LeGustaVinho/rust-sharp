@@ -2,6 +2,7 @@
 members = [
     "crates/rsharp-prelude",
     "crates/rsharp-core",
+    "crates/rsharp-lsp",
     "crates/rsharp-cli",
 ]
 resolver = "2"

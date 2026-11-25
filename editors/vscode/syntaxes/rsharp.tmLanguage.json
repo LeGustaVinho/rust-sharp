@@ -1,0 +1,457 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "R#",
+  "scopeName": "source.rsharp",
+  "patterns": [
+    { "include": "#shebang" },
+    { "include": "#comments" },
+    { "include": "#inline-rust" },
+    { "include": "#attributes" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#macros" },
+    { "include": "#functions" },
+    { "include": "#verbatim-ident" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "shebang": {
+      "name": "comment.line.number-sign.rsharp",
+      "match": "\\A#!.*$"
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.rsharp",
+          "match": "(///(?!/)|//!).*$",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.rsharp" }
+          }
+        },
+        {
+          "name": "comment.line.double-slash.rsharp",
+          "match": "(//).*$",
+          "captures": {
+            "1": { "name": "punctuation.definition.comment.rsharp" }
+          }
+        },
+        { "include": "#block-doc-comment" },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-doc-comment": {
+      "name": "comment.block.documentation.rsharp",
+      "begin": "/\\*(\\*[^*/]|!)",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.rsharp" }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.rsharp" }
+      },
+      "patterns": [
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.rsharp",
+      "begin": "/\\*",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.comment.rsharp" }
+      },
+      "end": "\\*/",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.comment.rsharp" }
+      },
+      "patterns": [
+        { "include": "#block-comment" }
+      ]
+    },
+    "inline-rust": {
+      "begin": "\\b(rust)\\s*(\\{)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.rust.rsharp" },
+        "2": { "name": "punctuation.curlybrace.open.rsharp" }
+      },
+      "end": "(\\})",
+      "endCaptures": {
+        "1": { "name": "punctuation.curlybrace.close.rsharp" }
+      },
+      "contentName": "meta.embedded.block.rust.rsharp",
+      "patterns": [
+        { "include": "#rust-nested-braces" },
+        { "include": "source.rust" }
+      ]
+    },
+    "rust-nested-braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        { "include": "#rust-nested-braces" },
+        { "include": "source.rust" }
+      ]
+    },
+    "attributes": {
+      "begin": "\\[(?=(?:(?:module|assembly|inner)\\s*:|unsafe\\s+[A-Za-z_]|[A-Z][A-Za-z0-9_]*\\s*(?:\\(|\\]|=)))",
+      "beginCaptures": {
+        "0": { "name": "punctuation.squarebracket.open.rsharp" }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": { "name": "punctuation.squarebracket.close.rsharp" }
+      },
+      "name": "meta.attribute.rsharp",
+      "patterns": [
+        {
+          "match": "\\b(module|assembly|inner)\\s*(:)",
+          "captures": {
+            "1": { "name": "keyword.other.attribute-specifier.rsharp" },
+            "2": { "name": "punctuation.separator.colon.rsharp" }
+          }
+        },
+        {
+          "name": "storage.modifier.unsafe.rsharp",
+          "match": "\\bunsafe\\b"
+        },
+        {
+          "name": "entity.other.attribute-name.rsharp",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*(?:\\(|\\]|=|,|\\b))"
+        },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.rsharp",
+          "begin": "\\$\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.rsharp" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.rsharp" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.rsharp",
+              "match": "\\{\\{|\\}\\}|\\\\(?:u\\{[0-9a-fA-F_]+\\}|x[0-9a-fA-F]{2}|.)"
+            },
+            { "include": "#interpolation" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.rsharp",
+          "begin": "c?(\"\"\")",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.rsharp" }
+          },
+          "end": "(\"\"\")(u8\\b)?",
+          "endCaptures": {
+            "1": { "name": "punctuation.definition.string.end.rsharp" },
+            "2": { "name": "constant.numeric.other.suffix.rsharp" }
+          }
+        },
+        {
+          "name": "string.quoted.double.rsharp",
+          "begin": "c?@\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.rsharp" }
+          },
+          "end": "\"(?!\")(u8\\b)?",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.rsharp" },
+            "1": { "name": "constant.numeric.other.suffix.rsharp" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.rsharp",
+              "match": "\"\""
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.rsharp",
+          "begin": "c?\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.rsharp" }
+          },
+          "end": "\"(u8\\b)?",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.rsharp" },
+            "1": { "name": "constant.numeric.other.suffix.rsharp" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.rsharp",
+              "match": "\\\\(?:u\\{[0-9a-fA-F_]+\\}|x[0-9a-fA-F]{2}|.)"
+            }
+          ]
+        }
+      ]
+    },
+    "interpolation": {
+      "name": "meta.embedded.interpolation.rsharp",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.interpolation.begin.rsharp" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.interpolation.end.rsharp" }
+      },
+      "patterns": [
+        { "include": "#interpolation-braces" },
+        { "include": "#strings" },
+        { "include": "#chars" },
+        { "include": "#numbers" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#functions" },
+        { "include": "#operators" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "interpolation-braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        { "include": "#interpolation-braces" },
+        { "include": "#strings" },
+        { "include": "#numbers" },
+        { "include": "#keywords" }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.rsharp",
+      "begin": "b?'",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.char.begin.rsharp" }
+      },
+      "end": "'",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.char.end.rsharp" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.rsharp",
+          "match": "\\\\(?:u\\{[0-9a-fA-F_]+\\}|x[0-9a-fA-F]{2}|.)"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.rsharp",
+          "match": "\\b(0[xX])[0-9a-fA-F][0-9a-fA-F_]*(?:(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize))?\\b",
+          "captures": {
+            "1": { "name": "constant.numeric.other.preffix.hex.rsharp" },
+            "2": { "name": "constant.numeric.other.suffix.rsharp" }
+          }
+        },
+        {
+          "name": "constant.numeric.binary.rsharp",
+          "match": "\\b(0[bB])[01][01_]*(?:(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize))?\\b",
+          "captures": {
+            "1": { "name": "constant.numeric.other.preffix.binary.rsharp" },
+            "2": { "name": "constant.numeric.other.suffix.rsharp" }
+          }
+        },
+        {
+          "name": "constant.numeric.octal.rsharp",
+          "match": "\\b(0[oO])[0-7][0-7_]*(?:(i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize))?\\b",
+          "captures": {
+            "2": { "name": "constant.numeric.other.suffix.rsharp" }
+          }
+        },
+        {
+          "name": "constant.numeric.decimal.rsharp",
+          "match": "\\b[0-9][0-9_]*(?:\\.[0-9][0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?(?:(f32|f64|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize))?\\b",
+          "captures": {
+            "1": { "name": "constant.numeric.other.suffix.rsharp" }
+          }
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.struct.rsharp" },
+            "2": { "name": "entity.name.type.struct.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.enum.rsharp" },
+            "2": { "name": "entity.name.type.enum.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(union)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.union.rsharp" },
+            "2": { "name": "entity.name.type.union.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.interface.rsharp" },
+            "2": { "name": "entity.name.type.interface.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(alias|type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.alias.rsharp" },
+            "2": { "name": "entity.name.type.alias.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(namespace)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "storage.type.namespace.rsharp" },
+            "2": { "name": "entity.name.type.namespace.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(macro)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.macro.rsharp" },
+            "2": { "name": "entity.name.function.macro.rsharp" }
+          }
+        },
+        {
+          "match": "\\b(life)\\s+([A-Za-z_][A-Za-z0-9_]*|static|_)",
+          "captures": {
+            "1": { "name": "storage.modifier.lifetime.rsharp" },
+            "2": { "name": "entity.name.type.type-parameter.rsharp" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.conditional.rsharp",
+          "match": "\\b(?:if|else|match|when|require)\\b"
+        },
+        {
+          "name": "keyword.control.loop.rsharp",
+          "match": "\\b(?:while|for|foreach|in|loop)\\b"
+        },
+        {
+          "name": "keyword.control.flow.rsharp",
+          "match": "\\b(?:return|break|continue|try|await)\\b"
+        },
+        {
+          "name": "keyword.other.directive.rsharp",
+          "match": "\\b(?:using|crate|super|global)\\b"
+        },
+        {
+          "name": "storage.modifier.rsharp",
+          "match": "\\b(?:public|internal|private|mut|const|static|async|unsafe|extern|read|write|take|borrow|shadow|dyn|impl|forall|maybe|capture|safe)\\b"
+        },
+        {
+          "name": "storage.type.rsharp",
+          "match": "\\b(?:struct|enum|union|trait|namespace|alias|type|macro|slice|ptr|life)\\b"
+        },
+        {
+          "name": "keyword.operator.expression.rsharp",
+          "match": "\\b(?:new|as|is|not|with|where|deref)\\b"
+        },
+        {
+          "name": "variable.language.this.rsharp",
+          "match": "\\bthis\\b"
+        },
+        {
+          "name": "constant.language.boolean.true.rsharp",
+          "match": "\\btrue\\b"
+        },
+        {
+          "name": "constant.language.boolean.false.rsharp",
+          "match": "\\bfalse\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "keyword.type.rsharp",
+          "match": "\\b(?:sbyte|byte|short|ushort|int|uint|long|ulong|int128|uint128|nint|nuint|float|double|bool|char|string|str|void|never|dynamic|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)\\b"
+        },
+        {
+          "name": "entity.name.type.rsharp",
+          "match": "\\b(?:Self|List|Queue|Dictionary|SortedDictionary|SortedSet|PriorityQueue|HashSet|LinkedList|Option|Result|Task|Box|Rc|Arc|Vec|VecDeque|HashMap|BTreeMap|BTreeSet|BinaryHeap|String|Some|None|Ok|Err)\\b"
+        },
+        {
+          "name": "entity.name.type.rsharp",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b(?!\\s*(?:\\(|!))"
+        }
+      ]
+    },
+    "macros": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(!)",
+      "captures": {
+        "1": { "name": "entity.name.function.macro.rsharp" },
+        "2": { "name": "keyword.operator.macro.rsharp" }
+      }
+    },
+    "functions": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\b(?=\\s*(?:<[^;{}()]*>)?\\s*\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.rsharp" }
+      }
+    },
+    "verbatim-ident": {
+      "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "punctuation.separator.at.rsharp" },
+        "2": { "name": "variable.other.readwrite.rsharp" }
+      }
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.rsharp", "match": "=>|->" },
+        { "name": "keyword.operator.null-coalescing.rsharp", "match": "\\?\\?" },
+        { "name": "keyword.operator.range.rsharp", "match": "\\.\\.\\.|\\.\\.=|\\.\\." },
+        { "name": "keyword.operator.increment.rsharp", "match": "\\+\\+" },
+        { "name": "keyword.operator.decrement.rsharp", "match": "--" },
+        { "name": "keyword.operator.logical.rsharp", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.comparison.rsharp", "match": "==|!=|<=|>=" },
+        { "name": "keyword.operator.assignment.compound.rsharp", "match": "<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=" },
+        { "name": "keyword.operator.bitwise.shift.rsharp", "match": "<<|>>" },
+        { "name": "keyword.operator.arithmetic.rsharp", "match": "[+\\-*/%]" },
+        { "name": "keyword.operator.bitwise.rsharp", "match": "[&|^~]" },
+        { "name": "keyword.operator.assignment.rsharp", "match": "=" },
+        { "name": "keyword.operator.relational.rsharp", "match": "[<>]" },
+        { "name": "punctuation.separator.question-mark.rsharp", "match": "\\?" }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.curlybrace.open.rsharp", "match": "\\{" },
+        { "name": "punctuation.curlybrace.close.rsharp", "match": "\\}" },
+        { "name": "punctuation.squarebracket.open.rsharp", "match": "\\[" },
+        { "name": "punctuation.squarebracket.close.rsharp", "match": "\\]" },
+        { "name": "punctuation.parenthesis.open.rsharp", "match": "\\(" },
+        { "name": "punctuation.parenthesis.close.rsharp", "match": "\\)" },
+        { "name": "punctuation.terminator.statement.rsharp", "match": ";" },
+        { "name": "punctuation.separator.comma.rsharp", "match": "," },
+        { "name": "punctuation.separator.coloncolon.rsharp", "match": "::" },
+        { "name": "punctuation.separator.colon.rsharp", "match": ":" },
+        { "name": "punctuation.accessor.rsharp", "match": "\\." }
+      ]
+    }
+  }
+}
