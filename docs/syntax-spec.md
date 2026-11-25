@@ -133,6 +133,33 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
 | `r#type`, `'r#async`, `'r#loop`, `1.`, `b"\xff\x00"` | `@type`, `<life @async>`, `@loop:`, `1.`, `"\xff\x00"u8` |
 | `macro_rules! m ( ... );` / `[ ... ];` | `macro m ( ... );` / `[ ... ];` |
 
+### Wave 3 Parity Extensions (Stable Rust 1.99.1 Completeness)
+
+| Rust 2024 Construct | R# Syntax |
+| :--- | :--- |
+| `<Vec<i32>>::new()`, `<[i32]>::len(&v)` | `(List<int>).new()`, `(slice<int>).len(read v)` (or `(<Type>)::member` for any type) |
+| `<<T as A>::B as C>::X`, `<S as Tr>::A::B` | `((T as A).B as C).X`, `(S as Tr).A::B` |
+| `S::<i32> { x: 1 }`, `::m::S { x: 1 }` | `new S<int> { x = 1 }`, `new global::m.S { x = 1 }` |
+| `Point { x: 1, ..Point::default() }` | `new Point { X = 1, ..Point.default() }` (alongside `p with { X = 1 }` for locals / `this`) |
+| `<S as Tr>::C`, `<E>::A`, `E::<i32>::A(v)`, `::core::option::Option::Some(v)` *(patterns)* | `(S as Tr).C`, `(E)::A`, `E<int>.A(int v)`, `global::core.option.Option.Some(int v)` |
+| `LO..=HI`, `..=LO`, `<S as Tr>::MIN..` *(range patterns)* | `LO..=HI`, `..=LO`, `(S as Tr).MIN..` |
+| `\| A \| B` *(leading or-pattern bar)* | `\| A \| B` |
+| `Some(ref mut v @ 1..=5)`, `[_, ref mut mid @ .., _]` | `Some(1..=5 as borrow write int v)`, `[_, .. borrow write int[2] mid, _]` |
+| `Point { #[allow(unused)] ref x, ref mut y }` | `Point { [Allow(unused)] borrow read int X, borrow write int Y }` |
+| `let W(v) = w;`, `W(a) = w;`, `let &v = r;`, `let ref r = x;`, `let (v) = 1;` | `W(int v) = w;`, `W(a) = w;`, `deref int v = r;`, `borrow read int r = x;`, `(int v) = 1;` |
+| `fn f(W(a): W, &b: &i32, ref c: i32)`, `\|(a, b): (i32, i32)\| { let s = a + b; s }` | `void f(W(int a) : W, deref int b, borrow read int c)`, `((int a, int b)) => { int s = a + b; return s; }` |
+| `T: (Clone) + (?Sized)`, `Box<dyn (Fn() -> i32) + Send>` | `T : (Clone) + (maybe Sized)`, `Box<dyn (Fn() -> int) + Send>` |
+| `T: Clone +`, `where T:,` *(trailing `+` and empty predicate bounds)* | `T : Clone +`, `where T:,` |
+| `C<'a'>`, `B<b'x'>`, `[i32; 2 + 2]` *(const generic char/byte & exprs)* | `C<'a'>`, `B<b'x'>`, `int[2 + 2]` |
+| `fn helper(x: i32) -> i32 { ... }`, `mod inner { ... }` *(local items in blocks)* | `int helper(int x) { ... }`, `namespace inner { ... }` |
+| `{ let x = 1; }`, `;`, `m! { ... }` *(block stmt, empty stmt, brace macro stmt)* | `{ int x = 1; }`, `;`, `m! { ... }` |
+| `t.0.1` *(chained tuple indexing)* | `t.0.1` |
+| `#!/usr/bin/env ...`, `extern crate self as alias;` | `#!/usr/bin/env ...`, `extern crate this as alias;` |
+| `#[forbid(...)]`, `#[expect(...)]`, `#[a[x]]`, `#[a{ x }]`, `#[doc = concat!(...)]` | `[Forbid(...)]`, `[Expect(...)]`, `[a[x]]`, `[a{ x }]`, `[Doc = concat!(...)]` |
+| Attributes on `self` receivers, tuple-struct/union/enum-named fields, assoc items/macros, fn-ptr params & `...` | `[Allow(...)] read this`, `[Allow(...)] public int`, `[Allow(...)] ...` |
+
+> **Intentionally Deferred (Nightly-Only on `rustc 1.99.1 --edition=2024`)**: `gen`/`yield` blocks & functions, `try { ... }` blocks, `trait Alias = ...`, `extern type T;`, `impl !Trait for T`, `const trait` / `~const`, associated const equality (`Tr<C = 1>`), `for<'a> \|...\|` closure binders, `become` tail calls, `box` patterns, `default` specialization, `const { ... }` patterns, `more_qualified_paths` in struct literals, `const \|\|` / `static \|\|`, `auto trait`, postfix `.use` / `.match`.
+
 ## 5. Bidirectional Conversion Rules
 
 - **R# -> Rust**:

@@ -250,6 +250,7 @@ pub enum TokenKind {
     InterpString(Vec<InterpPart>),
     DocComment(String),
     InnerDocComment(String),
+    Shebang(String),
     /// Verbatim inline `rust { ... }` block payload.
     RustBlock(String),
     // Punctuation & operators

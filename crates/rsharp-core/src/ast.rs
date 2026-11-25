@@ -1,9 +1,19 @@
 /// Root AST for an `.rsharp` source file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileAst {
+    pub shebang: Option<String>,
     pub inner_docs: Vec<String>,
     pub inner_attrs: Vec<Attribute>,
     pub items: Vec<Item>,
+}
+
+/// Delimiter form for attribute arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttrArgs {
+    Paren(String),
+    Bracket(String),
+    Brace(String),
+    Eq(String),
 }
 
 /// `[Attr]`, `[unsafe Attr]`, or `[module: Attr]`.
@@ -12,8 +22,7 @@ pub struct Attribute {
     pub inner: bool,
     pub is_unsafe: bool,
     pub name: String,
-    /// Optional raw argument string inside parentheses or `= value`.
-    pub args: Option<String>,
+    pub args: Option<AttrArgs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +148,7 @@ pub enum TypeBound {
         lifetimes: Vec<String>,
         trait_path: TypePath,
     },
+    Paren(Box<TypeBound>),
     Lifetime(String),
     PreciseCapture(Vec<CaptureArg>),
 }
@@ -259,7 +269,10 @@ pub enum TraitItem {
         name: String,
         default: Option<Expr>,
     },
-    MacroCall(MacroCall),
+    MacroCall {
+        attrs: Vec<Attribute>,
+        call: MacroCall,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -290,7 +303,10 @@ pub enum ImplItem {
         ty: Type,
     },
     AssocConst(Item),
-    MacroCall(MacroCall),
+    MacroCall {
+        attrs: Vec<Attribute>,
+        call: MacroCall,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -376,7 +392,10 @@ pub struct FnDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Param {
-    Receiver(ReceiverKind),
+    Receiver {
+        attrs: Vec<Attribute>,
+        kind: ReceiverKind,
+    },
     Normal {
         attrs: Vec<Attribute>,
         is_mut: bool,
@@ -447,6 +466,7 @@ pub enum GenericArg {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnPtrParam {
+    pub attrs: Vec<Attribute>,
     pub name: Option<String>,
     pub ty: Type,
 }
@@ -461,9 +481,8 @@ pub enum Type {
     Path(TypePath),
     QualifiedPath {
         self_ty: Box<Type>,
-        trait_path: TypePath,
-        item: String,
-        args: Vec<GenericArg>,
+        trait_path: Option<TypePath>,
+        segments: Vec<TypePathSegment>,
     },
     Grouped(Box<Type>),
     Read {
@@ -492,7 +511,7 @@ pub enum Type {
         is_unsafe: bool,
         extern_abi: Option<String>,
         params: Vec<FnPtrParam>,
-        is_variadic: bool,
+        variadic: Option<Vec<Attribute>>,
         ret: Box<Type>,
     },
     Macro(MacroCall),
@@ -575,6 +594,8 @@ pub enum StmtKind {
         body: Block,
     },
     Match(MatchExpr),
+    Block(Block),
+    Empty,
     Unsafe(Block),
     InlineRust(String),
     Expr(Expr),
@@ -630,6 +651,14 @@ pub enum MatchArmBody {
     Expr(Expr),
 }
 
+/// Path in pattern position, supporting `global::`, `<Type [as Trait]>::`, and generic args.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatPath {
+    pub global: bool,
+    pub qself: Option<(Box<Type>, Option<TypePath>)>,
+    pub segments: Vec<TypePathSegment>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Wildcard,
@@ -660,8 +689,9 @@ pub enum Pattern {
     },
     /// Parenthesized pattern `(1 | 2)`.
     Paren(Box<Pattern>),
-    /// Subpattern binding `<pat> as <Type> <name>` (`name @ pat`).
+    /// Subpattern binding `<pat> as [borrow (read|write) | mut] <Type> <name>` (`[ref] [mut] name @ pat`).
     BindAt {
+        ref_mode: Option<RefMode>,
         is_mut: bool,
         ty: Type,
         name: String,
@@ -670,15 +700,15 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
     Slice(Vec<SlicePatElem>),
     TupleStruct {
-        path: Vec<String>,
+        path: PatPath,
         fields: Vec<Pattern>,
     },
     Struct {
-        path: Vec<String>,
+        path: PatPath,
         fields: Vec<StructPatField>,
         rest: bool,
     },
-    Path(Vec<String>),
+    Path(PatPath),
     Or(Vec<Pattern>),
     Macro(MacroCall),
 }
@@ -688,6 +718,7 @@ pub enum SlicePatElem {
     Pat(Pattern),
     Rest,
     RestBind {
+        ref_mode: Option<RefMode>,
         is_mut: bool,
         ty: Option<Type>,
         name: String,
@@ -702,6 +733,8 @@ pub enum RefMode {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructPatField {
+    pub attrs: Vec<Attribute>,
+    pub ref_mode: Option<RefMode>,
     pub ty: Option<Type>,
     pub is_mut: bool,
     pub name: String,
@@ -746,9 +779,8 @@ pub enum Expr {
     },
     QualifiedMember {
         self_ty: Box<Type>,
-        trait_path: TypePath,
-        member: String,
-        type_args: Vec<GenericArg>,
+        trait_path: Option<TypePath>,
+        segments: Vec<PathExprSegment>,
     },
     Unary {
         op: UnaryOp,
@@ -822,8 +854,9 @@ pub enum Expr {
     },
     TupleLit(Vec<Expr>),
     StructLit {
-        path: Vec<String>,
+        path: TypePath,
         fields: Vec<StructFieldInit>,
+        rest: Option<Box<Expr>>,
     },
     StructUpdate {
         base: Box<Expr>,

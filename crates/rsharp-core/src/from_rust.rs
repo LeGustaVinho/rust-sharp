@@ -193,6 +193,9 @@ impl RustToRSharp {
     }
 
     fn emit_file(&mut self, file: &syn::File) {
+        if let Some(sb) = &file.shebang {
+            self.line(sb);
+        }
         for attr in &file.attrs {
             self.emit_attr(attr, true);
         }
@@ -271,12 +274,12 @@ impl RustToRSharp {
                     .as_ref()
                     .map(|(_, id)| format!(" as {}", escape_ident(&id.to_string())))
                     .unwrap_or_default();
-                self.line(&format!(
-                    "{}extern crate {}{};",
-                    vis,
-                    escape_ident(&ec.ident.to_string()),
-                    alias
-                ));
+                let crate_name = if ec.ident == "self" {
+                    "this".to_string()
+                } else {
+                    escape_ident(&ec.ident.to_string())
+                };
+                self.line(&format!("{}extern crate {}{};", vis, crate_name, alias));
             }
             Item::Mod(m) => {
                 self.emit_split_attrs(&m.attrs, false, "module");
@@ -311,7 +314,16 @@ impl RustToRSharp {
                         let fs: Vec<String> = uf
                             .unnamed
                             .iter()
-                            .map(|f| format!("{}{}", fmt_vis(&f.vis), self.fmt_type(&f.ty)))
+                            .map(|f| {
+                                let mut p = String::new();
+                                for a in &f.attrs {
+                                    p.push_str(&self.fmt_attr_inline(a, None));
+                                    p.push(' ');
+                                }
+                                p.push_str(&fmt_vis(&f.vis));
+                                p.push_str(&self.fmt_type(&f.ty));
+                                p
+                            })
                             .collect();
                         self.line(&format!(
                             "{}struct {}{}({}){};",
@@ -380,6 +392,9 @@ impl RustToRSharp {
                             self.line(&format!("{} {{", vname));
                             self.indent += 1;
                             for f in &nf.named {
+                                for a in &f.attrs {
+                                    self.emit_attr(a, false);
+                                }
                                 let fname = escape_ident(&f.ident.as_ref().unwrap().to_string());
                                 let fty = self.fmt_type(&f.ty);
                                 self.line(&format!("{} {};", fty, fname));
@@ -403,6 +418,9 @@ impl RustToRSharp {
                 self.line(&format!("{}union {}{}{} {{", vis, name, gens, wh));
                 self.indent += 1;
                 for f in &u.fields.named {
+                    for a in &f.attrs {
+                        self.emit_attr(a, false);
+                    }
                     let fvis = fmt_vis(&f.vis);
                     let fname = escape_ident(&f.ident.as_ref().unwrap().to_string());
                     let fty = self.fmt_type(&f.ty);
@@ -450,6 +468,9 @@ impl RustToRSharp {
                             );
                         }
                         TraitItem::Type(tt) => {
+                            for a in &tt.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let aname = escape_ident(&tt.ident.to_string());
                             let agens = self.fmt_generics(&tt.generics);
                             let bs = if tt.bounds.is_empty() {
@@ -468,6 +489,9 @@ impl RustToRSharp {
                             self.line(&format!("type {}{}{}{}{};", aname, agens, bs, awh, def));
                         }
                         TraitItem::Const(tc) => {
+                            for a in &tc.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let cty = self.fmt_type(&tc.ty);
                             let cname = escape_ident(&tc.ident.to_string());
                             let def = match &tc.default {
@@ -477,6 +501,9 @@ impl RustToRSharp {
                             self.line(&format!("const {} {}{};", cty, cname, def));
                         }
                         TraitItem::Macro(tm) => {
+                            for a in &tm.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let ms = fmt_syn_macro(&tm.mac);
                             if matches!(tm.mac.delimiter, syn::MacroDelimiter::Brace(_)) {
                                 self.line(&ms);
@@ -537,6 +564,9 @@ impl RustToRSharp {
                             );
                         }
                         syn::ImplItem::Type(t) => {
+                            for a in &t.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let aname = escape_ident(&t.ident.to_string());
                             let agens = self.fmt_generics(&t.generics);
                             let ty = self.fmt_type(&t.ty);
@@ -544,6 +574,9 @@ impl RustToRSharp {
                             self.line(&format!("type {}{} = {}{};", aname, agens, ty, awh));
                         }
                         syn::ImplItem::Const(c) => {
+                            for a in &c.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let cvis = fmt_vis(&c.vis);
                             let cty = self.fmt_type(&c.ty);
                             let cname = escape_ident(&c.ident.to_string());
@@ -551,6 +584,9 @@ impl RustToRSharp {
                             self.line(&format!("{}const {} {} = {};", cvis, cty, cname, val));
                         }
                         syn::ImplItem::Macro(mc) => {
+                            for a in &mc.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let ms = fmt_syn_macro(&mc.mac);
                             if matches!(mc.mac.delimiter, syn::MacroDelimiter::Brace(_)) {
                                 self.line(&ms);
@@ -637,6 +673,9 @@ impl RustToRSharp {
                             self.emit_foreign_static(fs, "");
                         }
                         syn::ForeignItem::Macro(fm) => {
+                            for a in &fm.attrs {
+                                self.emit_attr(a, false);
+                            }
                             let ms = fmt_syn_macro(&fm.mac);
                             if matches!(fm.mac.delimiter, syn::MacroDelimiter::Brace(_)) {
                                 self.line(&ms);
@@ -802,51 +841,32 @@ impl RustToRSharp {
         for arg in &sig.inputs {
             match arg {
                 FnArg::Receiver(r) => {
+                    let mut pfx = String::new();
+                    for a in &r.attrs {
+                        pfx.push_str(&self.fmt_attr_inline(a, None));
+                        pfx.push(' ');
+                    }
                     if let Some((_, lt)) = &r.reference {
                         let life = lt
                             .as_ref()
                             .map(|l| format!("<{}>", escape_lifetime(l)))
                             .unwrap_or_default();
                         if r.mutability.is_some() {
-                            params.push(format!("write{} this", life));
+                            params.push(format!("{}write{} this", pfx, life));
                         } else {
-                            params.push(format!("read{} this", life));
+                            params.push(format!("{}read{} this", pfx, life));
                         }
                     } else if r.colon_token.is_some() {
                         let mk = if r.mutability.is_some() { "mut " } else { "" };
-                        params.push(format!("{}take {} this", mk, self.fmt_type(&r.ty)));
+                        params.push(format!("{}{}take {} this", pfx, mk, self.fmt_type(&r.ty)));
                     } else if r.mutability.is_some() {
-                        params.push("mut take this".to_string());
+                        params.push(format!("{}mut take this", pfx));
                     } else {
-                        params.push("take this".to_string());
+                        params.push(format!("{}take this", pfx));
                     }
                 }
                 FnArg::Typed(pt) => {
-                    let mut pfx = String::new();
-                    for a in &pt.attrs {
-                        pfx.push_str(&self.fmt_attr_inline(a, None));
-                        pfx.push(' ');
-                    }
-                    let ty_s = self.fmt_type(&pt.ty);
-                    match pt.pat.as_ref() {
-                        Pat::Ident(pi) => {
-                            let pname = pi.ident.to_string();
-                            self.bind_var(&pname, ty_s.clone());
-                            let mk = if pi.mutability.is_some() { "mut " } else { "" };
-                            params.push(format!("{}{}{} {}", pfx, mk, ty_s, escape_ident(&pname)));
-                        }
-                        Pat::Wild(_) => {
-                            params.push(format!("{}{} _", pfx, ty_s));
-                        }
-                        other => {
-                            let (pat_s, self_typed) = self.fmt_typed_pat(other, &pt.ty);
-                            if self_typed {
-                                params.push(format!("{}{}", pfx, pat_s));
-                            } else {
-                                params.push(format!("{}{} : {}", pfx, pat_s, ty_s));
-                            }
-                        }
-                    }
+                    params.push(self.fmt_typed_fn_param(&pt.attrs, &pt.pat, &pt.ty));
                 }
             }
         }
@@ -899,6 +919,42 @@ impl RustToRSharp {
         self.pop_scope();
     }
 
+    fn fmt_typed_fn_param(&mut self, attrs: &[Attribute], pat: &Pat, ty: &Type) -> String {
+        let mut pfx = String::new();
+        for a in attrs {
+            pfx.push_str(&self.fmt_attr_inline(a, None));
+            pfx.push(' ');
+        }
+        let ty_s = self.fmt_type(ty);
+        match pat {
+            Pat::Ident(pi) if pi.by_ref.is_some() => {
+                let pname = pi.ident.to_string();
+                let mode = if pi.mutability.is_some() {
+                    "write"
+                } else {
+                    "read"
+                };
+                self.bind_var(&pname, format!("{} {}", mode, ty_s));
+                format!("{}borrow {} {} {}", pfx, mode, ty_s, escape_ident(&pname))
+            }
+            Pat::Ident(pi) => {
+                let pname = pi.ident.to_string();
+                self.bind_var(&pname, ty_s.clone());
+                let mk = if pi.mutability.is_some() { "mut " } else { "" };
+                format!("{}{}{} {}", pfx, mk, ty_s, escape_ident(&pname))
+            }
+            Pat::Wild(_) => format!("{}{} _", pfx, ty_s),
+            other => {
+                let (pat_s, self_typed) = self.fmt_typed_pat(other, ty);
+                if self_typed {
+                    format!("{}{}", pfx, pat_s)
+                } else {
+                    format!("{}{} : {}", pfx, pat_s, ty_s)
+                }
+            }
+        }
+    }
+
     fn fmt_typed_pat(&mut self, pat: &Pat, ty: &Type) -> (String, bool) {
         match (pat, ty) {
             (Pat::Tuple(pt), Type::Tuple(tt)) if pt.elems.len() == tt.elems.len() => {
@@ -916,14 +972,58 @@ impl RustToRSharp {
                 };
                 (s, all_typed)
             }
+            (Pat::Reference(pr), Type::Reference(tr)) => {
+                let (inner, ok) = self.fmt_typed_pat(&pr.pat, &tr.elem);
+                let kw = if pr.mutability.is_some() {
+                    "deref write "
+                } else {
+                    "deref "
+                };
+                (format!("{}{}", kw, inner), ok)
+            }
+            (Pat::TupleStruct(pts), _) => {
+                let struct_key = pts
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+                let known_fields = self.struct_fields.get(&struct_key).cloned();
+                let fs: Vec<String> = pts
+                    .elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let fty = known_fields
+                            .as_ref()
+                            .and_then(|m| m.get(&i.to_string()))
+                            .map(|s| s.as_str());
+                        self.fmt_pat(p, fty)
+                    })
+                    .collect();
+                let path_s = self.fmt_pat_qself_or_path(&pts.qself, &pts.path);
+                let self_typed =
+                    pts.qself.is_none() && pts.path.segments.len() == 1 && known_fields.is_some();
+                (format!("{}({})", path_s, fs.join(", ")), self_typed)
+            }
             (Pat::Ident(pi), _) => {
                 let ty_s = self.fmt_type(ty);
+                let pname = pi.ident.to_string();
+                if pi.by_ref.is_some() {
+                    let mode = if pi.mutability.is_some() {
+                        "write"
+                    } else {
+                        "read"
+                    };
+                    self.bind_var(&pname, format!("{} {}", mode, ty_s));
+                    return (
+                        format!("borrow {} {} {}", mode, ty_s, escape_ident(&pname)),
+                        true,
+                    );
+                }
                 let mk = if pi.mutability.is_some() { "mut " } else { "" };
-                self.bind_var(&pi.ident.to_string(), ty_s.clone());
-                (
-                    format!("{}{} {}", mk, ty_s, escape_ident(&pi.ident.to_string())),
-                    true,
-                )
+                self.bind_var(&pname, ty_s.clone());
+                (format!("{}{} {}", mk, ty_s, escape_ident(&pname)), true)
             }
             (Pat::Paren(pp), _) => {
                 let (inner, ok) = self.fmt_typed_pat(&pp.pat, ty);
@@ -949,7 +1049,17 @@ impl RustToRSharp {
                     }
                 }
                 Stmt::Macro(sm) => {
-                    self.line(&format!("{};", fmt_syn_macro(&sm.mac)));
+                    for a in &sm.attrs {
+                        self.emit_attr(a, false);
+                    }
+                    let ms = fmt_syn_macro(&sm.mac);
+                    if matches!(sm.mac.delimiter, syn::MacroDelimiter::Brace(_))
+                        && sm.semi_token.is_none()
+                    {
+                        self.line(&ms);
+                    } else {
+                        self.line(&format!("{};", ms));
+                    }
                 }
             }
         }
@@ -1048,6 +1158,11 @@ impl RustToRSharp {
             let known_fields = self.struct_fields.get(&struct_key).cloned();
             let mut fs = Vec::new();
             for f in &ps.fields {
+                let mut apfx = String::new();
+                for a in &f.attrs {
+                    apfx.push_str(&self.fmt_attr_inline(a, None));
+                    apfx.push(' ');
+                }
                 let raw_fname = match &f.member {
                     Member::Named(id) => id.to_string(),
                     Member::Unnamed(idx) => idx.index.to_string(),
@@ -1062,14 +1177,26 @@ impl RustToRSharp {
                     .map(|s| s.as_str());
                 if f.colon_token.is_some() {
                     let sub_s = self.fmt_pat(&f.pat, fty);
-                    fs.push(format!("{}: {}", fname, sub_s));
+                    fs.push(format!("{}{}: {}", apfx, fname, sub_s));
                 } else if let Some(ty_s) = fty {
-                    let (is_mut, _) = extract_param_pat(&f.pat);
-                    let mk = if is_mut { "mut " } else { "" };
-                    self.bind_var(&raw_fname, ty_s.to_string());
-                    fs.push(format!("{}{} {}", mk, ty_s, fname));
+                    if let Pat::Ident(pi) = f.pat.as_ref()
+                        && pi.by_ref.is_some()
+                    {
+                        let mode = if pi.mutability.is_some() {
+                            "write"
+                        } else {
+                            "read"
+                        };
+                        self.bind_var(&raw_fname, format!("{} {}", mode, ty_s));
+                        fs.push(format!("{}borrow {} {} {}", apfx, mode, ty_s, fname));
+                    } else {
+                        let (is_mut, _) = extract_param_pat(&f.pat);
+                        let mk = if is_mut { "mut " } else { "" };
+                        self.bind_var(&raw_fname, ty_s.to_string());
+                        fs.push(format!("{}{}{} {}", apfx, mk, ty_s, fname));
+                    }
                 } else {
-                    fs.push(fname);
+                    fs.push(format!("{}{}", apfx, fname));
                 }
             }
             if ps.rest.is_some() {
@@ -1080,12 +1207,64 @@ impl RustToRSharp {
                 return;
             };
             let rhs = self.fmt_expr(&init.expr);
-            self.line(&format!(
-                "{} {{ {} }} = {};",
-                self.fmt_path(&ps.path),
-                fs.join(", "),
-                rhs
-            ));
+            let path_s = self.fmt_pat_qself_or_path(&ps.qself, &ps.path);
+            self.line(&format!("{} {{ {} }} = {};", path_s, fs.join(", "), rhs));
+            return;
+        }
+
+        // Tuple-struct destructuring `let W(v) = w;`
+        if let Pat::TupleStruct(pts) = inner_pat {
+            let struct_key = pts
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default();
+            let known_fields = self.struct_fields.get(&struct_key).cloned();
+            let fs: Vec<String> = pts
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let fty = known_fields
+                        .as_ref()
+                        .and_then(|m| m.get(&i.to_string()))
+                        .map(|s| s.as_str());
+                    self.fmt_pat(p, fty)
+                })
+                .collect();
+            let Some(init) = &local.init else {
+                self.record_err(RSharpError::from_rust("Destructuring without initializer"));
+                return;
+            };
+            let rhs = self.fmt_expr(&init.expr);
+            let path_s = self.fmt_pat_qself_or_path(&pts.qself, &pts.path);
+            self.line(&format!("{}({}) = {};", path_s, fs.join(", "), rhs));
+            return;
+        }
+
+        // Reference-stripping local `let &v = r;` / `let &mut v = r;`
+        if let Pat::Reference(pr) = inner_pat {
+            let Some(init) = &local.init else {
+                self.record_err(RSharpError::from_rust("Destructuring without initializer"));
+                return;
+            };
+            let inner_ty = match explicit_ty {
+                Some(Type::Reference(tr)) => Some(self.fmt_type(&tr.elem)),
+                _ => self.infer_expr_type(&init.expr).and_then(|t| {
+                    t.strip_prefix("read ")
+                        .or_else(|| t.strip_prefix("write "))
+                        .map(|s| s.to_string())
+                }),
+            };
+            let inner_pat_s = self.fmt_pat(&pr.pat, inner_ty.as_deref());
+            let kw = if pr.mutability.is_some() {
+                "deref write "
+            } else {
+                "deref "
+            };
+            let rhs = self.fmt_expr(&init.expr);
+            self.line(&format!("{}{} = {};", kw, inner_pat_s, rhs));
             return;
         }
 
@@ -1164,8 +1343,13 @@ impl RustToRSharp {
             return;
         }
 
-        // Standard variable binding `let (mut) x(: T)? (= init)?;`
-        let (is_mut, name) = extract_param_pat(inner_pat);
+        // Standard variable binding `let (ref) (mut) x(: T)? (= init)?;` or `let (x) = init;`
+        let (is_paren, unwrapped_pat) = match inner_pat {
+            Pat::Paren(pp) => (true, pp.pat.as_ref()),
+            other => (false, other),
+        };
+        let by_ref = matches!(unwrapped_pat, Pat::Ident(pi) if pi.by_ref.is_some());
+        let (is_mut, name) = extract_param_pat(unwrapped_pat);
         let ty_s = if let Some(ty) = explicit_ty {
             self.fmt_type(ty)
         } else if let Some(init) = &local.init {
@@ -1194,22 +1378,44 @@ impl RustToRSharp {
             return;
         };
 
-        let is_shadow = self.declared_in_fn.contains(&name);
-        let sh_kw = if is_shadow { "shadow " } else { "" };
-        let mut_kw = if is_mut { "mut " } else { "" };
         let init_s = match &local.init {
             Some(init) => format!(" = {}", self.fmt_expr(&init.expr)),
             None => String::new(),
         };
+        if by_ref {
+            let mode = if is_mut { "write" } else { "read" };
+            self.bind_var(&name, format!("{} {}", mode, ty_s));
+            self.line(&format!(
+                "borrow {} {} {}{};",
+                mode,
+                ty_s,
+                escape_ident(&name),
+                init_s
+            ));
+            return;
+        }
+        let is_shadow = self.declared_in_fn.contains(&name);
+        let sh_kw = if is_shadow { "shadow " } else { "" };
+        let mut_kw = if is_mut { "mut " } else { "" };
         self.bind_var(&name, ty_s.clone());
-        self.line(&format!(
-            "{}{}{} {}{};",
-            sh_kw,
-            mut_kw,
-            ty_s,
-            escape_ident(&name),
-            init_s
-        ));
+        if is_paren {
+            self.line(&format!(
+                "({}{} {}){};",
+                mut_kw,
+                ty_s,
+                escape_ident(&name),
+                init_s
+            ));
+        } else {
+            self.line(&format!(
+                "{}{}{} {}{};",
+                sh_kw,
+                mut_kw,
+                ty_s,
+                escape_ident(&name),
+                init_s
+            ));
+        }
     }
 
     fn next_probe_id(&self) -> usize {
@@ -1292,6 +1498,16 @@ impl RustToRSharp {
                 self.line("}");
             }
             Expr::Match(em) => self.emit_match_stmt(em, false),
+            Expr::Block(eb) if eb.label.is_none() => {
+                for a in &eb.attrs {
+                    self.emit_attr(a, false);
+                }
+                self.line("{");
+                self.indent += 1;
+                self.emit_block_stmts(&eb.block, BlockTail::None);
+                self.indent -= 1;
+                self.line("}");
+            }
             Expr::Unsafe(eu) => {
                 self.line("unsafe {");
                 self.indent += 1;
@@ -1465,10 +1681,10 @@ impl RustToRSharp {
                 format!("{} ptr<{}>", kw, self.fmt_type(&p.elem))
             }
             Type::Array(arr) => {
-                let mut dims = vec![arr.len.to_token_stream().to_string()];
+                let mut dims = vec![self.fmt_const_expr(&arr.len)];
                 let mut cur = arr.elem.as_ref();
                 while let Type::Array(inner) = cur {
-                    dims.push(inner.len.to_token_stream().to_string());
+                    dims.push(self.fmt_const_expr(&inner.len));
                     cur = inner.elem.as_ref();
                 }
                 format!("{}[{}]", self.fmt_type(cur), dims.join(", "))
@@ -1501,16 +1717,26 @@ impl RustToRSharp {
                     .inputs
                     .iter()
                     .map(|i| {
+                        let mut apfx = String::new();
+                        for a in &i.attrs {
+                            apfx.push_str(&self.fmt_attr_inline(a, None));
+                            apfx.push(' ');
+                        }
                         let ty_s = self.fmt_type(&i.ty);
                         if let Some((id, _)) = &i.name {
-                            format!("{} {}", ty_s, escape_ident(&id.to_string()))
+                            format!("{}{} {}", apfx, ty_s, escape_ident(&id.to_string()))
                         } else {
-                            ty_s
+                            format!("{}{}", apfx, ty_s)
                         }
                     })
                     .collect();
-                if bf.variadic.is_some() {
-                    ps.push("...".to_string());
+                if let Some(vp) = &bf.variadic {
+                    let mut vpfx = String::new();
+                    for a in &vp.attrs {
+                        vpfx.push_str(&self.fmt_attr_inline(a, None));
+                        vpfx.push(' ');
+                    }
+                    ps.push(format!("{}...", vpfx));
                 }
                 let ret = self.fmt_return_type(&bf.output, false);
                 format!("{}({}) -> {}", prefix, ps.join(", "), ret)
@@ -1542,24 +1768,53 @@ impl RustToRSharp {
         }
     }
 
+    fn fmt_const_expr(&self, expr: &Expr) -> String {
+        let mut sub = self.child();
+        if let Expr::Block(eb) = expr {
+            if let Some(single) = single_tail_expr(&eb.block) {
+                return format!("{{ {} }}", sub.fmt_expr(single));
+            }
+            sub.emit_block_stmts(&eb.block, BlockTail::Return);
+            return format!("{{\n{}}}", sub.out);
+        }
+        sub.fmt_expr(expr)
+    }
+
+    fn fmt_pat_qself_or_path(&self, qself: &Option<syn::QSelf>, path: &Path) -> String {
+        match qself {
+            Some(qs) => self.fmt_qself_path(qs, path),
+            None => self.fmt_path(path),
+        }
+    }
+
     fn fmt_qself_path(&self, qself: &syn::QSelf, path: &Path) -> String {
         let self_ty = self.fmt_type(&qself.ty);
-        let trait_segs: Vec<_> = path.segments.iter().take(qself.position).cloned().collect();
         let rest_segs: Vec<_> = path.segments.iter().skip(qself.position).cloned().collect();
-        let trait_path = Path {
-            leading_colon: None,
-            segments: syn::punctuated::Punctuated::from_iter(trait_segs),
-        };
         let rest_path = Path {
             leading_colon: None,
             segments: syn::punctuated::Punctuated::from_iter(rest_segs),
         };
-        format!(
-            "({} as {}).{}",
-            self_ty,
-            self.fmt_path(&trait_path),
-            self.fmt_path(&rest_path)
-        )
+        let rest_s = self.fmt_path(&rest_path);
+        if qself.position == 0 {
+            format!("({})::{}", self_ty, rest_s.replace('.', "::"))
+        } else {
+            let trait_segs: Vec<_> = path.segments.iter().take(qself.position).cloned().collect();
+            let trait_path = Path {
+                leading_colon: None,
+                segments: syn::punctuated::Punctuated::from_iter(trait_segs),
+            };
+            let rest_joined = if rest_path.segments.len() > 1 {
+                rest_s.replace('.', "::")
+            } else {
+                rest_s
+            };
+            format!(
+                "({} as {}).{}",
+                self_ty,
+                self.fmt_path(&trait_path),
+                rest_joined
+            )
+        }
     }
 
     fn fmt_path(&self, path: &Path) -> String {
@@ -1639,7 +1894,7 @@ impl RustToRSharp {
                     bs.join(" + ")
                 )
             }
-            GenericArgument::Const(e) => e.to_token_stream().to_string(),
+            GenericArgument::Const(e) => self.fmt_const_expr(e),
             other => other.to_token_stream().to_string(),
         }
     }
@@ -1687,7 +1942,7 @@ impl RustToRSharp {
                     escape_ident(&cp.ident.to_string())
                 ));
                 if let Some(def) = &cp.default {
-                    s.push_str(&format!(" = {}", def.to_token_stream()));
+                    s.push_str(&format!(" = {}", self.fmt_const_expr(def)));
                 }
                 s
             }
@@ -1742,8 +1997,12 @@ impl RustToRSharp {
                 ));
             }
             if let WherePredicate::Lifetime(pl) = p {
-                let os: Vec<String> = pl.bounds.iter().map(|l| l.ident.to_string()).collect();
-                preds.push(format!("life {} : {}", pl.lifetime.ident, os.join(", ")));
+                let os: Vec<String> = pl.bounds.iter().map(escape_lifetime).collect();
+                preds.push(format!(
+                    "life {} : {}",
+                    escape_lifetime(&pl.lifetime),
+                    os.join(", ")
+                ));
             }
         }
         format!(" where {}", preds.join(", "))
@@ -1760,13 +2019,17 @@ impl RustToRSharp {
                     out.push_str(&self.fmt_bound_lifetimes(bl));
                 }
                 out.push_str(&self.fmt_path(&tb.path));
-                out
+                if tb.paren_token.is_some() {
+                    format!("({})", out)
+                } else {
+                    out
+                }
             }
             TypeParamBound::Lifetime(lt) => {
                 if lt.ident == "static" {
                     "static".to_string()
                 } else {
-                    format!("life {}", lt.ident)
+                    format!("life {}", escape_lifetime(lt))
                 }
             }
             TypeParamBound::PreciseCapture(pc) => {
@@ -1774,7 +2037,7 @@ impl RustToRSharp {
                     .params
                     .iter()
                     .map(|p| match p {
-                        syn::CapturedParam::Lifetime(l) => format!("life {}", l.ident),
+                        syn::CapturedParam::Lifetime(l) => format!("life {}", escape_lifetime(l)),
                         other => other.to_token_stream().to_string(),
                     })
                     .collect();
@@ -1823,10 +2086,27 @@ impl RustToRSharp {
                 let name = escape_ident(&pi.ident.to_string());
                 if let Some((_, sub)) = &pi.subpat {
                     if matches!(sub.as_ref(), Pat::Rest(_)) {
-                        return format!(".. {}", name);
+                        if pi.by_ref.is_some() {
+                            let mode = if pi.mutability.is_some() {
+                                "write"
+                            } else {
+                                "read"
+                            };
+                            return format!(".. borrow {} {}", mode, name);
+                        }
+                        let mk = if pi.mutability.is_some() { "mut " } else { "" };
+                        return format!(".. {}{}", mk, name);
                     }
                     let sub_s = self.fmt_pat(sub, None);
                     let ty = ty_hint.unwrap_or("int");
+                    if pi.by_ref.is_some() {
+                        let mode = if pi.mutability.is_some() {
+                            "write"
+                        } else {
+                            "read"
+                        };
+                        return format!("{} as borrow {} {} {}", sub_s, mode, ty, name);
+                    }
                     let mk = if pi.mutability.is_some() { "mut " } else { "" };
                     return format!("{} as {}{} {}", sub_s, mk, ty, name);
                 }
@@ -1861,27 +2141,49 @@ impl RustToRSharp {
             }
             Pat::TupleStruct(pts) => {
                 let fs: Vec<_> = pts.elems.iter().map(|p| self.fmt_pat(p, None)).collect();
-                format!("{}({})", self.fmt_path(&pts.path), fs.join(", "))
+                format!(
+                    "{}({})",
+                    self.fmt_pat_qself_or_path(&pts.qself, &pts.path),
+                    fs.join(", ")
+                )
             }
             Pat::Struct(ps) => {
                 let mut fs = Vec::new();
                 for f in &ps.fields {
+                    let mut apfx = String::new();
+                    for a in &f.attrs {
+                        apfx.push_str(&self.fmt_attr_inline(a, None));
+                        apfx.push(' ');
+                    }
                     let fname = match &f.member {
                         Member::Named(id) => escape_ident(&id.to_string()),
                         Member::Unnamed(idx) => idx.index.to_string(),
                     };
                     if f.colon_token.is_some() {
-                        fs.push(format!("{}: {}", fname, self.fmt_pat(&f.pat, None)));
+                        fs.push(format!("{}{}: {}", apfx, fname, self.fmt_pat(&f.pat, None)));
+                    } else if let Pat::Ident(pi) = f.pat.as_ref()
+                        && pi.by_ref.is_some()
+                    {
+                        let mode = if pi.mutability.is_some() {
+                            "write"
+                        } else {
+                            "read"
+                        };
+                        fs.push(format!("{}borrow {} {}", apfx, mode, fname));
                     } else {
-                        fs.push(fname);
+                        fs.push(format!("{}{}", apfx, fname));
                     }
                 }
                 if ps.rest.is_some() {
                     fs.push("..".to_string());
                 }
-                format!("{} {{ {} }}", self.fmt_path(&ps.path), fs.join(", "))
+                format!(
+                    "{} {{ {} }}",
+                    self.fmt_pat_qself_or_path(&ps.qself, &ps.path),
+                    fs.join(", ")
+                )
             }
-            Pat::Path(pp) => self.fmt_path(&pp.path),
+            Pat::Path(pp) => self.fmt_pat_qself_or_path(&pp.qself, &pp.path),
             Pat::Or(po) => {
                 let alts: Vec<_> = po.cases.iter().map(|p| self.fmt_pat(p, None)).collect();
                 alts.join(" | ")
@@ -2040,10 +2342,31 @@ impl RustToRSharp {
                     }
                 }
                 if let Some(rest) = &es.rest {
-                    if fs.is_empty() {
-                        format!("{} with {{}}", self.fmt_expr(rest))
+                    let use_with = es.qself.is_none()
+                        && es.path.segments.iter().all(|s| s.arguments.is_empty())
+                        && matches!(
+                            rest.as_ref(),
+                            Expr::Path(ep) if ep
+                                .path
+                                .get_ident()
+                                .is_some_and(|id| self.lookup_var(&id.to_string()).is_some())
+                        );
+                    let rest_s = self.fmt_expr(rest);
+                    if use_with {
+                        if fs.is_empty() {
+                            format!("{} with {{}}", rest_s)
+                        } else {
+                            format!("{} with {{ {} }}", rest_s, fs.join(", "))
+                        }
+                    } else if fs.is_empty() {
+                        format!("new {} {{ ..{} }}", self.fmt_path(&es.path), rest_s)
                     } else {
-                        format!("{} with {{ {} }}", self.fmt_expr(rest), fs.join(", "))
+                        format!(
+                            "new {} {{ {}, ..{} }}",
+                            self.fmt_path(&es.path),
+                            fs.join(", "),
+                            rest_s
+                        )
                     }
                 } else {
                     format!("new {} {{ {} }}", self.fmt_path(&es.path), fs.join(", "))
@@ -2143,20 +2466,7 @@ impl RustToRSharp {
                 let mut ps = Vec::new();
                 for inp in &ec.inputs {
                     if let Pat::Type(pt) = inp {
-                        let mut apfx = String::new();
-                        for a in &pt.attrs {
-                            apfx.push_str(&self.fmt_attr_inline(a, None));
-                            apfx.push(' ');
-                        }
-                        let (is_mut, pname) = extract_param_pat(&pt.pat);
-                        let mk = if is_mut { "mut " } else { "" };
-                        ps.push(format!(
-                            "{}{}{} {}",
-                            apfx,
-                            mk,
-                            self.fmt_type(&pt.ty),
-                            escape_ident(&pname)
-                        ));
+                        ps.push(self.fmt_typed_fn_param(&pt.attrs, &pt.pat, &pt.ty));
                     } else {
                         let (is_mut, pname) = extract_param_pat(inp);
                         if self.options.use_rustc_inference {
@@ -2189,10 +2499,12 @@ impl RustToRSharp {
                 match ec.body.as_ref() {
                     Expr::Block(eb) => {
                         let mut sub = self.child();
-                        let tail = if matches!(ec.output, ReturnType::Default) {
-                            BlockTail::None
-                        } else {
+                        let has_value_tail =
+                            matches!(eb.block.stmts.last(), Some(Stmt::Expr(_, None)));
+                        let tail = if !matches!(ec.output, ReturnType::Default) || has_value_tail {
                             BlockTail::Return
+                        } else {
+                            BlockTail::None
                         };
                         sub.emit_block_stmts(&eb.block, tail);
                         format!("{}({}){} => {{\n{}}}", prefix, ps.join(", "), ret, sub.out)
@@ -2459,9 +2771,11 @@ impl RustToRSharp {
             }
             Expr::Closure(ec) => {
                 let mut param_tys = Vec::new();
+                let mut typed_inputs = Vec::new();
                 for inp in &ec.inputs {
                     if let Pat::Type(pt) = inp {
                         param_tys.push(self.fmt_type(&pt.ty));
+                        typed_inputs.push((pt.pat.as_ref(), pt.ty.as_ref()));
                     } else {
                         return None;
                     }
@@ -2469,7 +2783,7 @@ impl RustToRSharp {
                 let ret = match &ec.output {
                     ReturnType::Type(_, ty) => self.fmt_type(ty),
                     ReturnType::Default => self
-                        .infer_expr_type(&ec.body)
+                        .infer_closure_body_type(&typed_inputs, &ec.body)
                         .unwrap_or_else(|| "void".to_string()),
                 };
                 if ec.asyncness.is_some() {
@@ -2483,6 +2797,45 @@ impl RustToRSharp {
                 }
             }
             _ => None,
+        }
+    }
+
+    fn bind_typed_pat(&mut self, pat: &Pat, ty: &syn::Type) {
+        match (pat, ty) {
+            (Pat::Ident(pi), _) => self.bind_var(&pi.ident.to_string(), self.fmt_type(ty)),
+            (Pat::Tuple(pt), syn::Type::Tuple(tt)) => {
+                for (p, t) in pt.elems.iter().zip(tt.elems.iter()) {
+                    self.bind_typed_pat(p, t);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn infer_closure_body_type(
+        &self,
+        inputs: &[(&Pat, &syn::Type)],
+        body: &Expr,
+    ) -> Option<String> {
+        let mut sub = self.child();
+        for &(pat, ty) in inputs {
+            sub.bind_typed_pat(pat, ty);
+        }
+        match body {
+            Expr::Block(eb) => {
+                for st in &eb.block.stmts {
+                    if let Stmt::Local(loc) = st
+                        && let Pat::Type(pt) = &loc.pat
+                    {
+                        sub.bind_typed_pat(&pt.pat, &pt.ty);
+                    }
+                }
+                match eb.block.stmts.last() {
+                    Some(Stmt::Expr(tail, None)) => sub.infer_expr_type(tail),
+                    _ => None,
+                }
+            }
+            other => sub.infer_expr_type(other),
         }
     }
 
@@ -2543,7 +2896,17 @@ fn format_meta_attr(meta: &syn::Meta, prefix: &str, safety: &str) -> String {
             } else {
                 raw_args
             };
-            format!("[{}{}{}({})]", prefix, safety, name, args)
+            match ml.delimiter {
+                syn::MacroDelimiter::Paren(_) => {
+                    format!("[{}{}{}({})]", prefix, safety, name, args)
+                }
+                syn::MacroDelimiter::Bracket(_) => {
+                    format!("[{}{}{}[{}]]", prefix, safety, name, args)
+                }
+                syn::MacroDelimiter::Brace(_) => {
+                    format!("[{}{}{}{{ {} }}]", prefix, safety, name, args)
+                }
+            }
         }
         syn::Meta::NameValue(nv) => {
             let path_str = path_to_rsharp(&nv.path);
@@ -2610,8 +2973,21 @@ fn fmt_syn_lit(lit: &syn::Lit) -> String {
 fn format_rsharp_raw_str(value: &str, suffix: &str) -> String {
     if !value.contains('"') {
         format!("@\"{}\"{}", value, suffix)
+    } else if value.starts_with('"') || value.ends_with('"') {
+        format!("@\"{}\"{}", value.replace('"', "\"\""), suffix)
     } else {
-        format!("\"\"\"{}\"\"\"{}", value, suffix)
+        let mut max_run = 0usize;
+        let mut cur = 0usize;
+        for ch in value.chars() {
+            if ch == '"' {
+                cur += 1;
+                max_run = max_run.max(cur);
+            } else {
+                cur = 0;
+            }
+        }
+        let delim = "\"".repeat((max_run + 1).max(3));
+        format!("{}{}{}{}", delim, value, delim, suffix)
     }
 }
 
@@ -2625,7 +3001,7 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> Str
             let seg = if p.ident == "self" {
                 "this".to_string()
             } else {
-                p.ident.to_string()
+                escape_ident(&p.ident.to_string())
             };
             prefix.push(seg);
             fmt_use_tree_with_prefix(&p.tree, prefix)
@@ -2634,7 +3010,7 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> Str
             let seg = if n.ident == "self" {
                 "this".to_string()
             } else {
-                map_rust_std_alias(&n.ident.to_string())
+                escape_ident(&map_rust_std_alias(&n.ident.to_string()))
             };
             prefix.push(seg);
             prefix.join(".")
@@ -2643,7 +3019,7 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> Str
             let seg = if r.ident == "self" {
                 "this".to_string()
             } else {
-                map_rust_std_alias(&r.ident.to_string())
+                escape_ident(&map_rust_std_alias(&r.ident.to_string()))
             };
             prefix.push(seg);
             format!(
@@ -2780,7 +3156,17 @@ fn fmt_vis(vis: &Visibility) -> String {
 fn path_to_rsharp(path: &Path) -> String {
     path.segments
         .iter()
-        .map(|s| s.ident.to_string())
+        .enumerate()
+        .map(|(i, s)| {
+            let raw = s.ident.to_string();
+            if i == 0 && raw == "self" {
+                "this".to_string()
+            } else if i == 0 || raw.starts_with("r#") {
+                escape_ident(&raw)
+            } else {
+                raw
+            }
+        })
         .collect::<Vec<_>>()
         .join(".")
 }
@@ -2861,6 +3247,8 @@ fn map_rust_attr_name(name: &str) -> &str {
         "allow" => "Allow",
         "warn" => "Warn",
         "deny" => "Deny",
+        "forbid" => "Forbid",
+        "expect" => "Expect",
         "repr" => "Repr",
         "no_mangle" => "NoMangle",
         "export_name" => "ExportName",

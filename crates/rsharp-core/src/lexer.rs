@@ -73,6 +73,17 @@ impl<'a> Lexer<'a> {
 
     fn tokenize_all(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
+        if self.src.starts_with("#!") && !self.src.starts_with("#![") {
+            let line_end = self.src.find('\n').unwrap_or(self.src.len());
+            let raw = self.src[..line_end].trim_end_matches('\r').to_string();
+            while self.pos < line_end {
+                self.bump();
+            }
+            tokens.push(Token::new(
+                TokenKind::Shebang(raw),
+                Span::new(1, 1, 0, line_end),
+            ));
+        }
         loop {
             self.skip_whitespace_and_comments(&mut tokens)?;
             if self.is_eof() {
@@ -504,6 +515,12 @@ impl<'a> Lexer<'a> {
                 '"' => {
                     self.lex_string(self.line, self.col, self.pos)?;
                 }
+                'r' if self.starts_rust_raw_str() => {
+                    self.skip_rust_raw_str(line, col, start)?;
+                }
+                '\'' => {
+                    self.skip_rust_char_or_lifetime();
+                }
                 '/' if self.peek_at(1) == Some('/') => {
                     while let Some(nc) = self.peek() {
                         if nc == '\n' {
@@ -519,6 +536,56 @@ impl<'a> Lexer<'a> {
                     self.bump();
                 }
             }
+        }
+    }
+
+    fn starts_rust_raw_str(&self) -> bool {
+        let mut off = 1usize;
+        while self.peek_at(off) == Some('#') {
+            off += 1;
+        }
+        self.peek_at(off) == Some('"')
+    }
+
+    fn skip_rust_raw_str(&mut self, line: usize, col: usize, start: usize) -> Result<()> {
+        self.bump(); // 'r'
+        let mut hashes = 0usize;
+        while self.peek() == Some('#') {
+            self.bump();
+            hashes += 1;
+        }
+        self.bump(); // '"'
+        loop {
+            let Some(ch) = self.bump() else {
+                return Err(RSharpError::lex(
+                    self.span_from(line, col, start),
+                    "Unterminated raw string in 'rust { ... }' block",
+                ));
+            };
+            if ch == '"' && (0..hashes).all(|i| self.peek_at(i) == Some('#')) {
+                for _ in 0..hashes {
+                    self.bump();
+                }
+                return Ok(());
+            }
+        }
+    }
+
+    fn skip_rust_char_or_lifetime(&mut self) {
+        self.bump(); // '\''
+        if self.peek() == Some('\\') {
+            self.bump(); // '\\'
+            let _ = self.bump();
+            while let Some(ch) = self.bump() {
+                if ch == '\'' {
+                    break;
+                }
+            }
+        } else if let Some(ch) = self.peek()
+            && self.peek_at(ch.len_utf8()) == Some('\'')
+        {
+            self.bump();
+            self.bump();
         }
     }
 
