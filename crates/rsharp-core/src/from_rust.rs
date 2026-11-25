@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use quote::ToTokens;
 use syn::{
     Attribute, BinOp, Block, Expr, FnArg, GenericArgument, GenericParam, Generics, Item, Local,
-    Member, Pat, Path, PathArguments, ReturnType, Stmt, TraitItem, Type, TypeParamBound, UnOp,
-    Visibility, WherePredicate,
+    Member, Pat, Path, PathArguments, ReturnType, Stmt, TraitBoundModifier, TraitItem, Type,
+    TypeParamBound, UnOp, Visibility, WherePredicate,
 };
 
 use crate::error::{RSharpError, Result};
@@ -139,6 +139,18 @@ impl RustToRSharp {
         Ok(())
     }
 
+    fn fmt_attr_inline(&self, attr: &Attribute, inner: bool) -> String {
+        let prefix = if inner { "module: " } else { "" };
+        // Rust 2024 unsafe attributes: `#[unsafe(no_mangle)]`, `#[unsafe(export_name = "f")]`
+        if let syn::Meta::List(ml) = &attr.meta
+            && ml.path.is_ident("unsafe")
+            && let Ok(inner_meta) = syn::parse2::<syn::Meta>(ml.tokens.clone())
+        {
+            return format_meta_attr(&inner_meta, prefix, "unsafe ");
+        }
+        format_meta_attr(&attr.meta, prefix, "")
+    }
+
     fn emit_attr(&mut self, attr: &Attribute, inner: bool) {
         if attr.path().is_ident("doc")
             && let syn::Meta::NameValue(nv) = &attr.meta
@@ -150,35 +162,8 @@ impl RustToRSharp {
             self.line(&format!("/// {}", trimmed));
             return;
         }
-        let prefix = if inner { "module: " } else { "" };
-        match &attr.meta {
-            syn::Meta::Path(p) => {
-                let path_str = path_to_rsharp(p);
-                let name = map_rust_attr_name(&path_str);
-                self.line(&format!("[{}{}]", prefix, name));
-            }
-            syn::Meta::List(ml) => {
-                let path_str = path_to_rsharp(&ml.path);
-                let name = map_rust_attr_name(&path_str);
-                let raw_args = ml.tokens.to_string();
-                let args = if name == "Inline" {
-                    match raw_args.trim() {
-                        "always" => "Always".to_string(),
-                        "never" => "Never".to_string(),
-                        other => other.to_string(),
-                    }
-                } else {
-                    raw_args
-                };
-                self.line(&format!("[{}{}({})]", prefix, name, args));
-            }
-            syn::Meta::NameValue(nv) => {
-                let path_str = path_to_rsharp(&nv.path);
-                let name = map_rust_attr_name(&path_str);
-                let val = nv.value.to_token_stream().to_string();
-                self.line(&format!("[{}{} = {}]", prefix, name, val));
-            }
-        }
+        let formatted = self.fmt_attr_inline(attr, inner);
+        self.line(&formatted);
     }
 
     fn emit_item(&mut self, item: &Item) -> Result<()> {
@@ -188,11 +173,19 @@ impl RustToRSharp {
                     self.emit_attr(a, false);
                 }
                 let vis = fmt_vis(&u.vis);
-                let mut paths = Vec::new();
-                flatten_use_tree(&u.tree, Vec::new(), &mut paths);
-                for line in paths {
-                    self.line(&format!("{}using {};", vis, line));
+                self.line(&format!("{}using {};", vis, fmt_use_tree(&u.tree)));
+            }
+            Item::ExternCrate(ec) => {
+                for a in &ec.attrs {
+                    self.emit_attr(a, false);
                 }
+                let vis = fmt_vis(&ec.vis);
+                let alias = ec
+                    .rename
+                    .as_ref()
+                    .map(|(_, id)| format!(" as {}", escape_ident(&id.to_string())))
+                    .unwrap_or_default();
+                self.line(&format!("{}extern crate {}{};", vis, ec.ident, alias));
             }
             Item::Mod(m) => {
                 for a in &m.attrs {
@@ -343,10 +336,17 @@ impl RustToRSharp {
                             for a in &tf.attrs {
                                 self.emit_attr(a, false);
                             }
-                            self.emit_fn_sig_and_body("", &tf.sig, tf.default.as_ref(), false)?;
+                            self.emit_fn_sig_and_body(
+                                "",
+                                &tf.sig,
+                                tf.default.as_ref(),
+                                false,
+                                false,
+                            )?;
                         }
                         TraitItem::Type(tt) => {
                             let aname = escape_ident(&tt.ident.to_string());
+                            let agens = self.fmt_generics(&tt.generics);
                             let bs = if tt.bounds.is_empty() {
                                 String::new()
                             } else {
@@ -354,12 +354,13 @@ impl RustToRSharp {
                                     tt.bounds.iter().map(|b| self.fmt_bound(b)).collect();
                                 format!(" : {}", b.join(", "))
                             };
+                            let awh = self.fmt_where(&tt.generics);
                             let def = tt
                                 .default
                                 .as_ref()
                                 .map(|(_, ty)| format!(" = {}", self.fmt_type(ty)))
                                 .unwrap_or_default();
-                            self.line(&format!("type {}{}{};", aname, bs, def));
+                            self.line(&format!("type {}{}{}{}{};", aname, agens, bs, awh, def));
                         }
                         TraitItem::Const(tc) => {
                             let cty = self.fmt_type(&tc.ty);
@@ -410,12 +411,20 @@ impl RustToRSharp {
                             let mvis = fmt_vis(&m.vis);
                             let is_static =
                                 !m.sig.inputs.iter().any(|a| matches!(a, FnArg::Receiver(_)));
-                            self.emit_fn_sig_and_body(mvis, &m.sig, Some(&m.block), is_static)?;
+                            self.emit_fn_sig_and_body(
+                                &mvis,
+                                &m.sig,
+                                Some(&m.block),
+                                is_static,
+                                false,
+                            )?;
                         }
                         syn::ImplItem::Type(t) => {
                             let aname = escape_ident(&t.ident.to_string());
+                            let agens = self.fmt_generics(&t.generics);
                             let ty = self.fmt_type(&t.ty);
-                            self.line(&format!("type {} = {};", aname, ty));
+                            let awh = self.fmt_where(&t.generics);
+                            self.line(&format!("type {}{} = {}{};", aname, agens, ty, awh));
                         }
                         syn::ImplItem::Const(c) => {
                             let cvis = fmt_vis(&c.vis);
@@ -439,8 +448,9 @@ impl RustToRSharp {
                 let vis = fmt_vis(&t.vis);
                 let name = escape_ident(&t.ident.to_string());
                 let gens = self.fmt_generics(&t.generics);
+                let wh = self.fmt_where(&t.generics);
                 let ty = self.fmt_type(&t.ty);
-                self.line(&format!("{}alias {}{} = {};", vis, name, gens, ty));
+                self.line(&format!("{}alias {}{}{} = {};", vis, name, gens, wh, ty));
             }
             Item::Const(c) => {
                 for a in &c.attrs {
@@ -475,23 +485,49 @@ impl RustToRSharp {
                     self.emit_attr(a, false);
                 }
                 let vis = fmt_vis(&f.vis);
-                self.emit_fn_sig_and_body(vis, &f.sig, Some(&f.block), false)?;
+                self.emit_fn_sig_and_body(&vis, &f.sig, Some(&f.block), false, false)?;
             }
             Item::ForeignMod(fm) => {
+                let unsf = if fm.unsafety.is_some() { "unsafe " } else { "" };
                 let abi = fm
                     .abi
                     .name
                     .as_ref()
                     .map(|l| format!(" \"{}\"", l.value()))
                     .unwrap_or_default();
-                self.line(&format!("extern{} {{", abi));
+                self.line(&format!("{}extern{} {{", unsf, abi));
                 self.indent += 1;
                 for fi in &fm.items {
-                    if let syn::ForeignItem::Fn(ff) = fi {
-                        let fvis = fmt_vis(&ff.vis);
-                        self.emit_fn_sig_and_body(fvis, &ff.sig, None, false)?;
-                    } else {
-                        self.line(&format!("rust {{ {} }}", fi.to_token_stream()));
+                    match fi {
+                        syn::ForeignItem::Fn(ff) => {
+                            for a in &ff.attrs {
+                                self.emit_attr(a, false);
+                            }
+                            let fvis = fmt_vis(&ff.vis);
+                            self.emit_fn_sig_and_body(&fvis, &ff.sig, None, false, false)?;
+                        }
+                        syn::ForeignItem::Static(fs) => {
+                            for a in &fs.attrs {
+                                self.emit_attr(a, false);
+                            }
+                            let fvis = fmt_vis(&fs.vis);
+                            let mut_kw = if matches!(fs.mutability, syn::StaticMutability::Mut(_)) {
+                                "mut "
+                            } else {
+                                ""
+                            };
+                            let ty = self.fmt_type(&fs.ty);
+                            let name = escape_ident(&fs.ident.to_string());
+                            self.line(&format!("{}static {}{} {};", fvis, mut_kw, ty, name));
+                        }
+                        syn::ForeignItem::Verbatim(ts) => {
+                            if !self.try_emit_safe_foreign_verbatim(ts)? {
+                                self.line(&format!("rust {{ {} }}", ts));
+                            }
+                        }
+                        other => {
+                            self.line(&format!("rust {{ {} }}", other.to_token_stream()));
+                        }
                     }
                 }
                 self.indent -= 1;
@@ -514,12 +550,101 @@ impl RustToRSharp {
         Ok(())
     }
 
+    /// Parses Rust 2024 `safe fn` and `safe`/`unsafe static` items inside `unsafe extern` blocks,
+    /// which `syn` 2.0 represents as `ForeignItem::Verbatim`.
+    fn try_emit_safe_foreign_verbatim<T: ToTokens>(&mut self, tokens: &T) -> Result<bool> {
+        enum ParsedForeign {
+            Fn(Vec<Attribute>, Visibility, syn::Signature),
+            Static(
+                Vec<Attribute>,
+                Visibility,
+                &'static str,
+                syn::StaticMutability,
+                syn::Ident,
+                Type,
+            ),
+        }
+
+        let parsed = syn::parse::Parser::parse2(
+            |input: syn::parse::ParseStream| {
+                let attrs = input.call(Attribute::parse_outer)?;
+                let vis: Visibility = input.parse()?;
+                let is_unsafe = input.parse::<Option<syn::Token![unsafe]>>()?.is_some();
+                let is_safe = if !is_unsafe && input.peek(syn::Ident) {
+                    let fork = input.fork();
+                    let id: syn::Ident = fork.parse()?;
+                    if id == "safe" {
+                        let _: syn::Ident = input.parse()?;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if is_safe && input.peek(syn::Token![fn]) {
+                    let sig: syn::Signature = input.parse()?;
+                    let _: syn::Token![;] = input.parse()?;
+                    if input.is_empty() {
+                        return Ok(ParsedForeign::Fn(attrs, vis, sig));
+                    }
+                } else if (is_safe || is_unsafe) && input.peek(syn::Token![static]) {
+                    let _: syn::Token![static] = input.parse()?;
+                    let mutability: syn::StaticMutability = input.parse()?;
+                    let ident: syn::Ident = input.parse()?;
+                    let _: syn::Token![:] = input.parse()?;
+                    let ty: Type = input.parse()?;
+                    let _: syn::Token![;] = input.parse()?;
+                    if input.is_empty() {
+                        let safety = if is_safe { "safe " } else { "unsafe " };
+                        return Ok(ParsedForeign::Static(
+                            attrs, vis, safety, mutability, ident, ty,
+                        ));
+                    }
+                }
+                Err(input.error("not a safe/unsafe foreign item"))
+            },
+            tokens.to_token_stream(),
+        );
+
+        match parsed {
+            Ok(ParsedForeign::Fn(attrs, vis, sig)) => {
+                for a in &attrs {
+                    self.emit_attr(a, false);
+                }
+                let fvis = fmt_vis(&vis);
+                self.emit_fn_sig_and_body(&fvis, &sig, None, false, true)?;
+                Ok(true)
+            }
+            Ok(ParsedForeign::Static(attrs, vis, safety, mutability, ident, ty)) => {
+                for a in &attrs {
+                    self.emit_attr(a, false);
+                }
+                let fvis = fmt_vis(&vis);
+                let mut_kw = if matches!(mutability, syn::StaticMutability::Mut(_)) {
+                    "mut "
+                } else {
+                    ""
+                };
+                let ty_s = self.fmt_type(&ty);
+                let name = escape_ident(&ident.to_string());
+                self.line(&format!(
+                    "{}{}static {}{} {};",
+                    fvis, safety, mut_kw, ty_s, name
+                ));
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
     fn emit_fn_sig_and_body(
         &mut self,
         vis: &str,
         sig: &syn::Signature,
         body: Option<&Block>,
         is_static: bool,
+        is_safe: bool,
     ) -> Result<()> {
         let mut header = String::new();
         header.push_str(vis);
@@ -529,6 +654,9 @@ impl RustToRSharp {
         let is_async = sig.asyncness.is_some();
         if is_async {
             header.push_str("async ");
+        }
+        if is_safe {
+            header.push_str("safe ");
         }
         if sig.unsafety.is_some() {
             header.push_str("unsafe ");
@@ -573,13 +701,32 @@ impl RustToRSharp {
                     }
                 }
                 FnArg::Typed(pt) => {
+                    let mut pfx = String::new();
+                    for a in &pt.attrs {
+                        pfx.push_str(&self.fmt_attr_inline(a, false));
+                        pfx.push(' ');
+                    }
                     let ty_s = self.fmt_type(&pt.ty);
-                    let (is_mut, pname) = extract_param_pat(&pt.pat);
-                    self.bind_var(&pname, ty_s.clone());
-                    let mk = if is_mut { "mut " } else { "" };
-                    params.push(format!("{}{} {}", mk, ty_s, escape_ident(&pname)));
+                    match pt.pat.as_ref() {
+                        Pat::Ident(pi) => {
+                            let pname = pi.ident.to_string();
+                            self.bind_var(&pname, ty_s.clone());
+                            let mk = if pi.mutability.is_some() { "mut " } else { "" };
+                            params.push(format!("{}{}{} {}", pfx, mk, ty_s, escape_ident(&pname)));
+                        }
+                        Pat::Wild(_) => {
+                            params.push(format!("{}{} _", pfx, ty_s));
+                        }
+                        other => {
+                            let pat_s = self.fmt_typed_pat(other, &pt.ty)?;
+                            params.push(format!("{}{}", pfx, pat_s));
+                        }
+                    }
                 }
             }
+        }
+        if sig.variadic.is_some() {
+            params.push("...".to_string());
         }
 
         let wh = self.fmt_where(&sig.generics);
@@ -607,6 +754,30 @@ impl RustToRSharp {
         self.declared_in_fn = prev_declared;
         self.pop_scope();
         Ok(())
+    }
+
+    fn fmt_typed_pat(&mut self, pat: &Pat, ty: &Type) -> Result<String> {
+        match (pat, ty) {
+            (Pat::Tuple(pt), Type::Tuple(tt)) if pt.elems.len() == tt.elems.len() => {
+                let mut parts = Vec::new();
+                for (p, t) in pt.elems.iter().zip(tt.elems.iter()) {
+                    parts.push(self.fmt_typed_pat(p, t)?);
+                }
+                Ok(format!("({})", parts.join(", ")))
+            }
+            (Pat::Ident(pi), _) => {
+                let ty_s = self.fmt_type(ty);
+                let mk = if pi.mutability.is_some() { "mut " } else { "" };
+                self.bind_var(&pi.ident.to_string(), ty_s.clone());
+                Ok(format!(
+                    "{}{} {}",
+                    mk,
+                    ty_s,
+                    escape_ident(&pi.ident.to_string())
+                ))
+            }
+            _ => self.fmt_pat(pat, None),
+        }
     }
 
     fn emit_block_stmts(&mut self, block: &Block, tail_returns: bool) -> Result<()> {
@@ -647,7 +818,11 @@ impl RustToRSharp {
     }
 
     fn emit_local(&mut self, local: &Local) -> Result<()> {
-        // Handle `let Pat = expr else { ... };` -> `require (expr is Pat) else { ... }`
+        for a in &local.attrs {
+            self.emit_attr(a, false);
+        }
+
+        // `let Pat = expr else { ... };` -> `require (expr is Pat) else { ... }`
         if let Some(init) = &local.init
             && let Some((_, diverge)) = &init.diverge
         {
@@ -666,7 +841,6 @@ impl RustToRSharp {
             return Ok(());
         }
 
-        // Discard `let _ = expr;`
         if matches!(local.pat, Pat::Wild(_))
             && let Some(init) = &local.init
         {
@@ -675,11 +849,21 @@ impl RustToRSharp {
             return Ok(());
         }
 
-        // Unwrap explicit type annotation if present: `let x: T = ...;`
         let (inner_pat, explicit_ty) = match &local.pat {
             Pat::Type(pt) => (pt.pat.as_ref(), Some(pt.ty.as_ref())),
             other => (other, None),
         };
+
+        // Struct / Slice destructuring `let Point { x, y } = pt;` / `let [a, b] = arr;`
+        if matches!(inner_pat, Pat::Struct(_) | Pat::Slice(_)) {
+            let pat_s = self.fmt_pat(inner_pat, None)?;
+            let rhs = match &local.init {
+                Some(init) => self.fmt_expr(&init.expr)?,
+                None => return Err(RSharpError::from_rust("Destructuring without initializer")),
+            };
+            self.line(&format!("{} = {};", pat_s, rhs));
+            return Ok(());
+        }
 
         // Tuple destructuring `let (a, b): (i32, i32) = pair;`
         if let Pat::Tuple(ptup) = inner_pat {
@@ -940,6 +1124,9 @@ impl RustToRSharp {
         self.line(&format!("match ({}) {{", scr));
         self.indent += 1;
         for arm in &em.arms {
+            for a in &arm.attrs {
+                self.emit_attr(a, false);
+            }
             let pat = self.fmt_pat(&arm.pat, None)?;
             let guard = match &arm.guard {
                 Some((_, ge)) => format!(" when {}", self.fmt_expr(ge)?),
@@ -969,12 +1156,18 @@ impl RustToRSharp {
     }
 
     fn fmt_condition(&mut self, expr: &Expr) -> Result<String> {
-        if let Expr::Let(el) = expr {
-            let rhs = self.fmt_expr(&el.expr)?;
-            let pat = self.fmt_pat(&el.pat, None)?;
-            Ok(format!("{} is {}", rhs, pat))
-        } else {
-            self.fmt_expr(expr)
+        match expr {
+            Expr::Let(el) => {
+                let rhs = self.fmt_expr(&el.expr)?;
+                let pat = self.fmt_pat(&el.pat, None)?;
+                Ok(format!("{} is {}", rhs, pat))
+            }
+            Expr::Binary(eb) if matches!(eb.op, BinOp::And(_)) => {
+                let l = self.fmt_condition(&eb.left)?;
+                let r = self.fmt_condition(&eb.right)?;
+                Ok(format!("{} && {}", l, r))
+            }
+            other => self.fmt_expr(other),
         }
     }
 
@@ -1008,6 +1201,8 @@ impl RustToRSharp {
                 format!("({})", es.join(", "))
             }
             Type::Never(_) => "never".to_string(),
+            Type::Infer(_) => "_".to_string(),
+            Type::Paren(p) => format!("({})", self.fmt_type(&p.elem)),
             Type::Reference(r) => {
                 let kw = if r.mutability.is_some() {
                     "write"
@@ -1048,16 +1243,42 @@ impl RustToRSharp {
                 format!("impl {}", bs.join(" + "))
             }
             Type::BareFn(bf) => {
+                let mut prefix = String::new();
+                if let Some(lts) = &bf.lifetimes {
+                    let ls: Vec<String> = lts
+                        .lifetimes
+                        .iter()
+                        .filter_map(|gp| match gp {
+                            GenericParam::Lifetime(l) => Some(format!("life {}", l.lifetime.ident)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !ls.is_empty() {
+                        prefix.push_str(&format!("forall<{}> ", ls.join(", ")));
+                    }
+                }
+                if bf.unsafety.is_some() {
+                    prefix.push_str("unsafe ");
+                }
+                if let Some(abi) = &bf.abi {
+                    let name = abi
+                        .name
+                        .as_ref()
+                        .map(|s| s.value())
+                        .unwrap_or_else(|| "C".to_string());
+                    prefix.push_str(&format!("extern \"{}\" ", name));
+                }
                 let ps: Vec<String> = bf.inputs.iter().map(|i| self.fmt_type(&i.ty)).collect();
                 let ret = self.fmt_return_type(&bf.output, false);
-                format!("({}) -> {}", ps.join(", "), ret)
+                format!("{}({}) -> {}", prefix, ps.join(", "), ret)
             }
             Type::Path(tp) => {
-                // Detect `Box<dyn Any>` -> `dynamic`
+                if let Some(qself) = &tp.qself {
+                    return self.fmt_qself_path(qself, &tp.path);
+                }
                 if is_boxed_any(&tp.path) {
                     return "dynamic".to_string();
                 }
-                // Detect `Option<T>` -> `T?` for simple inner types
                 if let Some(inner) = extract_option_inner(&tp.path) {
                     let inner_s = self.fmt_type(inner);
                     if !inner_s.starts_with("read ")
@@ -1072,6 +1293,26 @@ impl RustToRSharp {
             }
             other => other.to_token_stream().to_string(),
         }
+    }
+
+    fn fmt_qself_path(&self, qself: &syn::QSelf, path: &Path) -> String {
+        let self_ty = self.fmt_type(&qself.ty);
+        let trait_segs: Vec<_> = path.segments.iter().take(qself.position).cloned().collect();
+        let rest_segs: Vec<_> = path.segments.iter().skip(qself.position).cloned().collect();
+        let trait_path = Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::from_iter(trait_segs),
+        };
+        let rest_path = Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::from_iter(rest_segs),
+        };
+        format!(
+            "({} as {}).{}",
+            self_ty,
+            self.fmt_path(&trait_path),
+            self.fmt_path(&rest_path)
+        )
     }
 
     fn fmt_path(&self, path: &Path) -> String {
@@ -1123,15 +1364,22 @@ impl RustToRSharp {
                     parts.push(format!("life {}", lt.lifetime.ident));
                 }
                 GenericParam::Type(tp) => {
-                    if tp.bounds.is_empty() {
-                        parts.push(tp.ident.to_string());
-                    } else {
+                    let mut s = tp.ident.to_string();
+                    if !tp.bounds.is_empty() {
                         let bs: Vec<String> = tp.bounds.iter().map(|b| self.fmt_bound(b)).collect();
-                        parts.push(format!("{} : {}", tp.ident, bs.join(" + ")));
+                        s.push_str(&format!(" : {}", bs.join(" + ")));
                     }
+                    if let Some(def) = &tp.default {
+                        s.push_str(&format!(" = {}", self.fmt_type(def)));
+                    }
+                    parts.push(s);
                 }
                 GenericParam::Const(cp) => {
-                    parts.push(format!("const {} {}", self.fmt_type(&cp.ty), cp.ident));
+                    let mut s = format!("const {} {}", self.fmt_type(&cp.ty), cp.ident);
+                    if let Some(def) = &cp.default {
+                        s.push_str(&format!(" = {}", def.to_token_stream()));
+                    }
+                    parts.push(s);
                 }
             }
         }
@@ -1149,9 +1397,30 @@ impl RustToRSharp {
         for p in &wc.predicates {
             match p {
                 WherePredicate::Type(pt) => {
+                    let forall = match &pt.lifetimes {
+                        Some(bl) => {
+                            let ls: Vec<String> = bl
+                                .lifetimes
+                                .iter()
+                                .filter_map(|gp| match gp {
+                                    GenericParam::Lifetime(l) => {
+                                        Some(format!("life {}", l.lifetime.ident))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            if ls.is_empty() {
+                                String::new()
+                            } else {
+                                format!("forall<{}> ", ls.join(", "))
+                            }
+                        }
+                        None => String::new(),
+                    };
                     let bs: Vec<String> = pt.bounds.iter().map(|b| self.fmt_bound(b)).collect();
                     preds.push(format!(
-                        "{} : {}",
+                        "{}{} : {}",
+                        forall,
                         self.fmt_type(&pt.bounded_ty),
                         bs.join(", ")
                     ));
@@ -1168,13 +1437,45 @@ impl RustToRSharp {
 
     fn fmt_bound(&self, b: &TypeParamBound) -> String {
         match b {
-            TypeParamBound::Trait(tb) => self.fmt_path(&tb.path),
+            TypeParamBound::Trait(tb) => {
+                let mut out = String::new();
+                if matches!(tb.modifier, TraitBoundModifier::Maybe(_)) {
+                    out.push_str("maybe ");
+                }
+                if let Some(bl) = &tb.lifetimes {
+                    let ls: Vec<String> = bl
+                        .lifetimes
+                        .iter()
+                        .filter_map(|gp| match gp {
+                            GenericParam::Lifetime(l) => Some(format!("life {}", l.lifetime.ident)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !ls.is_empty() {
+                        out.push_str(&format!("forall<{}> ", ls.join(", ")));
+                    }
+                }
+                out.push_str(&self.fmt_path(&tb.path));
+                out
+            }
             TypeParamBound::Lifetime(lt) => {
                 if lt.ident == "static" {
                     "static".to_string()
                 } else {
                     format!("life {}", lt.ident)
                 }
+            }
+            TypeParamBound::PreciseCapture(pc) => {
+                let args: Vec<String> = pc
+                    .params
+                    .iter()
+                    .map(|p| match p {
+                        syn::CapturedParam::Lifetime(l) => format!("life {}", l.ident),
+                        syn::CapturedParam::Ident(id) => id.to_string(),
+                        other => other.to_token_stream().to_string(),
+                    })
+                    .collect();
+                format!("capture<{}>", args.join(", "))
             }
             other => other.to_token_stream().to_string(),
         }
@@ -1185,7 +1486,16 @@ impl RustToRSharp {
     fn fmt_pat(&mut self, pat: &Pat, ty_hint: Option<&str>) -> Result<String> {
         Ok(match pat {
             Pat::Wild(_) => "_".to_string(),
-            Pat::Lit(l) => l.lit.to_token_stream().to_string(),
+            Pat::Rest(_) => "..".to_string(),
+            Pat::Lit(l) => fmt_syn_lit(&l.lit),
+            Pat::Const(pc) => {
+                let inner = single_tail_expr(&pc.block)
+                    .map(|e| self.fmt_expr(e))
+                    .transpose()?
+                    .unwrap_or_else(|| pc.block.to_token_stream().to_string());
+                format!("const({})", inner)
+            }
+            Pat::Reference(pr) => format!("deref {}", self.fmt_pat(&pr.pat, None)?),
             Pat::Range(r) => {
                 let s = r
                     .start
@@ -1207,6 +1517,24 @@ impl RustToRSharp {
             }
             Pat::Ident(pi) => {
                 let name = escape_ident(&pi.ident.to_string());
+                if let Some((_, sub)) = &pi.subpat {
+                    if matches!(sub.as_ref(), Pat::Rest(_)) {
+                        return Ok(format!(".. {}", name));
+                    }
+                    let sub_s = self.fmt_pat(sub, None)?;
+                    let ty = ty_hint.unwrap_or("int");
+                    let mk = if pi.mutability.is_some() { "mut " } else { "" };
+                    return Ok(format!("{} as {}{} {}", sub_s, mk, ty, name));
+                }
+                if pi.by_ref.is_some() {
+                    let mode = if pi.mutability.is_some() {
+                        "write"
+                    } else {
+                        "read"
+                    };
+                    let ty = ty_hint.unwrap_or("_");
+                    return Ok(format!("borrow {} {} {}", mode, ty, name));
+                }
                 let mk = if pi.mutability.is_some() { "mut " } else { "" };
                 if let Some(ty) = ty_hint {
                     self.bind_var(&pi.ident.to_string(), ty.to_string());
@@ -1218,6 +1546,11 @@ impl RustToRSharp {
             Pat::Tuple(pt) => {
                 let ps: Result<Vec<_>> = pt.elems.iter().map(|p| self.fmt_pat(p, None)).collect();
                 format!("({})", ps?.join(", "))
+            }
+            Pat::Slice(ps) => {
+                let elems: Result<Vec<_>> =
+                    ps.elems.iter().map(|p| self.fmt_pat(p, None)).collect();
+                format!("[{}]", elems?.join(", "))
             }
             Pat::TupleStruct(pts) => {
                 let fs: Result<Vec<_>> = pts.elems.iter().map(|p| self.fmt_pat(p, None)).collect();
@@ -1252,8 +1585,11 @@ impl RustToRSharp {
 
     fn fmt_expr(&mut self, expr: &Expr) -> Result<String> {
         Ok(match expr {
-            Expr::Lit(l) => l.lit.to_token_stream().to_string(),
+            Expr::Lit(l) => fmt_syn_lit(&l.lit),
             Expr::Path(ep) => {
+                if let Some(qself) = &ep.qself {
+                    return Ok(self.fmt_qself_path(qself, &ep.path));
+                }
                 if ep.path.is_ident("self") {
                     "this".to_string()
                 } else {
@@ -1277,6 +1613,24 @@ impl RustToRSharp {
                     "read"
                 };
                 format!("{} {}", kw, self.fmt_expr(&er.expr)?)
+            }
+            Expr::RawAddr(er) => {
+                let kw = match er.mutability {
+                    syn::PointerMutability::Mut(_) => "write ptr",
+                    syn::PointerMutability::Const(_) => "read ptr",
+                };
+                format!("{} {}", kw, self.fmt_expr(&er.expr)?)
+            }
+            Expr::Const(ec) => {
+                if let Some(single) = single_tail_expr(&ec.block) {
+                    format!("const({})", self.fmt_expr(single)?)
+                } else {
+                    let mut sub = RustToRSharp::new(self.raw_source.clone(), self.options);
+                    sub.indent = self.indent + 1;
+                    sub.scopes = self.scopes.clone();
+                    sub.emit_block_stmts(&ec.block, true)?;
+                    format!("const {{\n{}}}", sub.out)
+                }
             }
             Expr::Binary(eb) => {
                 let op = fmt_bin_op(&eb.op);
@@ -1388,7 +1742,11 @@ impl RustToRSharp {
                         Member::Named(id) => escape_ident(&id.to_string()),
                         Member::Unnamed(idx) => idx.index.to_string(),
                     };
-                    fs.push(format!("{} = {}", fname, self.fmt_expr(&f.expr)?));
+                    if f.colon_token.is_none() {
+                        fs.push(fname);
+                    } else {
+                        fs.push(format!("{} = {}", fname, self.fmt_expr(&f.expr)?));
+                    }
                 }
                 if let Some(rest) = &es.rest {
                     format!("{} with {{ {} }}", self.fmt_expr(rest)?, fs.join(", "))
@@ -1397,7 +1755,6 @@ impl RustToRSharp {
                 }
             }
             Expr::If(eif) => {
-                // Single-expression if/else converts cleanly to C# ternary `cond ? a : b`
                 if let (Some(then_e), Some((_, else_box))) =
                     (single_tail_expr(&eif.then_branch), &eif.else_branch)
                     && let Expr::Block(eb) = else_box.as_ref()
@@ -1408,7 +1765,24 @@ impl RustToRSharp {
                     let e = self.fmt_expr(else_e)?;
                     return Ok(format!("({} ? {} : {})", c, t, e));
                 }
-                format!("rust {{ {} }}", eif.to_token_stream())
+                // Convert multi-statement `if` expression into a labeled value block without `rust { ... }`!
+                let mut sub = RustToRSharp::new(self.raw_source.clone(), self.options);
+                sub.indent = self.indent + 1;
+                sub.scopes = self.scopes.clone();
+                sub.emit_if_break(eif, "__if_val", false)?;
+                format!("__if_val: {{\n{}}}", sub.out)
+            }
+            Expr::Loop(el) => {
+                let lbl = el
+                    .label
+                    .as_ref()
+                    .map(|l| format!("{}: ", l.name.ident))
+                    .unwrap_or_default();
+                let mut sub = RustToRSharp::new(self.raw_source.clone(), self.options);
+                sub.indent = self.indent + 1;
+                sub.scopes = self.scopes.clone();
+                sub.emit_block_stmts(&el.body, false)?;
+                format!("{}loop {{\n{}}}", lbl, sub.out)
             }
             Expr::Match(em) => {
                 let scr = self.fmt_expr(&em.expr)?;
@@ -1425,7 +1799,14 @@ impl RustToRSharp {
                 format!("match ({}) {{ {} }}", scr, arms.join(", "))
             }
             Expr::Closure(ec) => {
-                let mv = if ec.capture.is_some() { "take " } else { "" };
+                let mut prefix = String::new();
+                let is_async = ec.asyncness.is_some();
+                if is_async {
+                    prefix.push_str("async ");
+                }
+                if ec.capture.is_some() {
+                    prefix.push_str("take ");
+                }
                 let mut ps = Vec::new();
                 for inp in &ec.inputs {
                     if let Pat::Type(pt) = inp {
@@ -1453,7 +1834,14 @@ impl RustToRSharp {
                 }
                 let ret = match &ec.output {
                     ReturnType::Default => String::new(),
-                    ReturnType::Type(_, ty) => format!(" : {}", self.fmt_type(ty)),
+                    ReturnType::Type(_, ty) => {
+                        let inner = self.fmt_type(ty);
+                        if is_async {
+                            format!(" : Task<{}>", inner)
+                        } else {
+                            format!(" : {}", inner)
+                        }
+                    }
                 };
                 match ec.body.as_ref() {
                     Expr::Block(eb) => {
@@ -1461,11 +1849,11 @@ impl RustToRSharp {
                         sub.indent = self.indent + 1;
                         sub.scopes = self.scopes.clone();
                         sub.emit_block_stmts(&eb.block, !matches!(ec.output, ReturnType::Default))?;
-                        format!("{}({}){} => {{\n{}}}", mv, ps.join(", "), ret, sub.out)
+                        format!("{}({}){} => {{\n{}}}", prefix, ps.join(", "), ret, sub.out)
                     }
                     other => format!(
                         "{}({}){} => {}",
-                        mv,
+                        prefix,
                         ps.join(", "),
                         ret,
                         self.fmt_expr(other)?
@@ -1482,7 +1870,11 @@ impl RustToRSharp {
                 } else if let Some(single) = single_tail_expr(&eb.block) {
                     self.fmt_expr(single)?
                 } else {
-                    format!("rust {{ {} }}", eb.to_token_stream())
+                    let mut sub = RustToRSharp::new(self.raw_source.clone(), self.options);
+                    sub.indent = self.indent + 1;
+                    sub.scopes = self.scopes.clone();
+                    sub.emit_block_break(&eb.block, "__blk_val")?;
+                    format!("__blk_val: {{\n{}}}", sub.out)
                 }
             }
             Expr::Async(ea) => {
@@ -1505,6 +1897,61 @@ impl RustToRSharp {
         })
     }
 
+    fn emit_if_break(&mut self, eif: &syn::ExprIf, label: &str, is_else_if: bool) -> Result<()> {
+        let kw = if is_else_if { "else if" } else { "if" };
+        let cond = self.fmt_condition(&eif.cond)?;
+        self.line(&format!("{} ({}) {{", kw, cond));
+        self.indent += 1;
+        self.emit_block_break(&eif.then_branch, label)?;
+        self.indent -= 1;
+        if let Some((_, else_expr)) = &eif.else_branch {
+            match else_expr.as_ref() {
+                Expr::If(next) => {
+                    self.line("}");
+                    self.emit_if_break(next, label, true)?;
+                }
+                Expr::Block(eb) => {
+                    self.line("} else {");
+                    self.indent += 1;
+                    self.emit_block_break(&eb.block, label)?;
+                    self.indent -= 1;
+                    self.line("}");
+                }
+                other => {
+                    self.line("} else {");
+                    self.indent += 1;
+                    let s = self.fmt_expr(other)?;
+                    self.line(&format!("break {} {};", label, s));
+                    self.indent -= 1;
+                    self.line("}");
+                }
+            }
+        } else {
+            self.line("}");
+        }
+        Ok(())
+    }
+
+    fn emit_block_break(&mut self, block: &Block, label: &str) -> Result<()> {
+        self.push_scope();
+        let len = block.stmts.len();
+        for (idx, stmt) in block.stmts.iter().enumerate() {
+            let is_last = idx + 1 == len;
+            match stmt {
+                Stmt::Local(local) => self.emit_local(local)?,
+                Stmt::Item(item) => self.emit_item(item)?,
+                Stmt::Expr(expr, None) if is_last => {
+                    let s = self.fmt_expr(expr)?;
+                    self.line(&format!("break {} {};", label, s));
+                }
+                Stmt::Expr(expr, _) => self.emit_expr_stmt(expr)?,
+                Stmt::Macro(sm) => self.line(&format!("{};", fmt_syn_macro(&sm.mac))),
+            }
+        }
+        self.pop_scope();
+        Ok(())
+    }
+
     // ==================== LOCAL TYPE INFERENCE ====================
 
     fn infer_expr_type(&self, expr: &Expr) -> Option<String> {
@@ -1519,6 +1966,9 @@ impl RustToRSharp {
                         .to_string(),
                 ),
                 syn::Lit::Str(_) => Some("read str".to_string()),
+                syn::Lit::Byte(_) => Some("byte".to_string()),
+                syn::Lit::ByteStr(bs) => Some(format!("read byte[{}]", bs.value().len())),
+                syn::Lit::CStr(_) => Some("read<static> core.ffi.CStr".to_string()),
                 syn::Lit::Char(_) => Some("char".to_string()),
                 syn::Lit::Bool(_) => Some("bool".to_string()),
                 _ => None,
@@ -1534,9 +1984,17 @@ impl RustToRSharp {
                 };
                 Some(format!("{} {}", kw, inner))
             }
+            Expr::RawAddr(er) => {
+                let inner = self.infer_expr_type(&er.expr)?;
+                let kw = match er.mutability {
+                    syn::PointerMutability::Mut(_) => "write ptr",
+                    syn::PointerMutability::Const(_) => "read ptr",
+                };
+                Some(format!("{}<{}>", kw, inner))
+            }
+            Expr::Const(ec) => single_tail_expr(&ec.block).and_then(|e| self.infer_expr_type(e)),
             Expr::Unary(eu) => match eu.op {
-                UnOp::Not(_) => self.infer_expr_type(&eu.expr),
-                UnOp::Neg(_) => self.infer_expr_type(&eu.expr),
+                UnOp::Not(_) | UnOp::Neg(_) => self.infer_expr_type(&eu.expr),
                 UnOp::Deref(_) => {
                     let inner = self.infer_expr_type(&eu.expr)?;
                     inner
@@ -1680,7 +2138,15 @@ impl RustToRSharp {
                         .infer_expr_type(&ec.body)
                         .unwrap_or_else(|| "void".to_string()),
                 };
-                Some(format!("({}) -> {}", param_tys.join(", "), ret))
+                if ec.asyncness.is_some() {
+                    Some(format!(
+                        "impl std.ops.AsyncFn({}) -> {}",
+                        param_tys.join(", "),
+                        ret
+                    ))
+                } else {
+                    Some(format!("({}) -> {}", param_tys.join(", "), ret))
+                }
             }
             _ => None,
         }
@@ -1719,6 +2185,139 @@ impl RustToRSharp {
                 }
                 extract_collection_elem(&base)
             }
+        }
+    }
+}
+
+fn format_meta_attr(meta: &syn::Meta, prefix: &str, safety: &str) -> String {
+    match meta {
+        syn::Meta::Path(p) => {
+            let path_str = path_to_rsharp(p);
+            let name = map_rust_attr_name(&path_str);
+            format!("[{}{}{}]", prefix, safety, name)
+        }
+        syn::Meta::List(ml) => {
+            let path_str = path_to_rsharp(&ml.path);
+            let name = map_rust_attr_name(&path_str);
+            let raw_args = ml.tokens.to_string();
+            let args = if name == "Inline" {
+                match raw_args.trim() {
+                    "always" => "Always".to_string(),
+                    "never" => "Never".to_string(),
+                    other => other.to_string(),
+                }
+            } else {
+                raw_args
+            };
+            format!("[{}{}{}({})]", prefix, safety, name, args)
+        }
+        syn::Meta::NameValue(nv) => {
+            let path_str = path_to_rsharp(&nv.path);
+            let name = map_rust_attr_name(&path_str);
+            let val = nv.value.to_token_stream().to_string();
+            format!("[{}{}{} = {}]", prefix, safety, name, val)
+        }
+    }
+}
+
+fn fmt_syn_lit(lit: &syn::Lit) -> String {
+    match lit {
+        syn::Lit::Str(ls) => {
+            let raw = ls.to_token_stream().to_string();
+            if raw.starts_with('r') {
+                format_rsharp_raw_str(&ls.value(), "")
+            } else {
+                raw
+            }
+        }
+        syn::Lit::Byte(lb) => lb.to_token_stream().to_string(),
+        syn::Lit::ByteStr(lbs) => {
+            let raw = lbs.to_token_stream().to_string();
+            if let Ok(s) = std::str::from_utf8(&lbs.value()) {
+                if raw.starts_with("br") {
+                    format_rsharp_raw_str(s, "u8")
+                } else {
+                    let escaped = s.escape_default().to_string();
+                    format!("\"{}\"u8", escaped)
+                }
+            } else {
+                raw
+            }
+        }
+        syn::Lit::CStr(lcs) => {
+            let raw = lcs.to_token_stream().to_string();
+            if let Ok(s) = lcs.value().to_str() {
+                if raw.starts_with("cr") {
+                    format!("c{}", format_rsharp_raw_str(s, ""))
+                } else {
+                    let escaped = s.escape_default().to_string();
+                    format!("c\"{}\"", escaped)
+                }
+            } else {
+                raw
+            }
+        }
+        other => other.to_token_stream().to_string(),
+    }
+}
+
+fn format_rsharp_raw_str(value: &str, suffix: &str) -> String {
+    if !value.contains('"') {
+        format!("@\"{}\"{}", value, suffix)
+    } else {
+        format!("\"\"\"{}\"\"\"{}", value, suffix)
+    }
+}
+
+fn fmt_use_tree(tree: &syn::UseTree) -> String {
+    fmt_use_tree_with_prefix(tree, Vec::new())
+}
+
+fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> String {
+    match tree {
+        syn::UseTree::Path(p) => {
+            let seg = if p.ident == "self" {
+                "this".to_string()
+            } else {
+                p.ident.to_string()
+            };
+            prefix.push(seg);
+            fmt_use_tree_with_prefix(&p.tree, prefix)
+        }
+        syn::UseTree::Name(n) => {
+            let seg = if n.ident == "self" {
+                "this".to_string()
+            } else {
+                map_rust_std_alias(&n.ident.to_string())
+            };
+            prefix.push(seg);
+            prefix.join(".")
+        }
+        syn::UseTree::Rename(r) => {
+            let seg = if r.ident == "self" {
+                "this".to_string()
+            } else {
+                map_rust_std_alias(&r.ident.to_string())
+            };
+            prefix.push(seg);
+            format!(
+                "{} = {}",
+                escape_ident(&r.rename.to_string()),
+                prefix.join(".")
+            )
+        }
+        syn::UseTree::Glob(_) => {
+            prefix.push("*".to_string());
+            prefix.join(".")
+        }
+        syn::UseTree::Group(g) => {
+            let subs: Vec<String> = g
+                .items
+                .iter()
+                .map(|sub| fmt_use_tree_with_prefix(sub, Vec::new()))
+                .collect();
+            prefix.push(format!("{{{}}}", subs.join(", ")));
+            prefix.join(".")
         }
     }
 }
@@ -1780,47 +2379,21 @@ fn extract_param_pat(pat: &Pat) -> (bool, String) {
     }
 }
 
-fn flatten_use_tree(tree: &syn::UseTree, mut prefix: Vec<String>, out: &mut Vec<String>) {
-    match tree {
-        syn::UseTree::Path(p) => {
-            prefix.push(p.ident.to_string());
-            flatten_use_tree(&p.tree, prefix, out);
-        }
-        syn::UseTree::Name(n) => {
-            prefix.push(map_rust_std_alias(&n.ident.to_string()));
-            out.push(prefix.join("."));
-        }
-        syn::UseTree::Rename(r) => {
-            prefix.push(map_rust_std_alias(&r.ident.to_string()));
-            out.push(format!(
-                "{} = {}",
-                escape_ident(&r.rename.to_string()),
-                prefix.join(".")
-            ));
-        }
-        syn::UseTree::Glob(_) => {
-            prefix.push("*".to_string());
-            out.push(prefix.join("."));
-        }
-        syn::UseTree::Group(g) => {
-            for item in &g.items {
-                flatten_use_tree(item, prefix.clone(), out);
-            }
-        }
-    }
-}
-
-fn fmt_vis(vis: &Visibility) -> &'static str {
+fn fmt_vis(vis: &Visibility) -> String {
     match vis {
-        Visibility::Public(_) => "public ",
+        Visibility::Public(_) => "public ".to_string(),
         Visibility::Restricted(r) => {
             if r.path.is_ident("crate") {
-                "internal "
+                "internal ".to_string()
+            } else if r.path.is_ident("super") {
+                "public(super) ".to_string()
+            } else if r.path.is_ident("self") {
+                "public(this) ".to_string()
             } else {
-                "public(super) "
+                format!("public(in {}) ", path_to_rsharp(&r.path))
             }
         }
-        Visibility::Inherited => "",
+        Visibility::Inherited => String::new(),
     }
 }
 
@@ -1946,6 +2519,8 @@ fn map_rust_attr_name(name: &str) -> &str {
         "deny" => "Deny",
         "repr" => "Repr",
         "no_mangle" => "NoMangle",
+        "export_name" => "ExportName",
+        "link_section" => "LinkSection",
         "must_use" => "MustUse",
         "deprecated" => "Deprecated",
         "should_panic" => "ShouldPanic",

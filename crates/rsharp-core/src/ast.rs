@@ -5,21 +5,24 @@ pub struct FileAst {
     pub items: Vec<Item>,
 }
 
-/// `[Attr]` or `[module: Attr]`.
+/// `[Attr]`, `[unsafe Attr]`, or `[module: Attr]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub inner: bool,
+    pub is_unsafe: bool,
     pub name: String,
-    /// Optional raw argument string inside parentheses, e.g. `Debug, Clone`.
+    /// Optional raw argument string inside parentheses or `= value`.
     pub args: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Visibility {
     Private,
     Public,
     Internal,
     Super,
+    This,
+    InPath(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +37,7 @@ pub struct Item {
 pub enum ItemKind {
     Namespace(NamespaceDecl),
     Using(UsingDecl),
+    ExternCrate(ExternCrateDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
     Union(UnionDecl),
@@ -58,8 +62,25 @@ pub struct NamespaceDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsingDecl {
-    pub path: Vec<String>,
-    pub wildcard: bool,
+    pub tree: UsingTree,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsingTree {
+    Path {
+        prefix: Vec<String>,
+        wildcard: bool,
+        alias: Option<String>,
+    },
+    Group {
+        prefix: Vec<String>,
+        items: Vec<UsingTree>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternCrateDecl {
+    pub name: String,
     pub alias: Option<String>,
 }
 
@@ -74,10 +95,12 @@ pub enum GenericParamKind {
     Type {
         name: String,
         bounds: Vec<TypeBound>,
+        default: Option<Type>,
     },
     Const {
         ty: Type,
         name: String,
+        default: Option<Expr>,
     },
 }
 
@@ -88,14 +111,33 @@ pub struct WhereClause {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WherePredicate {
-    Type { ty: Type, bounds: Vec<TypeBound> },
-    Lifetime { life: String, outlives: Vec<String> },
+    Type {
+        lifetimes: Vec<String>,
+        ty: Type,
+        bounds: Vec<TypeBound>,
+    },
+    Lifetime {
+        life: String,
+        outlives: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeBound {
     Trait(TypePath),
+    Relaxed(TypePath),
+    Forall {
+        lifetimes: Vec<String>,
+        trait_path: TypePath,
+    },
     Lifetime(String),
+    PreciseCapture(Vec<CaptureArg>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CaptureArg {
+    Lifetime(String),
+    TypeOrConst(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,7 +229,9 @@ pub enum TraitItem {
     AssocType {
         attrs: Vec<Attribute>,
         name: String,
+        generics: Vec<GenericParam>,
         bounds: Vec<TypeBound>,
+        where_clause: Option<WhereClause>,
         default: Option<Type>,
     },
     AssocConst {
@@ -214,6 +258,8 @@ pub enum ImplItem {
     AssocType {
         attrs: Vec<Attribute>,
         name: String,
+        generics: Vec<GenericParam>,
+        where_clause: Option<WhereClause>,
         ty: Type,
     },
     AssocConst(Item),
@@ -223,6 +269,7 @@ pub enum ImplItem {
 pub struct AliasDecl {
     pub name: String,
     pub generics: Vec<GenericParam>,
+    pub where_clause: Option<WhereClause>,
     pub target: Type,
 }
 
@@ -235,14 +282,18 @@ pub struct ConstDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticDecl {
+    pub is_safe: bool,
+    pub is_unsafe: bool,
     pub is_mut: bool,
     pub ty: Type,
     pub name: String,
-    pub value: Expr,
+    /// `None` only inside `extern` blocks.
+    pub value: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternBlock {
+    pub is_unsafe: bool,
     pub abi: Option<String>,
     pub items: Vec<Item>,
 }
@@ -271,6 +322,7 @@ pub enum MacroDelim {
 pub struct FnDecl {
     pub is_const: bool,
     pub is_async: bool,
+    pub is_safe: bool,
     pub is_unsafe: bool,
     pub is_static: bool,
     pub extern_abi: Option<String>,
@@ -278,6 +330,7 @@ pub struct FnDecl {
     pub name: String,
     pub generics: Vec<GenericParam>,
     pub params: Vec<Param>,
+    pub is_variadic: bool,
     pub where_clause: Option<WhereClause>,
     pub body: Option<Block>,
 }
@@ -286,9 +339,14 @@ pub struct FnDecl {
 pub enum Param {
     Receiver(ReceiverKind),
     Normal {
+        attrs: Vec<Attribute>,
         is_mut: bool,
         ty: Type,
         name: String,
+    },
+    Pattern {
+        attrs: Vec<Attribute>,
+        pat: Pattern,
     },
 }
 
@@ -313,7 +371,17 @@ pub struct TypePath {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypePathSegment {
     pub name: String,
-    pub args: Vec<GenericArg>,
+    pub args: TypePathArgs,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypePathArgs {
+    None,
+    Angle(Vec<GenericArg>),
+    Parenthesized {
+        params: Vec<Type>,
+        ret: Option<Box<Type>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -322,6 +390,7 @@ pub enum GenericArg {
     Type(Type),
     AssocBinding { name: String, ty: Type },
     ConstExpr(Expr),
+    ConstBlock(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -329,7 +398,16 @@ pub enum Type {
     Void,
     Never,
     Dynamic,
+    /// Partial placeholder `_` inside generic arguments or casts (never standalone local variables).
+    Infer,
     Path(TypePath),
+    QualifiedPath {
+        self_ty: Box<Type>,
+        trait_path: TypePath,
+        item: String,
+        args: Vec<GenericArg>,
+    },
+    Grouped(Box<Type>),
     Read {
         life: Option<String>,
         inner: Box<Type>,
@@ -352,6 +430,9 @@ pub enum Type {
     DynTrait(Vec<TypeBound>),
     ImplTrait(Vec<TypeBound>),
     FnPtr {
+        lifetimes: Vec<String>,
+        is_unsafe: bool,
+        extern_abi: Option<String>,
         params: Vec<Type>,
         ret: Box<Type>,
     },
@@ -364,7 +445,22 @@ pub struct TupleTypeElem {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub struct Stmt {
+    pub attrs: Vec<Attribute>,
+    pub kind: StmtKind,
+}
+
+impl Stmt {
+    pub fn plain(kind: StmtKind) -> Self {
+        Self {
+            attrs: Vec::new(),
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StmtKind {
     Local {
         is_shadow: bool,
         is_mut: bool,
@@ -372,8 +468,8 @@ pub enum Stmt {
         name: String,
         init: Option<Expr>,
     },
-    DestructureTuple {
-        bindings: Vec<(bool, Type, String)>,
+    Destructure {
+        pat: Pattern,
         init: Expr,
     },
     Discard(Expr),
@@ -441,6 +537,13 @@ pub enum Condition {
         negated: bool,
         pat: Pattern,
     },
+    LetChain(Vec<ChainItem>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChainItem {
+    IsPattern { expr: Expr, pat: Pattern },
+    Bool(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -451,6 +554,7 @@ pub struct MatchExpr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
+    pub attrs: Vec<Attribute>,
     pub pat: Pattern,
     pub guard: Option<Expr>,
     pub body: MatchArmBody,
@@ -465,20 +569,37 @@ pub enum MatchArmBody {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Wildcard,
+    Rest,
     Lit(Literal),
+    Const(Box<Expr>),
     Range {
-        start: Box<Expr>,
-        end: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
         inclusive: bool,
     },
     /// Typed binding e.g. `int x`, `mut int x`, `read int x`, `write int x`.
     Binding {
         is_mut: bool,
-        ref_mode: Option<RefMode>,
         ty: Option<Type>,
         name: String,
     },
+    /// Explicit borrow-out binding `borrow read string s` (`ref s`) / `borrow write string s` (`ref mut s`).
+    BorrowRef {
+        mode: RefMode,
+        ty: Type,
+        name: String,
+    },
+    /// Reference-stripping pattern `deref int val` (`&val`).
+    DerefPat(Box<Pattern>),
+    /// Subpattern binding `<pat> as <Type> <name>` (`name @ pat`).
+    BindAt {
+        is_mut: bool,
+        ty: Type,
+        name: String,
+        subpat: Box<Pattern>,
+    },
     Tuple(Vec<Pattern>),
+    Slice(Vec<SlicePatElem>),
     TupleStruct {
         path: Vec<String>,
         fields: Vec<Pattern>,
@@ -490,6 +611,17 @@ pub enum Pattern {
     },
     Path(Vec<String>),
     Or(Vec<Pattern>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SlicePatElem {
+    Pat(Pattern),
+    Rest,
+    RestBind {
+        is_mut: bool,
+        ty: Option<Type>,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -511,6 +643,10 @@ pub enum Literal {
     Int(String),
     Float(String),
     Str(String),
+    RawStr(String),
+    Byte(String),
+    ByteStr { value: String, raw: bool },
+    CStr { value: String, raw: bool },
     Char(String),
     Bool(bool),
 }
@@ -524,6 +660,12 @@ pub enum Expr {
     SelfType,
     Path {
         segments: Vec<PathExprSegment>,
+    },
+    QualifiedMember {
+        self_ty: Box<Type>,
+        trait_path: TypePath,
+        member: String,
+        type_args: Vec<GenericArg>,
     },
     Unary {
         op: UnaryOp,
@@ -565,6 +707,8 @@ pub enum Expr {
     Deref(Box<Expr>),
     ReadSlice(Box<Expr>),
     WriteSlice(Box<Expr>),
+    RawReadPtr(Box<Expr>),
+    RawWritePtr(Box<Expr>),
     Range {
         start: Option<Box<Expr>>,
         end: Option<Box<Expr>>,
@@ -596,15 +740,16 @@ pub enum Expr {
     TupleLit(Vec<Expr>),
     StructLit {
         path: Vec<String>,
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Option<Expr>)>,
     },
     StructUpdate {
         base: Box<Expr>,
-        fields: Vec<(String, Expr)>,
+        fields: Vec<(String, Option<Expr>)>,
     },
     Lambda {
+        is_async: bool,
         is_move: bool,
-        params: Vec<(bool, Type, String)>,
+        params: Vec<Param>,
         ret_ty: Option<Type>,
         body: LambdaBody,
     },
@@ -617,6 +762,7 @@ pub enum Expr {
         label: String,
         block: Block,
     },
+    ConstBlock(ConstBody),
     AsyncBlock {
         is_move: bool,
         block: Block,
@@ -629,6 +775,12 @@ pub enum Expr {
         negated: bool,
         pat: Pattern,
     },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstBody {
+    Expr(Box<Expr>),
+    Block(Block),
 }
 
 #[derive(Debug, Clone, PartialEq)]

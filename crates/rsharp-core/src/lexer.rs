@@ -58,6 +58,19 @@ impl<'a> Lexer<'a> {
         Span::new(line, col, start, self.pos)
     }
 
+    fn eat_u8_suffix(&mut self) -> bool {
+        if self.peek() == Some('u')
+            && self.peek_at(1) == Some('8')
+            && !self.peek_at(2).is_some_and(is_ident_continue)
+        {
+            self.bump();
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
     fn tokenize_all(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
         loop {
@@ -170,9 +183,48 @@ impl<'a> Lexer<'a> {
             ));
         }
 
-        // Verbatim identifier: @ident
+        // Byte char literal: b'a'
+        if ch == 'b' && self.peek_at(1) == Some('\'') {
+            self.bump();
+            let c = self.lex_char(line, col, start)?;
+            return Ok(Token::new(
+                TokenKind::ByteLit(c),
+                self.span_from(line, col, start),
+            ));
+        }
+
+        // C-string literal: c"...", c@"...", c"""..."""
+        if ch == 'c'
+            && (self.peek_at(1) == Some('"')
+                || (self.peek_at(1) == Some('@') && self.peek_at(2) == Some('"')))
+        {
+            self.bump(); // 'c'
+            let (value, raw) = if self.peek() == Some('@') {
+                self.bump();
+                (self.lex_verbatim_string(line, col, start)?, true)
+            } else if self.is_triple_quote() {
+                (self.lex_triple_raw_string(line, col, start)?, true)
+            } else {
+                (self.lex_string(line, col, start)?, false)
+            };
+            return Ok(Token::new(
+                TokenKind::CStringLit { value, raw },
+                self.span_from(line, col, start),
+            ));
+        }
+
+        // Verbatim string `@"..."` (`@"..."u8`) or verbatim identifier `@ident`
         if ch == '@' {
             self.bump();
+            if self.peek() == Some('"') {
+                let value = self.lex_verbatim_string(line, col, start)?;
+                let kind = if self.eat_u8_suffix() {
+                    TokenKind::ByteStringLit { value, raw: true }
+                } else {
+                    TokenKind::RawStringLit(value)
+                };
+                return Ok(Token::new(kind, self.span_from(line, col, start)));
+            }
             let id_start = self.pos;
             match self.peek() {
                 Some(c) if is_ident_start(c) => {
@@ -196,7 +248,7 @@ impl<'a> Lexer<'a> {
                 _ => {
                     return Err(RSharpError::lex(
                         self.span_from(line, col, start),
-                        "Expected identifier after '@'",
+                        "Expected identifier or string after '@'",
                     ));
                 }
             }
@@ -240,13 +292,24 @@ impl<'a> Lexer<'a> {
             return self.lex_number(line, col, start);
         }
 
-        // String literal
+        // Triple-quote raw string `"""..."""` (`"""..."""u8`) or standard string `"..."` (`"..."u8`)
         if ch == '"' {
-            let s = self.lex_string(line, col, start)?;
-            return Ok(Token::new(
-                TokenKind::StringLit(s),
-                self.span_from(line, col, start),
-            ));
+            if self.is_triple_quote() {
+                let value = self.lex_triple_raw_string(line, col, start)?;
+                let kind = if self.eat_u8_suffix() {
+                    TokenKind::ByteStringLit { value, raw: true }
+                } else {
+                    TokenKind::RawStringLit(value)
+                };
+                return Ok(Token::new(kind, self.span_from(line, col, start)));
+            }
+            let value = self.lex_string(line, col, start)?;
+            let kind = if self.eat_u8_suffix() {
+                TokenKind::ByteStringLit { value, raw: false }
+            } else {
+                TokenKind::StringLit(value)
+            };
+            return Ok(Token::new(kind, self.span_from(line, col, start)));
         }
 
         // Char literal
@@ -260,6 +323,65 @@ impl<'a> Lexer<'a> {
 
         // Punctuation & operators
         self.lex_punct(line, col, start)
+    }
+
+    fn is_triple_quote(&self) -> bool {
+        self.peek() == Some('"') && self.peek_at(1) == Some('"') && self.peek_at(2) == Some('"')
+    }
+
+    /// C#-style verbatim string `@"..."` where `""` represents a literal `"`.
+    fn lex_verbatim_string(&mut self, line: usize, col: usize, start: usize) -> Result<String> {
+        self.bump(); // opening "
+        let mut out = String::new();
+        while let Some(c) = self.bump() {
+            if c == '"' {
+                if self.peek() == Some('"') {
+                    self.bump();
+                    out.push('"');
+                } else {
+                    return Ok(out);
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        Err(RSharpError::lex(
+            self.span_from(line, col, start),
+            "Unterminated verbatim string literal",
+        ))
+    }
+
+    /// C# 11 raw string literal `"""..."""` (supports 3+ matching quotes).
+    fn lex_triple_raw_string(&mut self, line: usize, col: usize, start: usize) -> Result<String> {
+        let mut quotes = 0usize;
+        while self.peek() == Some('"') {
+            self.bump();
+            quotes += 1;
+        }
+        let mut out = String::new();
+        while !self.is_eof() {
+            if self.peek() == Some('"') {
+                let mut run = 0usize;
+                while self.peek_at(run) == Some('"') {
+                    run += 1;
+                }
+                if run >= quotes {
+                    for _ in 0..(run - quotes) {
+                        self.bump();
+                        out.push('"');
+                    }
+                    for _ in 0..quotes {
+                        self.bump();
+                    }
+                    return Ok(out);
+                }
+            }
+            out.push(self.bump().unwrap());
+        }
+        Err(RSharpError::lex(
+            self.span_from(line, col, start),
+            "Unterminated raw string literal",
+        ))
     }
 
     fn is_followed_by_lbrace(&self) -> bool {
@@ -283,8 +405,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        // Consume opening '{'
-        self.bump();
+        self.bump(); // '{'
         let body_start = self.pos;
         let mut depth = 1usize;
         loop {
@@ -608,7 +729,10 @@ impl<'a> Lexer<'a> {
             '.' => {
                 if self.peek() == Some('.') {
                     self.bump();
-                    if self.peek() == Some('=') {
+                    if self.peek() == Some('.') {
+                        self.bump();
+                        TokenKind::DotDotDot
+                    } else if self.peek() == Some('=') {
                         self.bump();
                         TokenKind::DotDotEq
                     } else {

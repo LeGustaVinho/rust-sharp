@@ -120,7 +120,7 @@ fn test_lexer_literals_operators_comments_and_verbatim_idents() {
 fn test_lexer_error_cases() {
     let bad_inputs = [
         ("/* unterminated", "Unterminated block comment"),
-        ("@123", "Expected identifier after '@'"),
+        ("@123", "Expected identifier or string after '@'"),
         ("\"unterminated", "Unterminated string literal"),
         ("\"bad\\", "Unterminated escape sequence in string literal"),
         ("''", "Empty char literal"),

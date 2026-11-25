@@ -80,7 +80,41 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
                | '(' TypedBinding (',' TypedBinding)* ')' '=' Expr ';'
 ```
 
-## 4. Bidirectional Conversion Rules
+## 4. Rust 2024 Parity Extensions
+
+| Rust 2024 Construct | R# Syntax |
+| :--- | :--- |
+| `r"..."` / `r#"..."#` | `@"..."` / `"""..."""` |
+| `b'a'`, `b"hi"`, `br#"hi"#` | `b'a'`, `"hi"u8`, `@"hi"u8` / `"""hi"""u8` |
+| `c"hi"`, `cr#"hi"#` | `c"hi"`, `c@"hi"` / `c"""hi"""` |
+| `if let Some(a) = x && let Some(b) = y && a > b` | `if (x is Some(int a) && y is Some(int b) && a > b)` |
+| `&raw const x` / `&raw mut x` | `read ptr x` / `write ptr x` |
+| `const { expr }` / `const { ... }` | `const(expr)` / `const { ... return expr; }` |
+| `async \|x: i32\| -> i32 { ... }` | `async (int x) : Task<int> => ...` |
+| `<Dog as Animal>::speak(&d)` / `<I as Iterator>::Item` | `(Dog as Animal).speak(read d)` / `(I as Iterator).Item` |
+| `Point { x, y }` | `new Point { x, y }` |
+| `'a: loop { break 'a 42; }` | `a: loop { break a 42; }` |
+| `[]`, `[first, mid @ .., last]` | `[]`, `[int first, .. read slice<int> mid, int last]` |
+| `n @ 1..=5` | `1..=5 as int n` |
+| `Some(ref s)` / `Some(ref mut s)` / `&val` | `Some(borrow read string s)` / `Some(borrow write string s)` / `deref int val` |
+| `..=59`, `..60`, `90..`, `(a, .., z)` | `..=59`, `..60`, `90..`, `(int a, .., int z)` |
+| `const { MAX - 1 }` (pattern) | `const(MAX - 1)` |
+| `let Point { x, y } = p;`, `fn f((a, b): (i32, i32))` | `Point { int x; int y; } = p;`, `void F((int a, int b))` |
+| `T: ?Sized` | `T : maybe Sized` |
+| `for<'a> Fn(&'a str) -> &'a str` | `forall<life a> Fn(read<a> str) -> read<a> str` |
+| `struct Buf<T = u8, const N: usize = 64>` | `struct Buf<T = byte, const nuint N = 64>` |
+| `type Item<'a> where Self: 'a;` (GAT) | `type Item<life a> where Self : life a;` |
+| `impl Display + use<'a, T>` | `impl Display + capture<life a, T>` |
+| `unsafe extern "C" fn(i32) -> i32` | `unsafe extern "C" (int) -> int` |
+| `Formatter<'_>`, `&'_ str`, `&(dyn A + B)` | `Formatter<life _>`, `read<_> str`, `read (dyn A + B)` |
+| `collect::<Vec<_>>()` | `collect<List<_>>()` |
+| `use std::io::{self, Read, Write as W};` | `using std.io.{this, Read, W = Write};` |
+| `pub(in crate::net)`, `pub(self)` | `public(in crate.net)`, `public(this)` |
+| `unsafe extern "C" { pub safe fn f(); static E: i32; fn p(s: *const i8, ...); }` | `unsafe extern "C" { public safe void f(); static int E; void p(read ptr<sbyte> s, ...); }` |
+| `#[unsafe(no_mangle)]`, `#[unsafe(export_name = "f")]` | `[unsafe NoMangle]`, `[unsafe ExportName = "f"]` |
+| `extern crate alloc;` | `extern crate alloc;` |
+
+## 5. Bidirectional Conversion Rules
 
 - **R# -> Rust**:
   - `for (init; cond; step) { body }` desugars to a loop preserving exact `continue` / `break` / label semantics.
