@@ -99,6 +99,19 @@ pub fn compile_and_run_rust(rust_source: &str) -> Result<RunOutput> {
     })
 }
 
+/// Probes `rustc` to recover the inferred concrete type of an unannotated closure parameter `|<param_name>| ...`.
+pub fn probe_closure_param_type(rust_source: &str, param_name: &str, seq: usize) -> Result<String> {
+    let marker = format!("__RSHARP_CPROBE_{}__", seq);
+    let injected = inject_closure_param_probe(rust_source, param_name, &marker).ok_or_else(|| {
+        RSharpError::unresolved_type(
+            param_name,
+            "Could not locate closure parameter for type probe",
+        )
+    })?;
+
+    run_type_probe(&injected, rust_source, param_name, &marker)
+}
+
 /// Probes `rustc` to recover the inferred concrete type of an unannotated local `let <var_name> = ...;`.
 pub fn probe_local_type(rust_source: &str, var_name: &str, seq: usize) -> Result<String> {
     let marker = format!("__RSHARP_PROBE_{}__", seq);
@@ -106,13 +119,17 @@ pub fn probe_local_type(rust_source: &str, var_name: &str, seq: usize) -> Result
         RSharpError::unresolved_type(var_name, "Could not locate binding site for type probe")
     })?;
 
+    run_type_probe(&injected, rust_source, var_name, &marker)
+}
+
+fn run_type_probe(injected: &str, orig_source: &str, name: &str, marker: &str) -> Result<String> {
     let dir = unique_temp_dir("rsharp_probe")?;
     let rs_path = dir.join("probe.rs");
     let meta_path = dir.join("probe.rmeta");
-    std::fs::write(&rs_path, &injected)
+    std::fs::write(&rs_path, injected)
         .map_err(|e| RSharpError::io(format!("Failed to write probe file: {}", e)))?;
 
-    let is_lib = !rust_source.contains("fn main(") && !rust_source.contains("fn main (");
+    let is_lib = !orig_source.contains("fn main(") && !orig_source.contains("fn main (");
     let mut cmd = Command::new("rustc");
     cmd.arg("--edition=2024").arg("--emit=metadata");
     if is_lib {
@@ -128,12 +145,61 @@ pub fn probe_local_type(rust_source: &str, var_name: &str, seq: usize) -> Result
     let _ = std::fs::remove_dir_all(&dir);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    extract_found_type(&stderr, &marker).ok_or_else(|| {
+    extract_found_type(&stderr, marker).ok_or_else(|| {
         RSharpError::unresolved_type(
-            var_name,
+            name,
             "rustc could not infer concrete type (external crate or compile error)",
         )
     })
+}
+
+fn inject_closure_param_probe(source: &str, param_name: &str, marker: &str) -> Option<String> {
+    let needle = format!("|{}|", param_name);
+    let start = source.find(&needle)?;
+    let body_start = start + needle.len();
+    let rest = &source[body_start..];
+    let trimmed_offset = rest.len() - rest.trim_start().len();
+    let abs = body_start + trimmed_offset;
+    let mut out = String::with_capacity(source.len() + 64);
+    if source[abs..].starts_with('{') {
+        out.push_str(&source[..abs + 1]);
+        out.push_str(&format!(
+            " struct {}; let _: {} = {};",
+            marker, marker, param_name
+        ));
+        out.push_str(&source[abs + 1..]);
+    } else {
+        // Wrap single-expression closure body up to closing ')' or ',' or ';'
+        let end_rel = find_expr_end(&source[abs..]);
+        out.push_str(&source[..abs]);
+        out.push_str(&format!(
+            "{{ struct {}; let _: {} = {}; {} }}",
+            marker,
+            marker,
+            param_name,
+            &source[abs..abs + end_rel]
+        ));
+        out.push_str(&source[abs + end_rel..]);
+    }
+    Some(out)
+}
+
+fn find_expr_end(s: &str) -> usize {
+    let mut depth = 0usize;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    return idx;
+                }
+                depth -= 1;
+            }
+            ',' | ';' if depth == 0 => return idx,
+            _ => {}
+        }
+    }
+    s.len()
 }
 
 /// Injects `struct <marker>; let _: <marker> = <var_name>;` immediately after `let (mut )?<var_name> = ...;`.

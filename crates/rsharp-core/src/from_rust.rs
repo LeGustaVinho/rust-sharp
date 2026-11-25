@@ -776,7 +776,20 @@ impl RustToRSharp {
                 format!("rustc reported unparseable type '{}'", rust_ty),
             )
         })?;
-        Ok(self.fmt_type(&parsed_ty))
+        Ok(strip_non_static_lifetimes(&self.fmt_type(&parsed_ty)))
+    }
+
+    fn probe_closure_param_via_rustc(&mut self, param_name: &str) -> Result<String> {
+        self.probe_counter += 1;
+        let rust_ty =
+            rustc_runner::probe_closure_param_type(&self.raw_source, param_name, self.probe_counter)?;
+        let parsed_ty: Type = syn::parse_str(&rust_ty).map_err(|_| {
+            RSharpError::unresolved_type(
+                param_name,
+                format!("rustc reported unparseable closure param type '{}'", rust_ty),
+            )
+        })?;
+        Ok(strip_non_static_lifetimes(&self.fmt_type(&parsed_ty)))
     }
 
     fn emit_expr_stmt(&mut self, expr: &Expr) -> Result<()> {
@@ -1380,26 +1393,33 @@ impl RustToRSharp {
                 }
                 format!("match ({}) {{ {} }}", scr, arms.join(", "))
             }
-            Expr::Closure(ec) => {
-                let mv = if ec.capture.is_some() { "take " } else { "" };
-                let mut ps = Vec::new();
-                for inp in &ec.inputs {
-                    if let Pat::Type(pt) = inp {
-                        let (is_mut, pname) = extract_param_pat(&pt.pat);
-                        let mk = if is_mut { "mut " } else { "" };
-                        ps.push(format!(
-                            "{}{} {}",
-                            mk,
-                            self.fmt_type(&pt.ty),
-                            escape_ident(&pname)
-                        ));
-                    } else {
-                        return Err(RSharpError::unresolved_type(
-                            inp.to_token_stream().to_string(),
-                            "Closure parameter requires explicit type in R#",
-                        ));
+                Expr::Closure(ec) => {
+                    let mv = if ec.capture.is_some() { "take " } else { "" };
+                    let mut ps = Vec::new();
+                    for inp in &ec.inputs {
+                        if let Pat::Type(pt) = inp {
+                            let (is_mut, pname) = extract_param_pat(&pt.pat);
+                            let mk = if is_mut { "mut " } else { "" };
+                            ps.push(format!(
+                                "{}{} {}",
+                                mk,
+                                self.fmt_type(&pt.ty),
+                                escape_ident(&pname)
+                            ));
+                        } else {
+                            let (is_mut, pname) = extract_param_pat(inp);
+                            if self.options.use_rustc_inference {
+                                let inferred = self.probe_closure_param_via_rustc(&pname)?;
+                                let mk = if is_mut { "mut " } else { "" };
+                                ps.push(format!("{}{} {}", mk, inferred, escape_ident(&pname)));
+                            } else {
+                                return Err(RSharpError::unresolved_type(
+                                    pname,
+                                    "Closure parameter requires explicit type in R#",
+                                ));
+                            }
+                        }
                     }
-                }
                 let ret = match &ec.output {
                     ReturnType::Default => String::new(),
                     ReturnType::Type(_, ty) => format!(" : {}", self.fmt_type(ty)),
@@ -1563,7 +1583,7 @@ impl RustToRSharp {
                         .collect::<Vec<_>>()
                         .join("::");
                     if let Some(ret) = self.fn_returns.get(&rust_key) {
-                        return Some(ret.clone());
+                        return Some(strip_non_static_lifetimes(ret));
                     }
                 }
                 None
@@ -1575,10 +1595,39 @@ impl RustToRSharp {
                     "len" => Some("nuint".to_string()),
                     "is_empty" => Some("bool".to_string()),
                     "clone" => self.infer_expr_type(&mc.receiver),
-                    _ => self.fn_returns.get(&m).cloned(),
+                    _ => self.fn_returns.get(&m).map(|r| strip_non_static_lifetimes(r)),
                 }
             }
             Expr::If(eif) => single_tail_expr(&eif.then_branch).and_then(|e| self.infer_expr_type(e)),
+            Expr::Async(ea) => {
+                let out = ea
+                    .block
+                    .stmts
+                    .last()
+                    .and_then(|st| match st {
+                        Stmt::Expr(e, None) => self.infer_expr_type(e),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "void".to_string());
+                Some(format!("impl std.future.Future<Output = {}>", out))
+            }
+            Expr::Closure(ec) => {
+                let mut param_tys = Vec::new();
+                for inp in &ec.inputs {
+                    if let Pat::Type(pt) = inp {
+                        param_tys.push(self.fmt_type(&pt.ty));
+                    } else {
+                        return None;
+                    }
+                }
+                let ret = match &ec.output {
+                    ReturnType::Type(_, ty) => self.fmt_type(ty),
+                    ReturnType::Default => self
+                        .infer_expr_type(&ec.body)
+                        .unwrap_or_else(|| "void".to_string()),
+                };
+                Some(format!("({}) -> {}", param_tys.join(", "), ret))
+            }
             _ => None,
         }
     }
@@ -1612,6 +1661,36 @@ impl RustToRSharp {
             }
         }
     }
+}
+
+fn strip_non_static_lifetimes(ty: &str) -> String {
+    let mut out = String::with_capacity(ty.len());
+    let mut rest = ty;
+    while !rest.is_empty() {
+        let prefix = if rest.starts_with("read<") {
+            Some(("read<", "read"))
+        } else if rest.starts_with("write<") {
+            Some(("write<", "write"))
+        } else {
+            None
+        };
+        if let Some((open, base)) = prefix
+            && let Some(close_idx) = rest[open.len()..].find('>')
+        {
+            let life = &rest[open.len()..open.len() + close_idx];
+            if life == "static" {
+                out.push_str(&rest[..open.len() + close_idx + 1]);
+            } else {
+                out.push_str(base);
+            }
+            rest = &rest[open.len() + close_idx + 1..];
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        out.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
 }
 
 fn extract_collection_elem(ty: &str) -> Option<String> {

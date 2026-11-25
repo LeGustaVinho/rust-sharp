@@ -749,6 +749,7 @@ impl<'a> Lexer<'a> {
                     TokenKind::Caret
                 }
             }
+            '$' => TokenKind::Dollar,
             other => {
                 return Err(RSharpError::lex(
                     self.span_from(line, col, start),

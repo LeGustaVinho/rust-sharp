@@ -283,6 +283,7 @@ pub enum TokenKind {
     ShlEq,
     Shr,
     ShrEq,
+    Dollar,
     Eof,
 }
 

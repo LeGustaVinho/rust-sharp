@@ -21,14 +21,38 @@ pub fn parse_expr_str(source: &str) -> Result<Expr> {
     Ok(expr)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Checkpoint {
+    pos: usize,
+    pending_gt: bool,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Set when a `>>` (`Shr`) token was split to close a nested generic `<...<...>>`.
+    pending_gt: bool,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            pending_gt: false,
+        }
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            pos: self.pos,
+            pending_gt: self.pending_gt,
+        }
+    }
+
+    fn restore(&mut self, cp: Checkpoint) {
+        self.pos = cp.pos;
+        self.pending_gt = cp.pending_gt;
     }
 
     fn peek(&self) -> &Token {
@@ -36,7 +60,11 @@ impl Parser {
     }
 
     fn peek_kind(&self) -> &TokenKind {
-        &self.peek().kind
+        if self.pending_gt {
+            &TokenKind::Gt
+        } else {
+            &self.peek().kind
+        }
     }
 
     fn peek_at(&self, offset: usize) -> &Token {
@@ -45,15 +73,49 @@ impl Parser {
     }
 
     fn is_eof(&self) -> bool {
-        matches!(self.peek_kind(), TokenKind::Eof)
+        !self.pending_gt && matches!(self.peek_kind(), TokenKind::Eof)
     }
 
     fn bump(&mut self) -> Token {
+        if self.pending_gt {
+            self.pending_gt = false;
+            let span = self.peek().span;
+            self.pos += 1;
+            return Token::new(TokenKind::Gt, span);
+        }
         let tok = self.peek().clone();
         if !matches!(tok.kind, TokenKind::Eof) {
             self.pos += 1;
         }
         tok
+    }
+
+    fn check_gt(&self) -> bool {
+        self.pending_gt || matches!(self.peek().kind, TokenKind::Gt | TokenKind::Shr)
+    }
+
+    fn eat_gt(&mut self) -> bool {
+        if self.pending_gt {
+            self.pending_gt = false;
+            self.pos += 1;
+            true
+        } else if matches!(self.peek().kind, TokenKind::Gt) {
+            self.pos += 1;
+            true
+        } else if matches!(self.peek().kind, TokenKind::Shr) {
+            self.pending_gt = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_gt(&mut self) -> Result<()> {
+        if self.eat_gt() {
+            Ok(())
+        } else {
+            Err(self.err_here(format!("Expected '>', found {:?}", self.peek_kind())))
+        }
     }
 
     fn span(&self) -> Span {
@@ -302,6 +364,7 @@ impl Parser {
             TokenKind::ShlEq => "<<=".into(),
             TokenKind::Shr => ">>".into(),
             TokenKind::ShrEq => ">>=".into(),
+            TokenKind::Dollar => "$".into(),
             TokenKind::Eof => String::new(),
         }
     }
@@ -418,7 +481,7 @@ impl Parser {
                 kind: ItemKind::Trait(t),
             });
         }
-        if self.check_kw(Keyword::Impl) {
+        if self.check_kw(Keyword::Impl) && self.is_impl_block() {
             let i = self.parse_impl(false)?;
             return Ok(Item {
                 docs,
@@ -517,6 +580,25 @@ impl Parser {
             vis,
             kind: ItemKind::Fn(func),
         })
+    }
+
+    fn is_impl_block(&mut self) -> bool {
+        let save = self.checkpoint();
+        let is_block = if self.eat_kw(Keyword::Impl) {
+            if self.check(&TokenKind::Lt) {
+                true
+            } else if self.parse_type().is_ok() {
+                self.check_kw(Keyword::For)
+                    || self.check_kw(Keyword::Where)
+                    || self.check(&TokenKind::LBrace)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        self.restore(save);
+        is_block
     }
 
     fn is_extern_block(&self) -> bool {
@@ -642,7 +724,7 @@ impl Parser {
             return Ok(Vec::new());
         }
         let mut params = Vec::new();
-        while !self.check(&TokenKind::Gt) && !self.is_eof() {
+        while !self.check_gt() && !self.is_eof() {
             if self.eat_kw(Keyword::Life) {
                 let name = self.expect_ident()?;
                 params.push(GenericParam {
@@ -671,7 +753,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(&TokenKind::Gt, "'>'")?;
+        self.expect_gt()?;
         Ok(params)
     }
 
@@ -1342,7 +1424,7 @@ impl Parser {
             if life.is_none() && self.eat_kw(Keyword::Ptr) {
                 self.expect(&TokenKind::Lt, "'<'")?;
                 let inner = self.parse_type()?;
-                self.expect(&TokenKind::Gt, "'>'")?;
+                self.expect_gt()?;
                 Type::ReadPtr(Box::new(inner))
             } else {
                 let inner = self.parse_type()?;
@@ -1356,7 +1438,7 @@ impl Parser {
             if life.is_none() && self.eat_kw(Keyword::Ptr) {
                 self.expect(&TokenKind::Lt, "'<'")?;
                 let inner = self.parse_type()?;
-                self.expect(&TokenKind::Gt, "'>'")?;
+                self.expect_gt()?;
                 Type::WritePtr(Box::new(inner))
             } else {
                 let inner = self.parse_type()?;
@@ -1368,7 +1450,7 @@ impl Parser {
         } else if self.eat_kw(Keyword::Slice) {
             self.expect(&TokenKind::Lt, "'<' after 'slice'")?;
             let inner = self.parse_type()?;
-            self.expect(&TokenKind::Gt, "'>'")?;
+            self.expect_gt()?;
             Type::Slice(Box::new(inner))
         } else if self.eat_kw(Keyword::Dyn) {
             let mut bounds = vec![self.parse_type_bound()?];
@@ -1467,13 +1549,13 @@ impl Parser {
             return Ok(Vec::new());
         }
         let args = self.parse_generic_arg_list()?;
-        self.expect(&TokenKind::Gt, "'>'")?;
+        self.expect_gt()?;
         Ok(args)
     }
 
     fn parse_generic_arg_list(&mut self) -> Result<Vec<GenericArg>> {
         let mut args = Vec::new();
-        while !self.check(&TokenKind::Gt) && !self.is_eof() {
+        while !self.check_gt() && !self.is_eof() {
             if self.eat_kw(Keyword::Life) {
                 args.push(GenericArg::Lifetime(self.expect_lifetime_name()?));
             } else if matches!(
@@ -1614,6 +1696,13 @@ impl Parser {
             return Ok(Stmt::Discard(expr));
         }
 
+        // Explicit local variable declaration starting with `impl Trait name = ...`
+        if self.check_kw(Keyword::Impl)
+            && let Some(stmt) = self.try_parse_local_decl(true)?
+        {
+            return Ok(stmt);
+        }
+
         // Nested item statements (const, static, struct, enum, trait, impl, alias, using)
         if self.is_nested_item_start() {
             let item = self.parse_item()?;
@@ -1723,7 +1812,7 @@ impl Parser {
     }
 
     fn try_parse_local_decl(&mut self, expect_semi: bool) -> Result<Option<Stmt>> {
-        let save = self.pos;
+        let save = self.checkpoint();
         let is_shadow = self.eat_kw(Keyword::Shadow);
         let is_mut = self.eat_kw(Keyword::Mut);
         let forced = is_shadow || is_mut;
@@ -1731,7 +1820,10 @@ impl Parser {
         let ty = match self.parse_type() {
             Ok(t) => t,
             Err(e) => {
-                self.pos = save;
+                if e.to_string().contains("Array type requires explicit length") {
+                    return Err(e);
+                }
+                self.restore(save);
                 if forced {
                     return Err(e);
                 }
@@ -1742,7 +1834,7 @@ impl Parser {
         let name = match self.expect_ident() {
             Ok(n) => n,
             Err(e) => {
-                self.pos = save;
+                self.restore(save);
                 if forced {
                     return Err(e);
                 }
@@ -1751,7 +1843,7 @@ impl Parser {
         };
 
         if !self.check(&TokenKind::Eq) && !self.check(&TokenKind::Semicolon) {
-            self.pos = save;
+            self.restore(save);
             if forced {
                 return Err(self.err_here("Expected '=' or ';' in variable declaration"));
             }
@@ -2597,14 +2689,14 @@ impl Parser {
         if !self.check(&TokenKind::Lt) {
             return Vec::new();
         }
-        let save = self.pos;
+        let save = self.checkpoint();
         self.bump(); // '<'
         let Ok(args) = self.parse_generic_arg_list() else {
-            self.pos = save;
+            self.restore(save);
             return Vec::new();
         };
         if !args.is_empty()
-            && self.eat(&TokenKind::Gt)
+            && self.eat_gt()
             && matches!(
                 self.peek_kind(),
                 TokenKind::LParen | TokenKind::Dot | TokenKind::ColonColon
@@ -2612,7 +2704,7 @@ impl Parser {
         {
             return args;
         }
-        self.pos = save;
+        self.restore(save);
         Vec::new()
     }
 
