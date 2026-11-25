@@ -1,0 +1,13 @@
+[package]
+name = "rsharp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for compiling, running, and converting R# (.rsharp) and Rust (.rs) files."
+
+[[bin]]
+name = "rsharp"
+path = "src/main.rs"
+
+[dependencies]
+rsharp-core = { path = "../rsharp-core" }

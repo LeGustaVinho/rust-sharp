@@ -1,0 +1,6 @@
+[package]
+name = "rsharp-prelude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standard type aliases and minimal C#-ergonomic helpers for R#."

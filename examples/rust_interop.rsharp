@@ -1,0 +1,59 @@
+/// Demonstrates traits, lifetimes, dynamic typing, unsafe raw pointers,
+/// and direct inline Rust execution.
+public trait Describe
+{
+    string Describe(read this);
+}
+
+public struct Item
+{
+    public string Name;
+}
+
+impl Describe for Item
+{
+    string Describe(read this)
+    {
+        return $"Item({this.Name})";
+    }
+}
+
+public read<a> str Longest<life a>(read<a> str x, read<a> str y)
+{
+    if (x.len() >= y.len())
+    {
+        return x;
+    }
+    return y;
+}
+
+public string DescribeDyn(read dyn Describe target)
+{
+    return target.Describe();
+}
+
+void main()
+{
+    Item it = new Item { Name = "Sword".ToString() };
+    PrintLine(DescribeDyn(read it));
+    PrintLine(Longest("alpha", "longest_word"));
+
+    dynamic boxed = ToDynamic(123);
+    if (AsDynamic<int>(read boxed) is Some(read int v))
+    {
+        PrintLine($"dynamic={deref v}");
+    }
+
+    mut int rawTarget = 10;
+    unsafe
+    {
+        write ptr<int> p = (write rawTarget) as write ptr<int>;
+        deref p = 42;
+    }
+    PrintLine($"unsafe={rawTarget}");
+
+    rust {
+        let rust_val: i32 = 7 * 6;
+        println!("inline_rust={}", rust_val);
+    }
+}

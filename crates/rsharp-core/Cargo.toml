@@ -1,0 +1,12 @@
+[package]
+name = "rsharp-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lexer, parser, AST, R#->Rust transpiler, and Rust->R# converter."
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+proc-macro2 = "1"
+quote = "1"
+prettyplease = "0.2"

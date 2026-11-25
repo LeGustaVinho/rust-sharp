@@ -1,0 +1,50 @@
+/// Bank account example demonstrating structs, inline methods, borrowing,
+/// Result error handling, slices, and string interpolation.
+[Derive(Debug, Clone)]
+public struct Account
+{
+    public string Owner;
+    public long Balance;
+
+    public static Self New(string owner, long initial)
+    {
+        return new Self { Owner = owner, Balance = initial };
+    }
+
+    public Result<long, string> Deposit(write this, long amount)
+    {
+        if (amount <= 0)
+        {
+            return Err("Amount must be positive".ToString());
+        }
+        this.Balance += amount;
+        return Ok(this.Balance);
+    }
+
+    public string Summary(read this)
+    {
+        return $"{this.Owner}: {this.Balance}";
+    }
+}
+
+public long TotalBalance(read slice<Account> accounts)
+{
+    mut long sum = 0;
+    foreach (read Account acc in accounts)
+    {
+        sum += acc.Balance;
+    }
+    return sum;
+}
+
+void main()
+{
+    mut Account alice = Account.New("Alice".ToString(), 100);
+    _ = alice.Deposit(50);
+    Account bob = alice with { Owner = "Bob".ToString() };
+
+    mut List<Account> accounts = [alice, bob];
+    long total = TotalBalance(read slice accounts[..]);
+    PrintLine(accounts[0].Summary());
+    PrintLine($"Total: {total}");
+}

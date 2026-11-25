@@ -1,0 +1,62 @@
+/// Demonstrates matrices, named tuples, C-style for loops, match expressions,
+/// nullables (T?), null-coalescing (??), and Result propagation with `try`.
+public enum Shape
+{
+    Circle(double),
+    Rect { double W; double H; },
+}
+
+public double Area(read Shape s)
+{
+    return match (s)
+    {
+        Shape.Circle(read double r) => 3.14 * (deref r) * (deref r),
+        Shape.Rect { W: read double w, H: read double h } when (deref w) == (deref h) => (deref w) * (deref w),
+        Shape.Rect { W: read double w, H: read double h } => (deref w) * (deref h),
+    };
+}
+
+public Result<int, string> ParseDouble(read str input)
+{
+    Result<int, std.num.ParseIntError> parsed = input.parse<int>();
+    if (parsed is Ok(int n))
+    {
+        return Ok(n * 2);
+    }
+    return Err("Not a number".ToString());
+}
+
+public Result<int, string> SumInputs(read str a, read str b)
+{
+    int va = try ParseDouble(a);
+    int vb = try ParseDouble(b);
+    return Ok(va + vb);
+}
+
+void main()
+{
+    int[2, 3] matrix = [[1, 2, 3], [4, 5, 6]];
+    mut int matrixSum = 0;
+    for (mut nuint r = 0; r < 2; r++)
+    {
+        for (mut nuint c = 0; c < 3; c++)
+        {
+            if (r == 0 && c == 1)
+            {
+                continue;
+            }
+            matrixSum += matrix[r, c];
+        }
+    }
+
+    (int X, int Y) point = (10, 25);
+    int? maybe = None;
+    int fallback = maybe ?? (point.X + point.Y);
+
+    Shape sq = new Shape.Rect { W = 4.0, H = 4.0 };
+    double area = Area(read sq);
+    Result<int, string> sumRes = SumInputs("5", "7");
+    int doubled = sumRes.unwrap();
+
+    PrintLine($"matrix={matrixSum} fallback={fallback} area={area} doubled={doubled}");
+}
