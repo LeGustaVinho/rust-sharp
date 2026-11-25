@@ -6,7 +6,9 @@
 #![allow(dead_code, non_snake_case)]
 
 pub use std::any::Any;
-pub use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque};
+pub use std::collections::{
+    BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque,
+};
 
 /// C#-friendly alias for `std::vec::Vec<T>`.
 pub type List<T> = Vec<T>;

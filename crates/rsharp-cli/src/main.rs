@@ -1,4 +1,6 @@
-fn main() {
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let out = rsharp_cli::run_cli(&args);
     if !out.stdout.is_empty() {
@@ -7,5 +9,5 @@ fn main() {
     if !out.stderr.is_empty() {
         eprint!("{}", out.stderr);
     }
-    std::process::exit(out.exit_code);
+    ExitCode::from(out.exit_code as u8)
 }

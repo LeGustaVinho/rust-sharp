@@ -223,7 +223,10 @@ impl Keyword {
 pub enum TokenKind {
     Kw(Keyword),
     /// Standard identifier (including verbatim `@ident` with leading `@` stripped and `verbatim = true`).
-    Ident { name: String, verbatim: bool },
+    Ident {
+        name: String,
+        verbatim: bool,
+    },
     IntLit(String),
     FloatLit(String),
     StringLit(String),

@@ -128,7 +128,12 @@ fn test_cli_examples_end_to_end() {
         let out = run_cli(&args(&["run", &p_str]));
         assert_eq!(out.exit_code, 0, "example {} failed: {}", rel, out.stderr);
         let normalized = out.stdout.replace("\r\n", "\n");
-        assert_eq!(normalized.trim(), expected, "example {} stdout mismatch", rel);
+        assert_eq!(
+            normalized.trim(),
+            expected,
+            "example {} stdout mismatch",
+            rel
+        );
     }
 }
 
@@ -166,4 +171,27 @@ fn test_cli_error_paths() {
         let out = run_cli(&c);
         assert_eq!(out.exit_code, 1, "expected error for {:?}", c);
     }
+
+    // Invalid syntax through check/run/build/from-rust
+    let bad_rsh = temp_file("bad_syntax.rsharp");
+    std::fs::write(&bad_rsh, "void main() { var x = 1; }").unwrap();
+    let bad_str = bad_rsh.to_string_lossy().to_string();
+    assert_eq!(run_cli(&args(&["check", &bad_str])).exit_code, 1);
+    assert_eq!(run_cli(&args(&["run", &bad_str])).exit_code, 1);
+    assert_eq!(run_cli(&args(&["build", &bad_str])).exit_code, 1);
+    assert_eq!(run_cli(&args(&["to-rust", &bad_str])).exit_code, 1);
+    assert_eq!(run_cli(&args(&["from-rust", &bad_str])).exit_code, 1);
+}
+
+#[test]
+fn test_cli_binary_entrypoint() {
+    let bin = env!("CARGO_BIN_EXE_rsharp");
+
+    let ok = Command::new(bin).arg("--help").output().unwrap();
+    assert!(ok.status.success());
+    assert!(String::from_utf8_lossy(&ok.stdout).contains("Usage:"));
+
+    let fail = Command::new(bin).arg("not-a-command").output().unwrap();
+    assert!(!fail.status.success());
+    assert!(String::from_utf8_lossy(&fail.stderr).contains("error:"));
 }

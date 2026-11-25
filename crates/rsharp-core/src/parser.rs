@@ -6,14 +6,14 @@ use crate::token::{InterpPart, Keyword, Token, TokenKind};
 /// Parses R# source code into a `FileAst`.
 pub fn parse_file(source: &str) -> Result<FileAst> {
     let tokens = tokenize(source)?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(source, tokens);
     parser.parse_file()
 }
 
 /// Parses a standalone R# expression (used by interpolated strings and tests).
 pub fn parse_expr_str(source: &str) -> Result<Expr> {
     let tokens = tokenize(source)?;
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(source, tokens);
     let expr = parser.parse_expr()?;
     if !parser.is_eof() {
         return Err(parser.err_here("Unexpected trailing tokens in expression"));
@@ -27,16 +27,18 @@ struct Checkpoint {
     pending_gt: bool,
 }
 
-struct Parser {
+struct Parser<'a> {
+    src: &'a str,
     tokens: Vec<Token>,
     pos: usize,
     /// Set when a `>>` (`Shr`) token was split to close a nested generic `<...<...>>`.
     pending_gt: bool,
 }
 
-impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
+impl<'a> Parser<'a> {
+    fn new(src: &'a str, tokens: Vec<Token>) -> Self {
         Self {
+            src,
             tokens,
             pos: 0,
             pending_gt: false,
@@ -182,10 +184,7 @@ impl Parser {
                 self.bump();
                 Ok(name)
             }
-            _ => Err(self.err_here(format!(
-                "Expected identifier, found {:?}",
-                self.peek_kind()
-            ))),
+            _ => Err(self.err_here(format!("Expected identifier, found {:?}", self.peek_kind()))),
         }
     }
 
@@ -267,12 +266,12 @@ impl Parser {
         let args = if self.check(&TokenKind::LParen) {
             Some(self.collect_balanced_raw(TokenKind::LParen, TokenKind::RParen)?)
         } else if self.eat(&TokenKind::Eq) {
-            let mut rhs = String::from("= ");
+            let rhs_start = self.peek().span.start;
+            let mut rhs_end = rhs_start;
             while !self.check(&TokenKind::RBracket) && !self.is_eof() {
-                let tok = self.bump();
-                rhs.push_str(&self.token_to_raw_str(&tok));
+                rhs_end = self.bump().span.end;
             }
-            Some(rhs)
+            Some(format!("= {}", self.src[rhs_start..rhs_end].trim()))
         } else {
             None
         };
@@ -281,9 +280,9 @@ impl Parser {
     }
 
     fn collect_balanced_raw(&mut self, open: TokenKind, close: TokenKind) -> Result<String> {
-        self.expect(&open, "opening delimiter")?;
+        let open_tok = self.expect(&open, "opening delimiter")?;
+        let body_start = open_tok.span.end;
         let mut depth = 1usize;
-        let mut parts = Vec::new();
         while depth > 0 {
             if self.is_eof() {
                 return Err(self.err_here("Unterminated delimiter group"));
@@ -291,82 +290,14 @@ impl Parser {
             let tok = self.bump();
             if tok.kind == open {
                 depth += 1;
-                parts.push(self.token_to_raw_str(&tok));
             } else if tok.kind == close {
                 depth -= 1;
-                if depth > 0 {
-                    parts.push(self.token_to_raw_str(&tok));
+                if depth == 0 {
+                    return Ok(self.src[body_start..tok.span.start].trim().to_string());
                 }
-            } else {
-                parts.push(self.token_to_raw_str(&tok));
             }
         }
-        Ok(join_raw_tokens(&parts))
-    }
-
-    fn token_to_raw_str(&self, tok: &Token) -> String {
-        match &tok.kind {
-            TokenKind::Kw(kw) => kw.as_str().to_string(),
-            TokenKind::Ident { name, .. } => name.clone(),
-            TokenKind::IntLit(s) | TokenKind::FloatLit(s) => s.clone(),
-            TokenKind::StringLit(s) => format!("\"{}\"", s),
-            TokenKind::CharLit(c) => format!("'{}'", c),
-            TokenKind::InterpString(parts) => format_interp_raw(parts),
-            TokenKind::RustBlock(s) => format!("{{{}}}", s),
-            TokenKind::DocComment(s) => format!("/// {}", s),
-            TokenKind::LParen => "(".into(),
-            TokenKind::RParen => ")".into(),
-            TokenKind::LBrace => "{".into(),
-            TokenKind::RBrace => "}".into(),
-            TokenKind::LBracket => "[".into(),
-            TokenKind::RBracket => "]".into(),
-            TokenKind::Comma => ",".into(),
-            TokenKind::Semicolon => ";".into(),
-            TokenKind::Colon => ":".into(),
-            TokenKind::ColonColon => "::".into(),
-            TokenKind::Dot => ".".into(),
-            TokenKind::DotDot => "..".into(),
-            TokenKind::DotDotEq => "..=".into(),
-            TokenKind::Question => "?".into(),
-            TokenKind::QuestionQuestion => "??".into(),
-            TokenKind::FatArrow => "=>".into(),
-            TokenKind::ThinArrow => "->".into(),
-            TokenKind::Plus => "+".into(),
-            TokenKind::PlusPlus => "++".into(),
-            TokenKind::PlusEq => "+=".into(),
-            TokenKind::Minus => "-".into(),
-            TokenKind::MinusMinus => "--".into(),
-            TokenKind::MinusEq => "-=".into(),
-            TokenKind::Star => "*".into(),
-            TokenKind::StarEq => "*=".into(),
-            TokenKind::Slash => "/".into(),
-            TokenKind::SlashEq => "/=".into(),
-            TokenKind::Percent => "%".into(),
-            TokenKind::PercentEq => "%=".into(),
-            TokenKind::Eq => "=".into(),
-            TokenKind::EqEq => "==".into(),
-            TokenKind::Bang => "!".into(),
-            TokenKind::BangEq => "!=".into(),
-            TokenKind::Lt => "<".into(),
-            TokenKind::Le => "<=".into(),
-            TokenKind::Gt => ">".into(),
-            TokenKind::Ge => ">=".into(),
-            TokenKind::Amp => "&".into(),
-            TokenKind::AmpAmp => "&&".into(),
-            TokenKind::AmpEq => "&=".into(),
-            TokenKind::Pipe => "|".into(),
-            TokenKind::PipePipe => "||".into(),
-            TokenKind::PipeEq => "|=".into(),
-            TokenKind::Caret => "^".into(),
-            TokenKind::CaretEq => "^=".into(),
-            TokenKind::Tilde => "~".into(),
-            TokenKind::Shl => "<<".into(),
-            TokenKind::ShlEq => "<<=".into(),
-            TokenKind::Shr => ">>".into(),
-            TokenKind::ShrEq => ">>=".into(),
-            TokenKind::Dollar => "$".into(),
-            TokenKind::Eof => String::new(),
-        }
+        Ok(String::new())
     }
 
     fn parse_visibility(&mut self) -> Result<Visibility> {
@@ -648,15 +579,16 @@ impl Parser {
     fn try_parse_item_macro_call(&mut self) -> Result<Option<MacroCall>> {
         let save = self.pos;
         if let Ok(path) = self.parse_simple_path()
-            && self.eat(&TokenKind::Bang) {
-                let mc = self.parse_macro_call_body(path)?;
-                if mc.delim != MacroDelim::Brace {
-                    self.expect(&TokenKind::Semicolon, "';' after macro invocation")?;
-                } else {
-                    self.eat(&TokenKind::Semicolon);
-                }
-                return Ok(Some(mc));
+            && self.eat(&TokenKind::Bang)
+        {
+            let mc = self.parse_macro_call_body(path)?;
+            if mc.delim != MacroDelim::Brace {
+                self.expect(&TokenKind::Semicolon, "';' after macro invocation")?;
+            } else {
+                self.eat(&TokenKind::Semicolon);
             }
+            return Ok(Some(mc));
+        }
         self.pos = save;
         Ok(None)
     }
@@ -1376,16 +1308,18 @@ impl Parser {
                 return Ok(Some(ReceiverKind::Take));
             }
             if let Ok(ty) = self.parse_type()
-                && self.eat_kw(Keyword::This) {
-                    return Ok(Some(ReceiverKind::Typed { ty }));
-                }
+                && self.eat_kw(Keyword::This)
+            {
+                return Ok(Some(ReceiverKind::Typed { ty }));
+            }
             self.pos = save;
         }
         // Arbitrary typed receiver `Pin<write Self> this`
         if let Ok(ty) = self.parse_type()
-            && self.eat_kw(Keyword::This) {
-                return Ok(Some(ReceiverKind::Typed { ty }));
-            }
+            && self.eat_kw(Keyword::This)
+        {
+            return Ok(Some(ReceiverKind::Typed { ty }));
+        }
         self.pos = save;
         Ok(None)
     }
@@ -1667,7 +1601,11 @@ impl Parser {
 
         // Labeled loop: `outer: loop/while/for/foreach`
         if matches!(
-            (self.peek_kind(), &self.peek_at(1).kind, &self.peek_at(2).kind),
+            (
+                self.peek_kind(),
+                &self.peek_at(1).kind,
+                &self.peek_at(2).kind
+            ),
             (
                 TokenKind::Ident { .. },
                 TokenKind::Colon,
@@ -1752,9 +1690,10 @@ impl Parser {
                 let save = self.pos;
                 let lbl = self.expect_ident()?;
                 if let Ok(val) = self.parse_expr()
-                    && self.check(&TokenKind::Semicolon) {
-                        return Ok((Some(lbl), Some(val)));
-                    }
+                    && self.check(&TokenKind::Semicolon)
+                {
+                    return Ok((Some(lbl), Some(val)));
+                }
                 self.pos = save;
             }
         }
@@ -1820,7 +1759,9 @@ impl Parser {
         let ty = match self.parse_type() {
             Ok(t) => t,
             Err(e) => {
-                if e.to_string().contains("Array type requires explicit length") {
+                if e.to_string()
+                    .contains("Array type requires explicit length")
+                {
                     return Err(e);
                 }
                 self.restore(save);
@@ -2105,17 +2046,18 @@ impl Parser {
         let is_mut = self.eat_kw(Keyword::Mut);
         if let Ok(ty) = self.parse_type()
             && let Ok(name) = self.expect_ident()
-                && matches!(
-                    self.peek_kind(),
-                    TokenKind::Semicolon | TokenKind::Comma | TokenKind::RBrace
-                ) {
-                    return Ok(StructPatField {
-                        ty: Some(ty),
-                        is_mut,
-                        name,
-                        pat: None,
-                    });
-                }
+            && matches!(
+                self.peek_kind(),
+                TokenKind::Semicolon | TokenKind::Comma | TokenKind::RBrace
+            )
+        {
+            return Ok(StructPatField {
+                ty: Some(ty),
+                is_mut,
+                name,
+                pat: None,
+            });
+        }
         self.pos = save;
         let name = self.expect_ident()?;
         let pat = if self.eat(&TokenKind::Colon) || self.eat(&TokenKind::Eq) {
@@ -2747,6 +2689,12 @@ impl Parser {
             return Ok(Expr::Match(self.parse_match()?));
         }
 
+        // Value-returning `loop { break val; }` expression
+        if self.eat_kw(Keyword::Loop) {
+            let block = self.parse_block()?;
+            return Ok(Expr::Loop { label: None, block });
+        }
+
         // Unsafe block expression
         if self.check_kw(Keyword::Unsafe) && matches!(self.peek_at(1).kind, TokenKind::LBrace) {
             self.bump();
@@ -2770,7 +2718,11 @@ impl Parser {
 
         // Labeled value block: `b: { int a = 1; break b a + 2; }`
         if matches!(
-            (self.peek_kind(), &self.peek_at(1).kind, &self.peek_at(2).kind),
+            (
+                self.peek_kind(),
+                &self.peek_at(1).kind,
+                &self.peek_at(2).kind
+            ),
             (TokenKind::Ident { .. }, TokenKind::Colon, TokenKind::LBrace)
         ) {
             let label = self.expect_ident()?;
@@ -2889,10 +2841,7 @@ impl Parser {
                     Ok(Expr::ArrayLit(elems))
                 }
             }
-            _ => Err(self.err_here(format!(
-                "Expected expression, found {:?}",
-                self.peek_kind()
-            ))),
+            _ => Err(self.err_here(format!("Expected expression, found {:?}", self.peek_kind()))),
         }
     }
 
@@ -3018,42 +2967,4 @@ fn expr_to_path(expr: &Expr) -> Option<Vec<String>> {
         }
         _ => None,
     }
-}
-
-fn format_interp_raw(parts: &[InterpPart]) -> String {
-    let mut s = String::from("$\"");
-    for p in parts {
-        match p {
-            InterpPart::Literal(l) => s.push_str(l),
-            InterpPart::Expr { source, format } => {
-                s.push('{');
-                s.push_str(source);
-                if let Some(f) = format {
-                    s.push(':');
-                    s.push_str(f);
-                }
-                s.push('}');
-            }
-        }
-    }
-    s.push('"');
-    s
-}
-
-fn join_raw_tokens(parts: &[String]) -> String {
-    let mut out = String::new();
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            let prev = &parts[i - 1];
-            let no_space = matches!(
-                part.as_str(),
-                "," | ";" | ")" | "]" | "." | "::" | "!" | "("
-            ) || matches!(prev.as_str(), "(" | "[" | "." | "::" | "!");
-            if !no_space {
-                out.push(' ');
-            }
-        }
-        out.push_str(part);
-    }
-    out
 }

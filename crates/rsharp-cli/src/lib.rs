@@ -102,8 +102,8 @@ fn cmd_to_rust(args: &[String]) -> Result<CliOutput, String> {
         }
     }
 
-    let rust = transpile_to_rust(&src, TranspileOptions { prelude_mode })
-        .map_err(|e| e.to_string())?;
+    let rust =
+        transpile_to_rust(&src, TranspileOptions { prelude_mode }).map_err(|e| e.to_string())?;
 
     if let Some(p) = out_path {
         std::fs::write(&p, &rust)

@@ -205,10 +205,11 @@ impl RustCodegen {
         let mut file_ns: Option<Vec<String>> = None;
         if let Some(first) = file.items.first()
             && let ItemKind::Namespace(ns) = &first.kind
-                && ns.items.is_none() {
-                    file_ns = Some(ns.path.clone());
-                    idx = 1;
-                }
+            && ns.items.is_none()
+        {
+            file_ns = Some(ns.path.clone());
+            idx = 1;
+        }
 
         if let Some(ref ns_path) = file_ns {
             for seg in ns_path {
@@ -407,10 +408,7 @@ impl RustCodegen {
 
         if !s.methods.is_empty() {
             let gen_args = format_generic_args_from_params(&s.generics);
-            self.line(&format!(
-                "impl{} {}{}{} {{",
-                gens, s.name, gen_args, wh
-            ));
+            self.line(&format!("impl{} {}{}{} {{", gens, s.name, gen_args, wh));
             let prev_self = self.current_self_type.replace(s.name.clone());
             self.indent += 1;
             for m in &s.methods {
@@ -527,8 +525,7 @@ impl RustCodegen {
                     let b = if bounds.is_empty() {
                         String::new()
                     } else {
-                        let bs: Result<Vec<_>> =
-                            bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                        let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
                         format!(": {}", bs?.join(" + "))
                     };
                     let d = match default {
@@ -1137,17 +1134,20 @@ impl RustCodegen {
     }
 
     fn fmt_type_path(&self, path: &TypePath) -> Result<String> {
-        if path.segments.len() == 1 && path.segments[0].args.is_empty()
-            && let Some(prim) = map_primitive_alias(&path.segments[0].name) {
-                return Ok(prim.to_string());
-            }
+        if path.segments.len() == 1
+            && path.segments[0].args.is_empty()
+            && let Some(prim) = map_primitive_alias(&path.segments[0].name)
+        {
+            return Ok(prim.to_string());
+        }
         let mut out = Vec::new();
         for seg in &path.segments {
             let mapped = map_std_type_alias(&seg.name);
             if seg.args.is_empty() {
                 out.push(mapped);
             } else {
-                let args: Result<Vec<_>> = seg.args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                let args: Result<Vec<_>> =
+                    seg.args.iter().map(|a| self.fmt_generic_arg(a)).collect();
                 out.push(format!("{}<{}>", mapped, args?.join(", ")));
             }
         }
@@ -1182,8 +1182,7 @@ impl RustCodegen {
                     if bounds.is_empty() {
                         parts.push(name.clone());
                     } else {
-                        let bs: Result<Vec<_>> =
-                            bounds.iter().map(|b| self.fmt_bound(b)).collect();
+                        let bs: Result<Vec<_>> = bounds.iter().map(|b| self.fmt_bound(b)).collect();
                         parts.push(format!("{}: {}", name, bs?.join(" + ")));
                     }
                 }
@@ -1304,8 +1303,11 @@ impl RustCodegen {
                     if seg.type_args.is_empty() {
                         parts.push(mapped);
                     } else {
-                        let args: Result<Vec<_>> =
-                            seg.type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                        let args: Result<Vec<_>> = seg
+                            .type_args
+                            .iter()
+                            .map(|a| self.fmt_generic_arg(a))
+                            .collect();
                         parts.push(format!("{}::<{}>", mapped, args?.join(", ")));
                     }
                 }
@@ -1422,16 +1424,18 @@ impl RustCodegen {
             } => {
                 // Special-case `panic(...)` -> `panic!(...)`
                 if let Expr::Ident(name) = callee.as_ref()
-                    && name == "panic" && type_args.is_empty() {
-                        if args.len() == 1 {
-                            return match &args[0] {
-                                Expr::Lit(Literal::Str(s)) => Ok(format!("panic!(\"{}\")", s)),
-                                other => Ok(format!("panic!(\"{{}}\", {})", self.fmt_expr(other)?)),
-                            };
-                        }
-                        let a: Result<Vec<_>> = args.iter().map(|e| self.fmt_expr(e)).collect();
-                        return Ok(format!("panic!({})", a?.join(", ")));
+                    && name == "panic"
+                    && type_args.is_empty()
+                {
+                    if args.len() == 1 {
+                        return match &args[0] {
+                            Expr::Lit(Literal::Str(s)) => Ok(format!("panic!(\"{}\")", s)),
+                            other => Ok(format!("panic!(\"{{}}\", {})", self.fmt_expr(other)?)),
+                        };
                     }
+                    let a: Result<Vec<_>> = args.iter().map(|e| self.fmt_expr(e)).collect();
+                    return Ok(format!("panic!({})", a?.join(", ")));
+                }
                 let c = self.fmt_expr(callee)?;
                 let targs = if type_args.is_empty() {
                     String::new()
@@ -1451,11 +1455,12 @@ impl RustCodegen {
                 // Check named tuple field access `p.X` -> `p.0`
                 if type_args.is_empty()
                     && let Expr::Ident(var_name) = object.as_ref()
-                        && let Some(info) = self.lookup_var(var_name)
-                            && let Some(map) = &info.tuple_fields
-                                && let Some(idx) = map.get(field) {
-                                    return Ok(format!("{}.{}", var_name, idx));
-                                }
+                    && let Some(info) = self.lookup_var(var_name)
+                    && let Some(map) = &info.tuple_fields
+                    && let Some(idx) = map.get(field)
+                {
+                    return Ok(format!("{}.{}", var_name, idx));
+                }
                 let sep = if self.is_path_expr(object) { "::" } else { "." };
                 let obj = self.fmt_expr(object)?;
                 let mapped_field = if sep == "::" {
@@ -1559,6 +1564,15 @@ impl RustCodegen {
                 sub.emit_match(m)?;
                 sub.out.trim_end().to_string()
             }
+            Expr::Loop { label, block } => {
+                let lbl = label
+                    .as_ref()
+                    .map(|l| format!("'{}: ", l))
+                    .unwrap_or_default();
+                let mut sub = self.child_formatter();
+                sub.emit_block_stmts(block)?;
+                format!("{}loop {{\n{}}}", lbl, sub.out)
+            }
             Expr::LabeledBlock { label, block } => {
                 let mut sub = self.child_formatter();
                 sub.emit_block_stmts(block)?;
@@ -1577,11 +1591,7 @@ impl RustCodegen {
             }
             Expr::InlineRust(raw) => format!("{{ {} }}", raw.trim()),
             Expr::MacroCall(mc) => format_macro_call(mc),
-            Expr::IsPattern {
-                expr,
-                negated,
-                pat,
-            } => {
+            Expr::IsPattern { expr, negated, pat } => {
                 let e = self.fmt_expr(expr)?;
                 let p = self.fmt_pattern(pat)?;
                 if *negated {
@@ -1621,10 +1631,9 @@ impl RustCodegen {
 
     fn resolve_struct_name(&self, base: &Expr) -> Result<String> {
         match base {
-            Expr::This => self
-                .current_self_type
-                .clone()
-                .ok_or_else(|| RSharpError::codegen("Cannot resolve struct type for 'this with { ... }'")),
+            Expr::This => self.current_self_type.clone().ok_or_else(|| {
+                RSharpError::codegen("Cannot resolve struct type for 'this with { ... }'")
+            }),
             Expr::Ident(name) => self
                 .lookup_var(name)
                 .and_then(|v| v.struct_path.clone())
@@ -1644,6 +1653,9 @@ impl RustCodegen {
 fn var_info_from_type(ty: &Type) -> VarInfo {
     match ty {
         Type::Path(tp) => {
+            if tp.segments.len() == 1 && map_primitive_alias(&tp.segments[0].name).is_some() {
+                return VarInfo::default();
+            }
             let name = tp
                 .segments
                 .iter()
@@ -1688,9 +1700,10 @@ fn type_to_struct_name(ty: &Type) -> Option<String> {
 
 fn is_list_type(ty: &Type) -> bool {
     if let Type::Path(tp) = ty
-        && let Some(last) = tp.segments.last() {
-            return matches!(last.name.as_str(), "List" | "Vec");
-        }
+        && let Some(last) = tp.segments.last()
+    {
+        return matches!(last.name.as_str(), "List" | "Vec");
+    }
     false
 }
 
@@ -1699,14 +1712,16 @@ fn unwrap_async_task_type(is_async: bool, ty: &Type) -> &Type {
         return ty;
     }
     if let Type::Path(tp) = ty
-        && tp.segments.len() == 1 && tp.segments[0].name == "Task" {
-            if tp.segments[0].args.is_empty() {
-                return &Type::Void;
-            }
-            if let Some(GenericArg::Type(inner)) = tp.segments[0].args.first() {
-                return inner;
-            }
+        && tp.segments.len() == 1
+        && tp.segments[0].name == "Task"
+    {
+        if tp.segments[0].args.is_empty() {
+            return &Type::Void;
         }
+        if let Some(GenericArg::Type(inner)) = tp.segments[0].args.first() {
+            return inner;
+        }
+    }
     ty
 }
 

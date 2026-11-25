@@ -102,12 +102,13 @@ pub fn compile_and_run_rust(rust_source: &str) -> Result<RunOutput> {
 /// Probes `rustc` to recover the inferred concrete type of an unannotated closure parameter `|<param_name>| ...`.
 pub fn probe_closure_param_type(rust_source: &str, param_name: &str, seq: usize) -> Result<String> {
     let marker = format!("__RSHARP_CPROBE_{}__", seq);
-    let injected = inject_closure_param_probe(rust_source, param_name, &marker).ok_or_else(|| {
-        RSharpError::unresolved_type(
-            param_name,
-            "Could not locate closure parameter for type probe",
-        )
-    })?;
+    let injected =
+        inject_closure_param_probe(rust_source, param_name, &marker).ok_or_else(|| {
+            RSharpError::unresolved_type(
+                param_name,
+                "Could not locate closure parameter for type probe",
+            )
+        })?;
 
     run_type_probe(&injected, rust_source, param_name, &marker)
 }
@@ -210,14 +211,18 @@ fn inject_type_probe(source: &str, var_name: &str, marker: &str) -> Option<Strin
     ];
     for pat in &patterns {
         if let Some(start) = source.find(pat)
-            && let Some(semi_rel) = source[start..].find(';') {
-                let insert_pos = start + semi_rel + 1;
-                let mut out = String::with_capacity(source.len() + 64);
-                out.push_str(&source[..insert_pos]);
-                out.push_str(&format!(" struct {}; let _: {} = {};", marker, marker, var_name));
-                out.push_str(&source[insert_pos..]);
-                return Some(out);
-            }
+            && let Some(semi_rel) = source[start..].find(';')
+        {
+            let insert_pos = start + semi_rel + 1;
+            let mut out = String::with_capacity(source.len() + 64);
+            out.push_str(&source[..insert_pos]);
+            out.push_str(&format!(
+                " struct {}; let _: {} = {};",
+                marker, marker, var_name
+            ));
+            out.push_str(&source[insert_pos..]);
+            return Some(out);
+        }
     }
     None
 }
@@ -232,6 +237,6 @@ fn extract_found_type(stderr: &str, marker: &str) -> Option<String> {
     if ty.is_empty() {
         None
     } else {
-        Some(ty.to_string())
+        Some(ty.replace("{integer}", "i32").replace("{float}", "f64"))
     }
 }

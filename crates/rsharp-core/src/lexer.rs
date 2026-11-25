@@ -287,7 +287,7 @@ impl<'a> Lexer<'a> {
         self.bump();
         let body_start = self.pos;
         let mut depth = 1usize;
-        while depth > 0 {
+        loop {
             let Some(c) = self.peek() else {
                 return Err(RSharpError::lex(
                     self.span_from(line, col, start),
@@ -327,15 +327,11 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        unreachable!("loop returns when depth hits 0")
     }
 
     fn lex_number(&mut self, line: usize, col: usize, start: usize) -> Result<Token> {
         if self.peek() == Some('0')
-            && matches!(
-                self.peek_at(1),
-                Some('x' | 'X' | 'b' | 'B' | 'o' | 'O')
-            )
+            && matches!(self.peek_at(1), Some('x' | 'X' | 'b' | 'B' | 'o' | 'O'))
         {
             self.bump();
             self.bump();
@@ -362,9 +358,7 @@ impl<'a> Lexer<'a> {
         }
 
         let mut is_float = false;
-        if self.peek() == Some('.')
-            && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())
-        {
+        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
             is_float = true;
             self.bump();
             while let Some(c) = self.peek() {
@@ -471,7 +465,12 @@ impl<'a> Lexer<'a> {
         ))
     }
 
-    fn lex_interp_string(&mut self, line: usize, col: usize, start: usize) -> Result<Vec<InterpPart>> {
+    fn lex_interp_string(
+        &mut self,
+        line: usize,
+        col: usize,
+        start: usize,
+    ) -> Result<Vec<InterpPart>> {
         let mut parts = Vec::new();
         let mut lit = String::new();
         while let Some(c) = self.bump() {
@@ -519,7 +518,12 @@ impl<'a> Lexer<'a> {
         ))
     }
 
-    fn lex_interp_hole(&mut self, line: usize, col: usize, start: usize) -> Result<(String, Option<String>)> {
+    fn lex_interp_hole(
+        &mut self,
+        line: usize,
+        col: usize,
+        start: usize,
+    ) -> Result<(String, Option<String>)> {
         let mut depth = 1usize;
         let mut paren_depth = 0usize;
         let mut expr_buf = String::new();
@@ -552,7 +556,11 @@ impl<'a> Lexer<'a> {
                     paren_depth = paren_depth.saturating_sub(1);
                     push_hole_char(&mut expr_buf, &mut fmt_buf, c);
                 }
-                ':' if depth == 1 && paren_depth == 0 && fmt_buf.is_none() && self.peek() != Some(':') => {
+                ':' if depth == 1
+                    && paren_depth == 0
+                    && fmt_buf.is_none()
+                    && self.peek() != Some(':') =>
+                {
                     fmt_buf = Some(String::new());
                 }
                 '"' => {

@@ -7,12 +7,67 @@ use rsharp_core::{PreludeMode, TranspileOptions, transpile_to_rust};
 #[test]
 fn test_all_keywords_roundtrip() {
     let keywords = [
-        "read", "write", "take", "slice", "deref", "ptr", "life", "try", "shadow", "require",
-        "rust", "macro", "void", "never", "dynamic", "dyn", "impl", "alias", "type", "struct",
-        "enum", "union", "trait", "Self", "this", "public", "internal", "private", "mut", "const",
-        "static", "async", "unsafe", "extern", "super", "crate", "if", "else", "while", "for",
-        "foreach", "in", "loop", "match", "when", "is", "not", "return", "break", "continue",
-        "await", "with", "new", "as", "where", "namespace", "using", "true", "false", "var", "let",
+        "read",
+        "write",
+        "take",
+        "slice",
+        "deref",
+        "ptr",
+        "life",
+        "try",
+        "shadow",
+        "require",
+        "rust",
+        "macro",
+        "void",
+        "never",
+        "dynamic",
+        "dyn",
+        "impl",
+        "alias",
+        "type",
+        "struct",
+        "enum",
+        "union",
+        "trait",
+        "Self",
+        "this",
+        "public",
+        "internal",
+        "private",
+        "mut",
+        "const",
+        "static",
+        "async",
+        "unsafe",
+        "extern",
+        "super",
+        "crate",
+        "if",
+        "else",
+        "while",
+        "for",
+        "foreach",
+        "in",
+        "loop",
+        "match",
+        "when",
+        "is",
+        "not",
+        "return",
+        "break",
+        "continue",
+        "await",
+        "with",
+        "new",
+        "as",
+        "where",
+        "namespace",
+        "using",
+        "true",
+        "false",
+        "var",
+        "let",
     ];
     for kw in keywords {
         let parsed = Keyword::parse(kw).expect("keyword must parse");
@@ -31,7 +86,7 @@ fn test_lexer_literals_operators_comments_and_verbatim_idents() {
         @read @write @new
         0xFF_u32 0b1010_u8 0o77 42 1_000i64 3.14 2.5e-3 1E+4 5f32
         "hello \"world\"\n" 'a' '\n'
-        $"escaped {{brace}} {x} {y:.2} {(a + b)} {"ok"}"
+        $"escaped {{brace}} \n {x} {y:.2} {(a + b)} {"a\"b"} {rust { 1 }}"
         + ++ += - -- -= -> * *= / /= % %= = == => ! != < <= << <<= > >= >> >>=
         & && &= | || |= ^ ^= ~ : :: . .. ..= ? ?? , ; ( ) { } [ ]
         rust { let s = "}"; /* } */ // }
@@ -40,11 +95,24 @@ fn test_lexer_literals_operators_comments_and_verbatim_idents() {
         foo.rust
     "#;
     let toks = tokenize(src).expect("should lex cleanly");
-    assert!(toks.iter().any(|t| matches!(t.kind, TokenKind::DocComment(ref s) if s == "doc line")));
-    assert!(toks.iter().any(|t| matches!(t.kind, TokenKind::Ident { ref name, verbatim: true } if name == "read")));
-    assert!(toks.iter().any(|t| matches!(t.kind, TokenKind::RustBlock(ref s) if s.contains("let x = { 1 + 2 };"))));
-    assert!(toks.iter().any(|t| matches!(t.kind, TokenKind::InterpString(_))));
-    assert!(toks.iter().any(|t| matches!(t.kind, TokenKind::Kw(Keyword::Rust))));
+    assert!(
+        toks.iter()
+            .any(|t| matches!(t.kind, TokenKind::DocComment(ref s) if s == "doc line"))
+    );
+    assert!(toks.iter().any(
+        |t| matches!(t.kind, TokenKind::Ident { ref name, verbatim: true } if name == "read")
+    ));
+    assert!(toks.iter().any(
+        |t| matches!(t.kind, TokenKind::RustBlock(ref s) if s.contains("let x = { 1 + 2 };"))
+    ));
+    assert!(
+        toks.iter()
+            .any(|t| matches!(t.kind, TokenKind::InterpString(_)))
+    );
+    assert!(
+        toks.iter()
+            .any(|t| matches!(t.kind, TokenKind::Kw(Keyword::Rust)))
+    );
     assert_eq!(toks.last().unwrap().kind, TokenKind::Eof);
 }
 
@@ -58,7 +126,10 @@ fn test_lexer_error_cases() {
         ("''", "Empty char literal"),
         ("'a", "Unterminated char literal"),
         ("'\\", "Unterminated escape sequence in char literal"),
-        ("$\"unterminated", "Unterminated interpolated string literal"),
+        (
+            "$\"unterminated",
+            "Unterminated interpolated string literal",
+        ),
         ("$\"bad\\", "Unterminated escape in interpolated string"),
         ("$\"{}\"", "Empty interpolation expression"),
         ("$\"{x", "Unterminated interpolation expression"),
@@ -93,7 +164,10 @@ fn test_parser_strict_rejections() {
 
     // Rejects unsized array `int[]`
     let err = parse_file("void main() { int[] x = [1]; }").unwrap_err();
-    assert!(err.to_string().contains("Array type requires explicit length"));
+    assert!(
+        err.to_string()
+            .contains("Array type requires explicit length")
+    );
 
     // Rejects `require` with non-pattern condition
     let err = parse_file("void main() { require (true) else { return; } }").unwrap_err();
@@ -395,7 +469,10 @@ public void ExerciseAll()
     )
     .expect("embedded transpile should succeed");
     assert!(rust_embedded.contains("pub mod App"));
-    assert!(rust_embedded.contains("pub trait RawStore") || rust_embedded.contains("pub unsafe trait RawStore"));
+    assert!(
+        rust_embedded.contains("pub trait RawStore")
+            || rust_embedded.contains("pub unsafe trait RawStore")
+    );
     assert!(rust_embedded.contains("macro_rules! MyEcho"));
 
     let rust_crate = transpile_to_rust(
@@ -432,4 +509,227 @@ fn test_error_display_variants() {
     for e in errs {
         assert!(!e.to_string().is_empty());
     }
+}
+
+#[test]
+fn test_codegen_and_parser_edge_cases() {
+    let src = r#"
+///
+/// Multi-line doc with empty line
+[module: Warn(unused)]
+[serde.rename("x")]
+[Inline(Never)]
+[Inline(hint)]
+[Test]
+[CfgAttr(test, allow(dead_code))]
+[Deny(warnings)]
+[Repr(C)]
+[NoMangle]
+[MustUse]
+[Deprecated]
+[ShouldPanic]
+[Ignore]
+[NonExhaustive]
+[Doc("hi")]
+[Cold]
+[TrackCaller]
+[ProcMacro]
+[ProcMacroDerive(Foo)]
+[ProcMacroAttribute]
+public struct TupleWithAttr([Allow(dead_code)] public sbyte, byte, short, ushort, uint, ulong, int128, uint128, nint, float);
+
+namespace ExternalMod;
+
+extern
+{
+    void raw_fn();
+}
+
+my_macro! { a = 1 }
+my_list_macro![1, 2, 3];
+
+public trait ExtraTrait
+{
+    type Assoc;
+    const int NO_DEF;
+    void TakeAll(read this);
+}
+
+public struct Boxed
+{
+    public int V;
+}
+
+impl Boxed
+{
+    public const int ID = 1;
+    public Self CloneWith(read this, int v)
+    {
+        return this with { V = v };
+    }
+}
+
+public void TestEdgeStatements(Boxed b, (int, int) pair)
+{
+    Boxed b2 = b with { V = 2 };
+    _ = b2;
+    (int) -> void cb = (int x) => { _ = x; };
+    _ = cb;
+    mut List<int> l = List<int>.new();
+    _ = l;
+    string plain = $"plain_only";
+    _ = plain;
+    match (pair)
+    {
+        (int x, int y) => { _ = x + y; }
+    }
+    match (b)
+    {
+        Boxed { mut int V } => { V += 1; _ = V; }
+    }
+    match (b)
+    {
+        Boxed { V: 0, .. } => { return; }
+        Boxed { V: int k } => { _ = k; }
+    }
+    int loopVal = loop
+    {
+        break 42;
+    };
+    _ = loopVal;
+    for (int k = 0; k < 1; )
+    {
+        _ = k;
+        break;
+    }
+    int zeroInit;
+    zeroInit = 1;
+    _ = zeroInit;
+    string msg = "boom".ToString();
+    if (false)
+    {
+        panic(msg);
+    }
+    if (false)
+    {
+        panic("fmt {}", 1);
+    }
+    foo.bar![1, 2];
+    foo.bar!{ a };
+}
+"#;
+    let rust = transpile_to_rust(
+        src,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("edge cases should transpile");
+    assert!(rust.contains("mod ExternalMod;"));
+    assert!(rust.contains("unsafe extern {"));
+    assert!(rust.contains("my_macro!{ a = 1 }"));
+    assert!(rust.contains("Boxed { V: v, ..self }"));
+    assert!(rust.contains("format!(\"plain_only\")"));
+    assert!(rust.contains("break 42;"));
+    assert!(rust.contains("#[inline(never)]"));
+    assert!(rust.contains("#[inline(hint)]"));
+    assert!(rust.contains("#[no_mangle]"));
+
+    // Error paths on `with`, unterminated delimiters, and high-level helpers
+    assert!(
+        transpile_to_rust(
+            "void main() { int a = this with { X = 1 }; }",
+            TranspileOptions::default()
+        )
+        .is_err()
+    );
+    assert!(
+        transpile_to_rust(
+            "void main() { int x = 1; int y = x with { A = 1 }; }",
+            TranspileOptions::default()
+        )
+        .is_err()
+    );
+    assert!(parse_file("[Derive(Debug").is_err());
+    assert!(parse_file("void main() { int x = ; }").is_err());
+    assert!(parse_file("void main() { mut 123; }").is_err());
+    assert!(parse_file("void main() { shadow int 123; }").is_err());
+    assert!(parse_file("void main() { int x = 1 +; }").is_err());
+    assert!(parse_file("struct 123 {}").is_err());
+    assert!(parse_file("public(foo) void f() {}").is_err());
+    assert!(parse_file("void f(int x) { return 1").is_err());
+
+    let tmp_bin = std::env::temp_dir().join("rsharp_never_created_bin");
+    assert!(rsharp_core::build_rsharp("void main() { var x = 1; }", &tmp_bin).is_err());
+    assert!(rsharp_core::run_rsharp("void main() { var x = 1; }").is_err());
+    assert!(rsharp_core::check_rsharp("void main() { var x = 1; }").is_err());
+    assert!(rsharp_core::run_rsharp("void main() { int x = \"bad\"; }").is_err());
+
+    // Extra parser & codegen branch coverage
+    let extra_rsh = r#"
+        /// Doc
+        public struct Holder<life a, const nuint N>
+            where life a : static
+        {
+            public read<a> str Text;
+        }
+
+        public Holder<life static, 4> MakeH(read<static> str s)
+        {
+            return new Holder { Text = s };
+        }
+
+        public void ExtraControl(bool c, int? o)
+        {
+            if (c)
+            {
+                return;
+            }
+            for (int x = 0; ; x += 1)
+            {
+                _ = x;
+                break;
+            }
+            for (mut int i = 0; i < 2; i++)
+            {
+                _ = i;
+            }
+            mut int k = 0;
+            for (k = 0; k < 1; k++)
+            {
+                _ = k;
+            }
+            int x = match (o)
+            {
+                Some(int v) => v,
+                None => 0,
+            };
+            _ = x;
+            bool m = o is Some(1);
+            bool nm = o is not Some(1);
+            _ = (m, nm);
+            read str lit = "x";
+            _ = lit;
+            int neg = match (-5)
+            {
+                -5 => 1,
+                -2.0 => 2,
+                'a' => 3,
+                "s" => 4,
+                true => 5,
+                false => 6,
+                _ => 0,
+            };
+            _ = neg;
+        }
+    "#;
+    let extra_rs = transpile_to_rust(
+        extra_rsh,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("extra parser/codegen branches should transpile");
+    assert!(extra_rs.contains("Holder<'static, 4>"));
+    assert!(extra_rs.contains("where 'a: 'static"));
 }

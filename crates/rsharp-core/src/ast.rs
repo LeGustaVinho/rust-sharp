@@ -88,14 +88,8 @@ pub struct WhereClause {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WherePredicate {
-    Type {
-        ty: Type,
-        bounds: Vec<TypeBound>,
-    },
-    Lifetime {
-        life: String,
-        outlives: Vec<String>,
-    },
+    Type { ty: Type, bounds: Vec<TypeBound> },
+    Lifetime { life: String, outlives: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -615,6 +609,10 @@ pub enum Expr {
         body: LambdaBody,
     },
     Match(MatchExpr),
+    Loop {
+        label: Option<String>,
+        block: Block,
+    },
     LabeledBlock {
         label: String,
         block: Block,

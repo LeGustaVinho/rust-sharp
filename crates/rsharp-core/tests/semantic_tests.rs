@@ -224,3 +224,33 @@ fn semantic_check_library_without_main() {
     .unwrap();
     assert!(rs.contains("pub fn Square(x: i32) -> i32"));
 }
+
+#[test]
+fn semantic_native_rust_stdlib_names_coexist_with_rsharp_aliases() {
+    let src = r#"
+        void main()
+        {
+            mut Vec<i32> native_vec = [1, 2];
+            native_vec.push(3);
+            mut List<int> alias_list = [4, 5];
+            alias_list.Add(6);
+
+            mut VecDeque<i32> native_q = VecDeque.new();
+            native_q.push_back(10);
+            mut Queue<int> alias_q = Queue.new();
+            alias_q.Enqueue(20);
+
+            mut HashMap<String, i32> native_map = HashMap.new();
+            native_map.insert("a".to_string(), 1);
+            mut Dictionary<string, int> alias_map = Dictionary.new();
+            alias_map.Add("b".ToString(), 2);
+
+            Option<i32> opt1 = Some(7);
+            int? opt2 = Some(8);
+            PrintLine($"{native_vec.len()},{alias_list.Count()},{native_q.len()},{alias_q.Count()},{native_map.len()},{alias_map.Count()},{opt1.unwrap() + opt2.unwrap()}");
+        }
+    "#;
+    let out = run_rsharp(src).expect("native Rust names and R# aliases must coexist seamlessly");
+    assert_eq!(out.exit_code, 0);
+    assert_eq!(out.stdout.trim(), "3,3,1,1,1,1,15");
+}
