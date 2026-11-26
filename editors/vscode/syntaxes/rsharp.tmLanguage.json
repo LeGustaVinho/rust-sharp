@@ -352,7 +352,7 @@
         },
         {
           "name": "keyword.control.flow.rsharp",
-          "match": "\\b(?:return|break|continue|try|await)\\b"
+          "match": "\\b(?:return|break|continue|try|await|yield)\\b"
         },
         {
           "name": "keyword.other.directive.rsharp",
@@ -361,6 +361,10 @@
         {
           "name": "storage.modifier.rsharp",
           "match": "\\b(?:public|internal|private|mut|const|static|async|unsafe|extern|read|write|take|borrow|shadow|dyn|impl|forall|maybe|capture|safe)\\b"
+        },
+        {
+          "name": "storage.modifier.contextual.rsharp",
+          "match": "\\b(?:auto(?=\\s+trait\\b)|default(?=\\s+(?:unsafe\\s+)?impl\\b))"
         },
         {
           "name": "storage.type.rsharp",
@@ -386,6 +390,10 @@
     },
     "types": {
       "patterns": [
+        {
+          "name": "keyword.type.var.rsharp",
+          "match": "\\bvar\\b"
+        },
         {
           "name": "keyword.type.rsharp",
           "match": "\\b(?:sbyte|byte|short|ushort|int|uint|long|ulong|int128|uint128|nint|nuint|float|double|bool|char|string|str|void|never|dynamic|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)\\b"

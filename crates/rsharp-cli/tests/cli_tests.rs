@@ -120,6 +120,10 @@ fn test_cli_examples_end_to_end() {
             "examples/rust_interop.rsharp",
             "Item(Sword)\nlongest_word\ndynamic=123\nunsafe=42\ninline_rust=42",
         ),
+        (
+            "examples/inference_and_value_blocks.rsharp",
+            "triple=18 lo=105 hi=70 adjusted=-11 total=25",
+        ),
     ];
 
     for (rel, expected) in cases {

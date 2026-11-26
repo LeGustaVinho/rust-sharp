@@ -1,0 +1,48 @@
+/// Demonstrates explicit-preferred typing alongside C#-style `var` inference
+/// for opaque `impl Fn` / closures, inferred lambda parameters, destructuring,
+/// and native value `if` / `{ ... }` block expressions.
+public impl Fn(int) -> int MakeMultiplier(int factor)
+{
+    return take (x) => x * factor;
+}
+
+public int ClassifyScore(int score)
+{
+    var labelValue = if (score < 0)
+    {
+        return -1;
+    }
+    else if (score >= 90)
+    {
+        int bonus = 10;
+        return score + bonus;
+    }
+    else
+    {
+        return score;
+    };
+    return labelValue;
+}
+
+void main()
+{
+    // Prefer explicit types when obvious
+    int base = 6;
+    int offset = 4;
+
+    // Use `var` for opaque `impl Fn` returns, closures, and inferred destructuring
+    var triple = MakeMultiplier(3);
+    var addOffset = (x) => x + offset;
+    mut var total = triple(base) + addOffset(2);
+
+    var (lo, hi) = (ClassifyScore(95), ClassifyScore(70));
+
+    // Native value block expression with explicit `return`
+    int adjusted = {
+        int delta = hi - lo;
+        return total + delta;
+    };
+
+    total += 1;
+    PrintLine($"triple={triple(base)} lo={lo} hi={hi} adjusted={adjusted} total={total}");
+}

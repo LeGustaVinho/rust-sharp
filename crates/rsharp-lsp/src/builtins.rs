@@ -84,8 +84,8 @@ pub const BUILTINS: &[BuiltinEntry] = &[
     BuiltinEntry {
         name: "try",
         kind: BuiltinKind::Keyword,
-        detail: "keyword (Rust: expr?)",
-        doc: "Error/Option propagation operator (`try expr` -> `(expr)?`).",
+        detail: "keyword (Rust: expr? / try { ... })",
+        doc: "Error/Option propagation operator (`try expr` -> `(expr)?`) or `try { ... }` block expression.",
     },
     BuiltinEntry {
         name: "shadow",
@@ -121,7 +121,7 @@ pub const BUILTINS: &[BuiltinEntry] = &[
         name: "impl",
         kind: BuiltinKind::Keyword,
         detail: "keyword",
-        doc: "Trait or inherent implementation block (`impl Trait for Type`), or opaque return type (`impl Trait`).",
+        doc: "Trait or inherent implementation block (`impl Trait for Type`, `default impl`, `impl !Trait for Type`), or opaque return type (`impl Trait`).",
     },
     BuiltinEntry {
         name: "alias",
@@ -133,7 +133,7 @@ pub const BUILTINS: &[BuiltinEntry] = &[
         name: "type",
         kind: BuiltinKind::Keyword,
         detail: "keyword",
-        doc: "Associated type declaration inside a `trait` or `impl` block.",
+        doc: "Associated type declaration inside a `trait`/`impl` block, or abstract/extern opaque type (`type Opaque;`).",
     },
     BuiltinEntry {
         name: "struct",
@@ -157,7 +157,13 @@ pub const BUILTINS: &[BuiltinEntry] = &[
         name: "trait",
         kind: BuiltinKind::Keyword,
         detail: "keyword",
-        doc: "Trait (interface) declaration specifying shared behavior.",
+        doc: "Trait (interface) declaration (`trait`, `auto trait`) or trait alias (`trait CopyClone = Clone + Copy;`).",
+    },
+    BuiltinEntry {
+        name: "var",
+        kind: BuiltinKind::Keyword,
+        detail: "keyword (Rust: let)",
+        doc: "Inferred local variable or destructuring binding (`var x = expr;`, `mut var x = expr;`, `var (a, b) = pair;`). Prefer explicit types when obvious.",
     },
     BuiltinEntry {
         name: "Self",
@@ -386,6 +392,12 @@ pub const BUILTINS: &[BuiltinEntry] = &[
         kind: BuiltinKind::Keyword,
         detail: "contextual keyword (Rust: use<...>)",
         doc: "Precise capture bound on `impl Trait` (`impl Display + capture<life a, T>`).",
+    },
+    BuiltinEntry {
+        name: "yield",
+        kind: BuiltinKind::Keyword,
+        detail: "contextual keyword (Rust: yield)",
+        doc: "Yields a value from a coroutine/generator expression (`yield expr` or `yield`).",
     },
     // Primitive types (R# aliases + native Rust primitives)
     BuiltinEntry {

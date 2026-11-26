@@ -397,7 +397,20 @@ impl<'a> Scanner<'a> {
                 TokenKind::Ident {
                     name,
                     verbatim: false,
-                } if name == "safe" => {
+                } if name == "safe"
+                    || (name == "auto"
+                        && self.pos + 1 < end
+                        && matches!(
+                            self.tokens[self.pos + 1].kind,
+                            TokenKind::Kw(Keyword::Trait)
+                        ))
+                    || (name == "default"
+                        && self.pos + 1 < end
+                        && matches!(
+                            self.tokens[self.pos + 1].kind,
+                            TokenKind::Kw(Keyword::Impl | Keyword::Unsafe)
+                        )) =>
+                {
                     self.pos += 1;
                 }
                 _ => break,
@@ -927,18 +940,35 @@ impl<'a> Scanner<'a> {
         self.pos += 1; // 'trait'
         let (name, sel_span) = self.take_ident(end)?;
         let generic_pos = self.pos;
-        while self.pos < end && !matches!(self.tokens[self.pos].kind, TokenKind::LBrace) {
+        while self.pos < end
+            && !matches!(
+                self.tokens[self.pos].kind,
+                TokenKind::LBrace | TokenKind::Semicolon
+            )
+        {
             self.pos += 1;
         }
         let header_end = self.tokens[self.pos.saturating_sub(1)].span.end;
-        let close = self.find_matching_delim(self.pos, &TokenKind::LBrace, &TokenKind::RBrace);
-        let full_end = self.tokens[close].span.end;
-        let saved = self.pos;
-        self.pos = generic_pos;
-        self.scan_generic_params(end, item_start.start, full_end);
-        self.pos = (saved + 1).min(close);
-        let children = self.scan_items(close, Some(&name), item_start.start, full_end);
-        self.pos = (close + 1).min(end);
+        let (full_end, children) = if self.pos < end
+            && matches!(self.tokens[self.pos].kind, TokenKind::LBrace)
+        {
+            let close = self.find_matching_delim(self.pos, &TokenKind::LBrace, &TokenKind::RBrace);
+            let full_end = self.tokens[close].span.end;
+            let saved = self.pos;
+            self.pos = generic_pos;
+            self.scan_generic_params(end, item_start.start, full_end);
+            self.pos = (saved + 1).min(close);
+            let children = self.scan_items(close, Some(&name), item_start.start, full_end);
+            self.pos = (close + 1).min(end);
+            (full_end, children)
+        } else {
+            let full_end = self.tokens[self.pos.min(end.saturating_sub(1))].span.end;
+            let saved = self.pos;
+            self.pos = generic_pos;
+            self.scan_generic_params(end, item_start.start, full_end);
+            self.pos = (saved + 1).min(end);
+            (full_end, Vec::new())
+        };
         Some(DeclSymbol {
             name: name.clone(),
             kind: DeclKind::Trait,

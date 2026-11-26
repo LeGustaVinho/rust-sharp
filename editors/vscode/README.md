@@ -20,7 +20,7 @@ Language support for **R# (`.rsharp`)** in Visual Studio Code, powered by the na
 
 Open a trusted folder with a root `Cargo.toml`, Rust sources, and no R# sources. VS Code offers to convert the project even when no file is open. Close the notification to defer until you reopen the project, or select **Don't Ask Again Here** to remember that choice for this folder in the workspace.
 
-Select **Convert to R#** to convert the saved sources with `rsharp from-rust --project`. The extension verifies each result by translating it back to Rust, then puts the `.rsharp` files in a new `rsharp-…` folder inside the project. Project conversion requires the `rsharp` CLI with project support and the `rust-analyzer` and `rust-src` Rust components.
+Select **Convert to R#** to convert the saved sources with `rsharp from-rust --project`. The CLI discovers compiled Cargo target files via `cargo metadata` (skipping non-member fixtures and templates), prefers explicit types resolved through `rust-analyzer`, and uses native `var` bindings and inferred lambdas for opaque or unnameable types rather than `rust {}` fallbacks. The extension verifies each result by translating it back to Rust, then puts the `.rsharp` files in a new `rsharp-…` folder inside the project. Project conversion requires the `rsharp` CLI with project support and the `rust-analyzer` and `rust-src` Rust components.
 
 ### Build changes with Cargo
 

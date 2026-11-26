@@ -17,7 +17,7 @@ File extension: `.rsharp`
    - `::` -> `.`
    - `#[attr]` / `#![attr]` -> `[Attr]` / `[module: Attr]`
 3. **Immutable by Default**: `int x = 10;` is immutable; `mut int x = 10;` is mutable.
-4. **Explicit Typing Only**: `var` and untyped `let` are rejected. Trait objects (`dyn Trait`) and runtime dynamic values (`dynamic`, backed by `Box<dyn std::any::Any>`) are supported.
+4. **Explicit Typing Preferred, `var` Supported**: Prefer explicit types whenever obvious or easily resolvable; C#-style `var` (`var x = expr;`, `mut var x = expr;`, `var (a, b) = expr;`) and inferred lambda parameters (`(x) => ...`) are supported for opaque, unnameable, or verbose types, while Rust's `let` keyword remains rejected. Trait objects (`dyn Trait`) and runtime dynamic values (`dynamic`, backed by `Box<dyn std::any::Any>`) are supported.
 5. **Explicit Returns Only**: Functions and methods always require `return expr;` (or `return;` for `void`).
 6. **Traits Stay `trait`**: Trait declarations use `trait` and `impl Trait for Type`.
 7. **Method Receivers**: Explicit `read this` (`&self`), `write this` (`&mut self`), `take this` (`self`), or `static` for associated functions.
@@ -54,9 +54,9 @@ File extension: `.rsharp`
 ```ebnf
 File          := InnerAttr* Item*
 Item          := OuterAttr* Visibility? ( NamespaceDecl | UsingDecl | StructDecl
-               | EnumDecl | UnionDecl | TraitDecl | ImplDecl | AliasDecl
-               | ConstDecl | StaticDecl | FnDecl | ExternBlock | MacroDecl
-               | InlineRust | MacroCall ';' )
+               | EnumDecl | UnionDecl | TraitDecl | TraitAliasDecl | ImplDecl
+               | AliasDecl | AbstractTypeDecl | ConstDecl | StaticDecl | FnDecl
+               | ExternBlock | MacroDecl | InlineRust | MacroCall ';' )
 
 Type          := ('read' | 'write') LifetimeArg? ( 'slice' '<' Type '>' | 'ptr' '<' Type '>' | 'dyn' TraitBounds | Type )
                | 'slice' '<' Type '>'
@@ -74,10 +74,11 @@ FnDecl        := 'const'? 'async'? 'unsafe'? ('extern' StringLit?)? 'static'?
 Stmt          := LocalDecl | ConstDecl | StaticDecl | Item
                | IfStmt | RequireStmt | WhileStmt | ForStmt | ForeachStmt
                | LoopStmt | MatchStmt | ReturnStmt | BreakStmt | ContinueStmt
-               | UnsafeBlock | InlineRust | ExprStmt
+               | UnsafeBlock | TryBlock | Block | InlineRust | ExprStmt
 
-LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
-               | '(' TypedBinding (',' TypedBinding)* ')' '=' Expr ';'
+LocalDecl     := 'shadow'? 'mut'? (Type | 'var') Ident ('=' Expr)? ';'
+               | 'var' Pattern (':' Type)? ('=' Expr)? ';'
+               | Pattern (':' Type)? '=' Expr ';'
 ```
 
 ## 4. Rust 2024 Parity Extensions
@@ -161,7 +162,25 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
 | `\|_\|\|`, `\|(i, _)\|`, `let (a, mut b) = pair;` | `(_) => ...`, `((nuint i, _)) => ...`, `(int a, mut b) = pair;` |
 | `Foo<{ let k = 1; k + 1 }>` *(multi-statement const generic block)* | `Foo<{ int k = 1; return k + 1; }>` |
 
-> **Intentionally Deferred (Nightly-Only on `rustc 1.99.1 --edition=2024`)**: `gen`/`yield` blocks & functions, `try { ... }` blocks, `trait Alias = ...`, `extern type T;`, `impl !Trait for T`, `const trait` / `~const`, associated const equality (`Tr<C = 1>`), `for<'a> \|...\|` closure binders, `become` tail calls, `box` patterns, `default` specialization, `const { ... }` patterns, `more_qualified_paths` in struct literals, `const \|\|` / `static \|\|`, `auto trait`, postfix `.use` / `.match`.
+### Zero-Fallback & Nightly AST Parity Extensions
+
+| Rust Construct | R# Syntax |
+| :--- | :--- |
+| `let x = opaque();`, `let mut x = expr;` | `var x = opaque();`, `mut var x = expr;` *(prefer explicit type when obvious)* |
+| `let (a, mut b) = pair;`, `let (a, b);`, `let ref r = x;` | `var (a, mut b) = pair;`, `var (a, b);`, `var borrow read r = x;` |
+| `\|x\| x + 1`, `\|mut a, b\| a + b` *(inferred closure params)* | `(x) => x + 1`, `(mut a, b) => a + b` |
+| `let v = if c { let t = 1; t } else { 2 };` *(multi-stmt value `if`)* | `var v = if (c) { int t = 1; return t; } else { return 2; };` |
+| `let v = { let t = 1; t + 1 };`, `&{ p.0 }` *(value / move block)* | `var v = { int t = 1; return t + 1; };`, `read { return p.0; }` |
+| `pub trait CopyClone<T> = Clone + Copy where T: Send;` | `public trait CopyClone<T> = Clone + Copy where T : Send;` |
+| `auto trait MyAuto {}`, `unsafe auto trait U {}` | `auto trait MyAuto {}`, `unsafe auto trait U {}` |
+| `default impl Tr for T {}`, `default unsafe impl Send for T {}` | `default impl Tr for T {}`, `default unsafe impl Send for T {}` |
+| `impl !Sync for T {}` | `impl !Sync for T {}` |
+| `extern "C" { pub type Opaque; }`, `impl T { type Elem; }`, `type bool;` | `extern "C" { public type Opaque; }`, `impl T { type Elem; }`, `type bool;` |
+| `try { let x = f()?; Ok(x) }` | `try { var x = try f(); return Ok(x); }` |
+| `yield expr`, `yield` | `yield expr`, `yield` |
+| `!(let Some(_) = opt)` *(boolean `Expr::Let`)* | `!((opt is Some(_)))` |
+
+> **Intentionally Deferred (Experimental Nightly-Only)**: `gen` blocks & functions, `const trait` / `~const`, associated const equality (`Tr<C = 1>`), `for<'a> \|...\|` closure binders, `become` tail calls, `box` patterns, `default fn` specialization, `const { ... }` patterns, `more_qualified_paths` in struct literals, `const \|\|` / `static \|\|`, postfix `.use` / `.match`, and generic/verbatim top-level `type T<X>;` declarations (safely preserved in `rust { ... }` during conversion).
 
 ## 5. Bidirectional Conversion Rules
 
@@ -173,10 +192,12 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
   - `$"...{expr}..."` desugars to `format!("...{}...", expr)`.
   - `try expr` desugars to `(expr)?` and `await expr` desugars to `(expr).await`.
   - `p with { X = 1 }` desugars to `Type { X: 1, ..p }`.
-  - Pattern bindings (`foreach`, `if is`, `while is`, `require is`, `match`) emit zero-cost compile-time type checks (`let _: &T = &x;`) enforced by `rustc`.
+  - Value blocks (`{ ... return expr; }`, `if (...) { ... return expr; }`, `try { ... return expr; }`) lift trailing `return expr;` into Rust tail expressions (wrapping `#[cfg]`-gated returns in `{ expr }`), while preserving early function returns via `return (return expr);`.
+  - `var` bindings lower directly to `let [mut] pat [= init];`, and typed pattern bindings (`foreach`, `if is`, `while is`, `require is`, `match`) emit zero-cost compile-time type checks (`let _: &T = &x;`) enforced by `rustc`.
 - **Rust -> R#**:
   - Parses Rust via `syn` (full syntax).
-  - Resolves untyped `let` bindings and closure parameters using local type inference, standalone `rustc` type probing, or batch Cargo-workspace type hints via `rust-analyzer` (`rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict]` / `--workspace <dir>`).
-  - Converts implicit tail returns into explicit `return expr;` statements.
-  - Converts `&`, `&mut`, `&'a`, `&[T]`, `*const`, `*mut`, `::`, `#[...]`, `?`, `.await`, `for`, `if let`, `while let`, `let ... else`, `match`, `..base`, closures, and stdlib types into idiomatic R#.
-  - Falls back to statement/expression-level `rust { ... }` for unnameable Rust types (e.g., nested closure/iterator adapters or unimported `dyn Trait` objects) unless `--strict` is enabled, preserving 100% of Rust semantics.
+  - Discovers compiled Cargo target files via `cargo metadata --no-deps --format-version 1` in `--project` mode (automatically excluding non-member fixtures and templates; pass `--all-rs-files` to walk all `.rs` files).
+  - Prefers explicit types whenever obvious or safely resolved via local type inference, standalone `rustc` type probing, or batch Cargo-workspace hints from `rust-analyzer` (`rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict] [--no-ra] [--all-rs-files] [--no-raw-rust]`).
+  - Emits native `var` bindings and inferred lambda parameters `(x) => ...` (instead of `rust { ... }`) whenever a type is unnameable, opaque, `#[cfg]`-inactive, unresolvable without `rust-analyzer`, or unsafe to annotate explicitly (such as elided-reference closure parameters or higher-ranked `fn(&T) -> ...` pointers), unless `--strict` is enabled.
+  - Converts implicit tail returns into explicit `return expr;` statements, and converts `&`, `&mut`, `&'a`, `&[T]`, `*const`, `*mut`, `::`, `#[...]`, `?`, `.await`, `for`, `if let`, `while let`, `let ... else`, `match`, `..base`, closures, value blocks, and stdlib types into idiomatic R#.
+  - Reserves inline `rust { ... }` strictly for unsupported experimental nightly verbatim constructs; pass `--no-raw-rust` to enforce zero `rust { ... }` blocks in CI/project conversions.

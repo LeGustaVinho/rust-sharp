@@ -53,8 +53,8 @@ cargo run -p rsharp-cli -- to-rust hello.rsharp --prelude none
 ## Language features
 
 - **Ownership and lifetimes.** Use `read` for shared borrows, `write` for exclusive mutable borrows, `take` to mark a move, and `deref` for dereferencing. Write lifetime parameters as `life a` and borrow slices with `read slice<T>` or `write slice<T>`. Rust checks lifetimes, aliasing, and uses after a move.
-- **Declarations and data.** Put types before binding names and mark mutable bindings with `mut`. R# supports structs with inline methods, tuple structs, data-carrying enums, unions, and struct updates with `with`. Fixed-size arrays, multidimensional indexing, and named tuple fields lower to native Rust arrays and tuples.
-- **Control flow and patterns.** Use C-style `for`, iterator-based `foreach`, and labeled loops and blocks. `if` and `while` accept `is` patterns and pattern chains. `match` supports guards with `when`, along with range, slice, and destructuring patterns. `require ... else` binds a successful pattern for the rest of the scope.
+- **Declarations and data.** Put types before binding names and mark mutable bindings with `mut` (explicit types are preferred, with C#-style `var` and inferred `(x) =>` lambdas available for opaque, unnameable, or verbose types). R# supports structs with inline methods, tuple structs, data-carrying enums, unions, and struct updates with `with`. Fixed-size arrays, multidimensional indexing, and named tuple fields lower to native Rust arrays and tuples.
+- **Control flow and patterns.** Use C-style `for`, iterator-based `foreach`, labeled loops and blocks, and value-producing `if` / `{ ... }` / `try { ... }` block expressions. `if` and `while` accept `is` patterns and pattern chains. `match` supports guards with `when`, along with range, slice, and destructuring patterns. `require ... else` binds a successful pattern for the rest of the scope.
 - **Optional values and errors.** `T?` maps to `Option<T>`, and `T??` is a nested option. `value ?? fallback` evaluates the fallback only for `None`. Use `try` for Rust-style early propagation from `Result` or `Option`.
 - **Traits, generics, and callables.** Define `trait` and `impl` blocks, associated types, generic associated types, const generics, and `where` clauses. Use `dyn Trait` for trait objects, `impl Trait` for opaque returns or parameter bounds, `=>` lambdas for closures, and signatures like `(int) -> int` for function pointers.
 - **Async and const evaluation.** `async Task<T>` and `await` lower to Rust async functions and `.await`, so the resulting futures use Rust's executor model. Const functions and inline const blocks lower to Rust compile-time constructs.
@@ -67,6 +67,8 @@ cargo run -p rsharp-cli -- to-rust hello.rsharp --prelude none
 | --- | --- | --- |
 | Local binding | `int count = 3;` | `let count: i32 = 3;` |
 | Mutable binding | `mut int count = 3;` | `let mut count: i32 = 3;` |
+| Inferred local (`var`) | `var f = (x) => x + 1;` | `let f = \|x\| x + 1;` |
+| Value `if` block | `var v = if (ok) { return 1; } else { return 2; };` | `let v = if ok { 1 } else { 2 };` |
 | Shared and mutable borrows | `read value`, `write value` | `&value`, `&mut value` |
 | Move a value into a call | `Consume(take value)` | `Consume(value)` |
 | Borrowed slice with a lifetime | `read<a> slice<int>` | `&'a [i32]` |
@@ -241,21 +243,24 @@ cargo install --path crates/rsharp-cli --locked
 | `rsharp run <file.rsharp>` | Compile and run an R# program. |
 | `rsharp lsp` | Start the R# language server over standard input and output. |
 
-The single-file conversion commands write to standard output unless you pass `-o`. Rust-to-R# conversion depends on the constructs and type information available in the input. The converter can preserve some Rust constructs in inline `rust { ... }` blocks.
+The single-file conversion commands write to standard output unless you pass `-o`. When converting from Rust, R# prefers explicit types whenever obvious or resolvable and emits native `var` bindings and inferred lambda parameters otherwise, reserving inline `rust { ... }` only for unsupported experimental nightly syntax.
 
 ### Convert Rust with Cargo workspace context
 
-Development builds that list `--workspace` and `--project` in `rsharp --help` can use `rust-analyzer` to resolve types using the Cargo workspace. Install `rust-analyzer` and `rust-src` for your Rust toolchain.
+Use `--workspace` or `--project` to convert Cargo crates with `rust-analyzer` type resolution (install `rust-analyzer` and `rust-src` for full explicit type hints, or pass `--no-ra` for fast offline conversion using local inference + `var`).
 
 ```sh
 rustup component add rust-analyzer rust-src
 rsharp from-rust path/to/project/src/lib.rs --workspace path/to/project -o lib.rsharp
-rsharp from-rust --project path/to/project -o converted --verify
+rsharp from-rust --project path/to/project -o converted --verify --no-raw-rust
 ```
 
-`--workspace` converts one file with workspace context. `--project` walks Rust source files and, with `-o`, writes the converted files under the output directory with their relative paths. `--verify` transpiles each result back to Rust as a conversion check.
-
-Workspace-backed conversion can preserve bindings with unnameable types in inline Rust. Use `--strict` in either mode to report those bindings as errors.
+- `--workspace` converts a single file with Cargo workspace context.
+- `--project` discovers compiled Cargo target `.rs` files via `cargo metadata` (automatically skipping non-member fixtures and templates; pass `--all-rs-files` to walk every `.rs` file) and writes converted `.rsharp` files under `-o` preserving relative paths.
+- `--verify` transpiles every converted `.rsharp` file back to Rust to verify syntax and codegen round-trip parity.
+- `--no-ra` skips `rust-analyzer` and converts immediately with local inference + `var`.
+- `--no-raw-rust` fails if any converted file requires a `rust { ... }` fallback block (reporting per-file counts).
+- `--strict` rejects bindings whose types cannot be written explicitly instead of emitting `var` or inferred lambda parameters.
 
 ## Examples and language reference
 
@@ -264,6 +269,7 @@ Workspace-backed conversion can preserve bindings with unnameable types in inlin
 | [Bank accounts](examples/accounts.rsharp) | Structs, methods, borrowing, slices, and `Result` |
 | [Matrices and control flow](examples/matrices_and_control.rsharp) | Matrices, named tuples, pattern matching, and error propagation |
 | [Rust interoperability](examples/rust_interop.rsharp) | Traits, lifetimes, dynamic dispatch, and inline Rust |
+| [Inference and value blocks](examples/inference_and_value_blocks.rsharp) | Explicit-preferred typing, `var` for opaque `impl Fn` / closures, inferred lambdas, and value `if` / `{ ... }` blocks |
 
 The [language specification](docs/syntax-spec.md) covers grammar, standard library aliases, and how constructs translate between R# and Rust.
 

@@ -111,6 +111,10 @@ describe("VS Code manifest, grammar, language config, and snippets", () => {
       path.join(REPO_ROOT, "examples", "rust_interop.rsharp"),
       "utf8",
     );
+    const inference = fs.readFileSync(
+      path.join(REPO_ROOT, "examples", "inference_and_value_blocks.rsharp"),
+      "utf8",
+    );
 
     const inlineRustRe = new RegExp(grammar.repository["inline-rust"].begin);
     assert.match(interop, inlineRustRe);
@@ -121,6 +125,22 @@ describe("VS Code manifest, grammar, language config, and snippets", () => {
     const interpRe = new RegExp(grammar.repository.strings.patterns[0].begin);
     assert.match(accounts, interpRe);
     assert.match(matrices, interpRe);
+    assert.match(inference, interpRe);
+
+    const varRe = new RegExp(grammar.repository.types.patterns[0].match);
+    assert.match(inference, varRe);
+
+    const flowRe = new RegExp(grammar.repository.keywords.patterns[2].match);
+    assert.match("yield 42;", flowRe);
+
+    const contextualModRe = new RegExp(
+      grammar.repository.keywords.patterns[5].match,
+    );
+    assert.match("auto trait MyAuto {}", contextualModRe);
+    assert.match("default impl Tr for S {}", contextualModRe);
+    assert.match("default unsafe impl Send for S {}", contextualModRe);
+    assert.doesNotMatch("int auto = 1; auto = 2;", contextualModRe);
+    assert.doesNotMatch("int default = 1; default = 2;", contextualModRe);
 
     const structDeclRe = new RegExp(
       grammar.repository.declarations.patterns[0].match,

@@ -1167,6 +1167,11 @@ void f() { Color.; unknown_recv.; List x = new List {}; x.; Color.Missing; }
         "const read x = 1;",
         "void m() { if (a < b; c) {} }",
         ".orphan",
+        "auto",
+        "default",
+        "auto fn_ret() {}",
+        "default fn_ret() {}",
+        "trait Truncated",
     ];
     for snippet in malformed_snippets {
         let toks = rsharp_core::lexer::tokenize(snippet).unwrap();
@@ -1175,6 +1180,50 @@ void f() { Color.; unknown_recv.; List x = new List {}; x.; Color.Missing; }
         let _ = idx.to_document_symbols(snippet, &lines);
         let _ = rsharp_lsp::semantic_tokens::compute_semantic_tokens(snippet, &toks, &lines, &idx);
     }
+
+    // Verify new zero-fallback constructs in LSP: `var`, `yield`, `trait Alias = ...;`,
+    // `auto trait`, `default impl`, `default unsafe impl`, and the new example file.
+    let parity_src = "auto trait MyAuto {}\npublic trait CopyClone<T> = Clone + Copy;\nstruct S;\ndefault impl MyAuto for S {}\ndefault unsafe impl Send for S {}\nvoid use_var() { var x = 1; mut var y = yield x; _ = y; }\n";
+    let parity_toks = rsharp_core::lexer::tokenize(parity_src).unwrap();
+    let parity_idx = DocumentIndex::build(parity_src, &parity_toks);
+    let parity_lines = LineIndex::new(parity_src);
+    let parity_syms = parity_idx.to_document_symbols(parity_src, &parity_lines);
+    let parity_names: Vec<&str> = parity_syms.iter().map(|s| s.name.as_str()).collect();
+    assert!(parity_names.contains(&"MyAuto"), "got: {parity_names:?}");
+    assert!(parity_names.contains(&"CopyClone"), "got: {parity_names:?}");
+    assert!(parity_names.contains(&"use_var"), "got: {parity_names:?}");
+    assert!(rsharp_lsp::builtins::find_builtin("var").is_some());
+    assert!(rsharp_lsp::builtins::find_builtin("yield").is_some());
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let inference_src = std::fs::read_to_string(
+        manifest_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/inference_and_value_blocks.rsharp"),
+    )
+    .unwrap();
+    let uri_inf = test_uri("inference_and_value_blocks.rsharp");
+    h.notify(
+        "textDocument/didOpen",
+        serde_json::to_value(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri_inf.clone(),
+                language_id: "rsharp".to_string(),
+                version: 1,
+                text: inference_src,
+            },
+        })
+        .unwrap(),
+    );
+    let inf_diags = h.recv_diagnostics();
+    assert!(
+        inf_diags.diagnostics.is_empty(),
+        "unexpected diagnostics on inference_and_value_blocks.rsharp: {:?}",
+        inf_diags.diagnostics
+    );
 
     h.shutdown();
 }
