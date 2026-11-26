@@ -631,3 +631,108 @@ fn test_cli_from_rust_project_parallel_determinism() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn test_cli_to_rust_project_parallel_and_errors() {
+    let base = std::env::temp_dir().join(format!("rsharp_cli_to_rust_par_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("rsh_proj");
+    let src = proj.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let empty_dir = base.join("empty");
+    std::fs::create_dir_all(&empty_dir).unwrap();
+
+    for i in 0..48 {
+        std::fs::write(
+            src.join(format!("mod_{i:02}.rsharp")),
+            format!("public int Val_{i}(int x)\n{{\n    return x + {i};\n}}\n"),
+        )
+        .unwrap();
+    }
+
+    let proj_str = proj.to_string_lossy().to_string();
+    // CLI flag & directory error paths
+    assert_eq!(run_cli(&args(&["to-rust", "--project"])).exit_code, 1);
+    assert_eq!(
+        run_cli(&args(&[
+            "to-rust",
+            "--project",
+            &base.join("missing").to_string_lossy()
+        ]))
+        .exit_code,
+        1
+    );
+    assert_eq!(
+        run_cli(&args(&["to-rust", "--project", &proj_str, "-o"])).exit_code,
+        1
+    );
+    assert_eq!(
+        run_cli(&args(&["to-rust", "--project", &proj_str, "--prelude"])).exit_code,
+        1
+    );
+    assert_eq!(
+        run_cli(&args(&[
+            "to-rust",
+            "--project",
+            &proj_str,
+            "--prelude",
+            "bogus"
+        ]))
+        .exit_code,
+        1
+    );
+    assert_eq!(
+        run_cli(&args(&["to-rust", "--project", &proj_str, "--unknown"])).exit_code,
+        1
+    );
+    let empty_out = run_cli(&args(&[
+        "to-rust",
+        "--project",
+        &empty_dir.to_string_lossy(),
+    ]));
+    assert_eq!(empty_out.exit_code, 1);
+    assert!(empty_out.stderr.contains("No .rsharp files"));
+
+    // Parallel batch transpilation with -o and --prelude none|crate|embedded
+    let out_dir = base.join("out_rs");
+    let ok = run_cli(&args(&[
+        "to-rust",
+        "--project",
+        &proj_str,
+        "-o",
+        &out_dir.to_string_lossy(),
+        "--prelude",
+        "none",
+    ]));
+    assert_eq!(ok.exit_code, 0, "stderr: {}", ok.stderr);
+    assert!(ok.stdout.contains("Transpiled 48/48 files cleanly"));
+    for i in 0..48 {
+        let rs =
+            std::fs::read_to_string(out_dir.join("src").join(format!("mod_{i:02}.rs"))).unwrap();
+        assert!(rs.contains(&format!("pub fn Val_{i}(x: i32) -> i32")));
+    }
+
+    // Multiple broken .rsharp files produce deterministic sorted error output across runs
+    for i in [4usize, 19, 31, 45] {
+        std::fs::write(
+            src.join(format!("mod_{i:02}.rsharp")),
+            "void main() { let x = 1; }\n",
+        )
+        .unwrap();
+    }
+    let run1 = run_cli(&args(&["to-rust", "--project", &proj_str]));
+    let run2 = run_cli(&args(&["to-rust", "--project", &proj_str]));
+    assert_eq!(run1.exit_code, 1);
+    assert_eq!(run1.stderr, run2.stderr);
+    assert!(
+        run1.stderr
+            .contains("Transpiled 44/48 files with 4 error(s)")
+    );
+    let p04 = run1.stderr.find("mod_04.rsharp:").unwrap();
+    let p19 = run1.stderr.find("mod_19.rsharp:").unwrap();
+    let p31 = run1.stderr.find("mod_31.rsharp:").unwrap();
+    let p45 = run1.stderr.find("mod_45.rsharp:").unwrap();
+    assert!(p04 < p19 && p19 < p31 && p31 < p45, "{}", run1.stderr);
+
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -15,8 +15,9 @@ pub use codegen_rust::{PreludeMode, TranspileOptions};
 pub use error::{RSharpError, Result, Span};
 pub use from_rust::{FromRustOptions, convert_from_rust_with_hints};
 pub use parallel::{
-    ProjectConvertOptions, ProjectFile, ProjectFileOutcome, convert_project_files,
-    convert_project_files_async,
+    ProjectConvertOptions, ProjectFile, ProjectFileOutcome, ToRustProjectOptions,
+    TranspileFileOutcome, convert_project_files, convert_project_files_async,
+    transpile_project_files, transpile_project_files_async,
 };
 pub use ra_oracle::{
     RustAnalyzerOracle, TypeHintMap, discover_cargo_rs_files, find_cargo_workspace_root,

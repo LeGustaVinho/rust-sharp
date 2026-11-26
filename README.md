@@ -237,6 +237,7 @@ cargo install --path crates/rsharp-cli --locked
 | Command | What it does |
 | --- | --- |
 | `rsharp to-rust <file.rsharp> [-o <out.rs>]` | Generate Rust source. `--prelude embedded` (the default) includes the prelude helpers, `crate` imports them from `rsharp_prelude`, and `none` omits the prelude. |
+| `rsharp to-rust --project <dir> [-o <out_dir>]` | Transpile all `.rsharp` files in `<dir>` to `.rs` in parallel across CPU cores using Tokio and Rayon with deterministic ordering (defaults to `--prelude none`; also accepts `crate` or `embedded`). |
 | `rsharp from-rust <file.rs> [-o <out.rsharp>]` | Convert Rust source to R#. For standalone files, use `--no-rustc-infer` to disable the compiler-assisted type inference pass. |
 | `rsharp check <file.rsharp>` | Check syntax, types, and borrows without producing an executable. |
 | `rsharp build <file.rsharp> [-o <binary>]` | Compile a native executable. By default, it is written next to the source file, with an `.exe` extension on Windows. |

@@ -34,6 +34,20 @@ pub struct ProjectFileOutcome {
     pub result: std::result::Result<usize, String>,
 }
 
+/// Configuration for parallel R# -> Rust project transpilation.
+#[derive(Debug, Clone, Default)]
+pub struct ToRustProjectOptions {
+    pub out_dir: Option<PathBuf>,
+    pub prelude_mode: PreludeMode,
+}
+
+/// Outcome of transpiling a single R# project file, preserving original input order.
+#[derive(Debug, Clone)]
+pub struct TranspileFileOutcome {
+    pub rel: PathBuf,
+    pub result: std::result::Result<(), String>,
+}
+
 fn rayon_pool() -> &'static rayon::ThreadPool {
     static POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
         rayon::ThreadPoolBuilder::new()
@@ -79,6 +93,61 @@ pub async fn convert_project_files_async(
     options: &ProjectConvertOptions,
 ) -> Vec<ProjectFileOutcome> {
     convert_project_files_async_bounded(files, oracle, options, default_max_in_flight()).await
+}
+
+/// Transpiles a batch of R# (`.rsharp`) source files to Rust in parallel using Tokio for async I/O
+/// and Rayon for CPU-bound lexing, parsing, and Rust code generation.
+///
+/// Returned outcomes strictly preserve the input order of `files`.
+pub fn transpile_project_files(
+    files: &[ProjectFile],
+    options: &ToRustProjectOptions,
+) -> Vec<TranspileFileOutcome> {
+    tokio_runtime().block_on(transpile_project_files_async(files, options))
+}
+
+/// Async variant of [`transpile_project_files`] for callers already executing inside a Tokio runtime.
+pub async fn transpile_project_files_async(
+    files: &[ProjectFile],
+    options: &ToRustProjectOptions,
+) -> Vec<TranspileFileOutcome> {
+    transpile_project_files_async_bounded(files, options, default_max_in_flight()).await
+}
+
+async fn transpile_project_files_async_bounded(
+    files: &[ProjectFile],
+    options: &ToRustProjectOptions,
+    max_in_flight: usize,
+) -> Vec<TranspileFileOutcome> {
+    let mut join_set = JoinSet::new();
+    let mut results: Vec<Option<std::result::Result<(), String>>> = vec![None; files.len()];
+
+    for (idx, file) in files.iter().enumerate() {
+        if join_set.len() >= max_in_flight {
+            drain_one(&mut join_set, &mut results).await;
+        }
+        let path = file.path.clone();
+        let rel = file.rel.clone();
+        let out_dir = options.out_dir.clone();
+        let prelude_mode = options.prelude_mode;
+        join_set.spawn(async move {
+            let res = match tokio::fs::read_to_string(&path).await {
+                Ok(src) => transpile_and_write_async(src, rel, out_dir, prelude_mode).await,
+                Err(e) => Err(e.to_string()),
+            };
+            (idx, res)
+        });
+    }
+
+    drain_all(&mut join_set, &mut results).await;
+    files
+        .iter()
+        .zip(results)
+        .map(|(file, res)| TranspileFileOutcome {
+            rel: file.rel.clone(),
+            result: res.unwrap(),
+        })
+        .collect()
 }
 
 async fn convert_project_files_async_bounded(
@@ -189,10 +258,7 @@ async fn convert_with_oracle_pipelined(
     collect_outcomes(files, results)
 }
 
-async fn drain_one(
-    join_set: &mut JoinSet<(usize, std::result::Result<usize, String>)>,
-    results: &mut [Option<std::result::Result<usize, String>>],
-) {
+async fn drain_one<T: 'static>(join_set: &mut JoinSet<(usize, T)>, results: &mut [Option<T>]) {
     let (done_idx, res) = join_set
         .join_next()
         .await
@@ -201,10 +267,7 @@ async fn drain_one(
     results[done_idx] = Some(res);
 }
 
-async fn drain_all(
-    join_set: &mut JoinSet<(usize, std::result::Result<usize, String>)>,
-    results: &mut [Option<std::result::Result<usize, String>>],
-) {
+async fn drain_all<T: 'static>(join_set: &mut JoinSet<(usize, T)>, results: &mut [Option<T>]) {
     while let Some(joined) = join_set.join_next().await {
         let (done_idx, res) = joined.expect("conversion task panicked");
         results[done_idx] = Some(res);
@@ -235,8 +298,31 @@ async fn convert_and_write_async(
 ) -> std::result::Result<usize, String> {
     let (rsharp, raw_count) =
         convert_source_on_rayon(src, hints, verify, strict_unnameable).await?;
-    write_converted_file(&rel, out_dir.as_deref(), &rsharp).await?;
+    write_output_file(&rel, out_dir.as_deref(), "rsharp", &rsharp).await?;
     Ok(raw_count)
+}
+
+async fn transpile_and_write_async(
+    src: String,
+    rel: PathBuf,
+    out_dir: Option<PathBuf>,
+    prelude_mode: PreludeMode,
+) -> std::result::Result<(), String> {
+    let rust = transpile_source_on_rayon(src, prelude_mode).await?;
+    write_output_file(&rel, out_dir.as_deref(), "rs", &rust).await
+}
+
+async fn transpile_source_on_rayon(
+    src: String,
+    prelude_mode: PreludeMode,
+) -> std::result::Result<String, String> {
+    let (tx, rx) = oneshot::channel();
+    rayon_pool().spawn(move || {
+        let res =
+            transpile_to_rust(&src, TranspileOptions { prelude_mode }).map_err(|e| e.to_string());
+        let _ = tx.send(res);
+    });
+    rx.await.expect("rayon transpilation task panicked")
 }
 
 async fn convert_source_on_rayon(
@@ -281,18 +367,19 @@ fn convert_source_sync(
     Ok((rsharp, raw_count))
 }
 
-async fn write_converted_file(
+async fn write_output_file(
     rel: &Path,
     out_dir: Option<&Path>,
-    rsharp: &str,
+    ext: &str,
+    content: &str,
 ) -> std::result::Result<(), String> {
     if let Some(base_out) = out_dir {
         let mut dest = base_out.join(rel);
-        dest.set_extension("rsharp");
+        dest.set_extension(ext);
         tokio::fs::create_dir_all(dest.parent().unwrap_or(base_out))
             .await
             .map_err(|e| e.to_string())?;
-        tokio::fs::write(&dest, rsharp)
+        tokio::fs::write(&dest, content)
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -473,6 +560,90 @@ mod tests {
         assert!(out_nora.join("00_ok.rsharp").is_file());
         assert!(out_nora.join("03_ok.rsharp").is_file());
         assert!(out_nora.join("04_ok.rsharp").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn parallel_to_rust_covers_all_paths_and_preserves_order() {
+        let base =
+            std::env::temp_dir().join(format!("rsharp_core_par_to_rust_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let default_opts = ToRustProjectOptions::default();
+        assert!(!format!("{:?}", default_opts.clone()).is_empty());
+        assert!(transpile_project_files(&[], &default_opts).is_empty());
+
+        let good_file = base.join("good.rsharp");
+        std::fs::write(
+            &good_file,
+            "public int Add(int a, int b) { return a + b; }\n",
+        )
+        .unwrap();
+        let bad_file = base.join("bad.rsharp");
+        std::fs::write(&bad_file, "void main() { let x = 1; }\n").unwrap();
+
+        let pfile = |path: PathBuf, rel: &str| ProjectFile {
+            path,
+            rel: PathBuf::from(rel),
+        };
+
+        // Out = None succeeds and exercises TranspileFileOutcome Debug/Clone.
+        let no_out = transpile_project_files(
+            &[pfile(good_file.clone(), "good.rsharp")],
+            &ToRustProjectOptions {
+                out_dir: None,
+                prelude_mode: PreludeMode::None,
+            },
+        );
+        assert_eq!(no_out.len(), 1);
+        assert!(!format!("{:?}", no_out[0].clone()).is_empty());
+        assert_eq!(no_out[0].result, Ok(()));
+
+        // Write error when destination is an existing directory.
+        let dir_dest = base.join("out_conflict");
+        std::fs::create_dir_all(dir_dest.join("good.rs")).unwrap();
+        let write_err = transpile_project_files(
+            &[pfile(good_file.clone(), "good.rsharp")],
+            &ToRustProjectOptions {
+                out_dir: Some(dir_dest),
+                prelude_mode: PreludeMode::None,
+            },
+        );
+        assert!(write_err[0].result.is_err());
+
+        // Bounded backpressure (`max_in_flight = 2`) with mixed ok, missing, and invalid syntax.
+        let out_rs = base.join("out_rs");
+        let batch = vec![
+            pfile(good_file.clone(), "00_ok.rsharp"),
+            pfile(base.join("missing.rsharp"), "01_missing.rsharp"),
+            pfile(bad_file.clone(), "02_bad.rsharp"),
+            pfile(good_file.clone(), "03_ok.rsharp"),
+            pfile(good_file.clone(), "04_ok.rsharp"),
+        ];
+        let outcomes = tokio_runtime().block_on(transpile_project_files_async_bounded(
+            &batch,
+            &ToRustProjectOptions {
+                out_dir: Some(out_rs.clone()),
+                prelude_mode: PreludeMode::CrateImport,
+            },
+            2,
+        ));
+        assert_eq!(outcomes.len(), 5);
+        assert_eq!(outcomes[0].rel, PathBuf::from("00_ok.rsharp"));
+        assert_eq!(outcomes[0].result, Ok(()));
+        assert_eq!(outcomes[1].rel, PathBuf::from("01_missing.rsharp"));
+        assert!(outcomes[1].result.is_err());
+        assert_eq!(outcomes[2].rel, PathBuf::from("02_bad.rsharp"));
+        assert!(outcomes[2].result.is_err());
+        assert_eq!(outcomes[3].rel, PathBuf::from("03_ok.rsharp"));
+        assert_eq!(outcomes[3].result, Ok(()));
+        assert_eq!(outcomes[4].rel, PathBuf::from("04_ok.rsharp"));
+        assert_eq!(outcomes[4].result, Ok(()));
+        let generated = std::fs::read_to_string(out_rs.join("00_ok.rs")).unwrap();
+        assert!(generated.contains("use rsharp_prelude::*;"));
+        assert!(generated.contains("pub fn Add"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

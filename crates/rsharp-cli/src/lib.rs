@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use rsharp_core::{
     FromRustOptions, PreludeMode, ProjectConvertOptions, ProjectFile, RustAnalyzerOracle,
-    TranspileOptions, build_rsharp, check_rsharp, convert_from_rust, convert_from_rust_with_hints,
-    convert_project_files, discover_cargo_rs_files, find_cargo_workspace_root, run_rsharp,
-    transpile_to_rust,
+    ToRustProjectOptions, TranspileOptions, build_rsharp, check_rsharp, convert_from_rust,
+    convert_from_rust_with_hints, convert_project_files, discover_cargo_rs_files,
+    find_cargo_workspace_root, run_rsharp, transpile_project_files, transpile_to_rust,
 };
 
 /// Result of executing a CLI invocation.
@@ -20,6 +20,7 @@ R# (R Sharp) - Rust Performance. C# Productivity.
 
 Usage:
   rsharp to-rust <file.rsharp> [-o <out.rs>] [--prelude embedded|crate|none]
+  rsharp to-rust --project <dir> [-o <out_dir>] [--prelude none|crate|embedded]
   rsharp from-rust <file.rs> [-o <out.rsharp>] [--workspace <dir>] [--no-rustc-infer] [--strict]
   rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict] [--no-ra] [--all-rs-files] [--no-raw-rust]
   rsharp build <file.rsharp> [-o <out_bin>]
@@ -71,7 +72,22 @@ fn read_input_file(args: &[String], usage_hint: &str) -> Result<(PathBuf, String
     Ok((p, content))
 }
 
+fn parse_prelude_mode(val: &str) -> Result<PreludeMode, String> {
+    match val {
+        "embedded" => Ok(PreludeMode::Embedded),
+        "crate" => Ok(PreludeMode::CrateImport),
+        "none" => Ok(PreludeMode::None),
+        other => Err(format!(
+            "Invalid prelude mode '{}'; expected embedded, crate, or none",
+            other
+        )),
+    }
+}
+
 fn cmd_to_rust(args: &[String]) -> Result<CliOutput, String> {
+    if args.first().map(String::as_str) == Some("--project") {
+        return cmd_to_rust_project(&args[1..]);
+    }
     let (_, src) = read_input_file(args, "rsharp to-rust <file.rsharp> [-o <out.rs>]")?;
     let mut out_path: Option<PathBuf> = None;
     let mut prelude_mode = PreludeMode::Embedded;
@@ -90,17 +106,7 @@ fn cmd_to_rust(args: &[String]) -> Result<CliOutput, String> {
                 let val = args
                     .get(i + 1)
                     .ok_or_else(|| "Missing value after '--prelude'".to_string())?;
-                prelude_mode = match val.as_str() {
-                    "embedded" => PreludeMode::Embedded,
-                    "crate" => PreludeMode::CrateImport,
-                    "none" => PreludeMode::None,
-                    other => {
-                        return Err(format!(
-                            "Invalid prelude mode '{}'; expected embedded, crate, or none",
-                            other
-                        ));
-                    }
-                };
+                prelude_mode = parse_prelude_mode(val)?;
                 i += 2;
             }
             flag => return Err(format!("Unknown option '{}'", flag)),
@@ -125,6 +131,100 @@ fn cmd_to_rust(args: &[String]) -> Result<CliOutput, String> {
             stderr: String::new(),
         })
     }
+}
+
+fn cmd_to_rust_project(args: &[String]) -> Result<CliOutput, String> {
+    let dir_arg = args
+        .first()
+        .ok_or_else(|| "Missing directory after '--project'".to_string())?;
+    let project_dir = PathBuf::from(dir_arg);
+    if !project_dir.is_dir() {
+        return Err(format!(
+            "Project directory '{}' does not exist",
+            project_dir.display()
+        ));
+    }
+
+    let mut out_dir: Option<PathBuf> = None;
+    let mut prelude_mode = PreludeMode::None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                let val = args
+                    .get(i + 1)
+                    .ok_or_else(|| "Missing path after '-o'".to_string())?;
+                out_dir = Some(PathBuf::from(val));
+                i += 2;
+            }
+            "--prelude" => {
+                let val = args
+                    .get(i + 1)
+                    .ok_or_else(|| "Missing value after '--prelude'".to_string())?;
+                prelude_mode = parse_prelude_mode(val)?;
+                i += 2;
+            }
+            flag => return Err(format!("Unknown option '{}'", flag)),
+        }
+    }
+
+    let mut rsh_files = Vec::new();
+    collect_project_files(&project_dir, "rsharp", &mut rsh_files);
+    rsh_files.sort_unstable();
+    if rsh_files.is_empty() {
+        return Err(format!(
+            "No .rsharp files found under '{}'",
+            project_dir.display()
+        ));
+    }
+
+    let files: Vec<ProjectFile> = rsh_files
+        .iter()
+        .map(|path| ProjectFile {
+            path: path.clone(),
+            rel: path
+                .strip_prefix(&project_dir)
+                .unwrap_or(path)
+                .to_path_buf(),
+        })
+        .collect();
+    let outcomes = transpile_project_files(
+        &files,
+        &ToRustProjectOptions {
+            out_dir,
+            prelude_mode,
+        },
+    );
+
+    let mut transpiled = 0usize;
+    let mut errors = Vec::new();
+    for outcome in outcomes {
+        match outcome.result {
+            Ok(()) => transpiled += 1,
+            Err(e) => errors.push(format!("{}: {}", outcome.rel.display(), e)),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(format!(
+            "Transpiled {}/{} files with {} error(s):\n{}",
+            transpiled,
+            rsh_files.len(),
+            errors.len(),
+            errors.join("\n")
+        ));
+    }
+
+    Ok(CliOutput {
+        exit_code: 0,
+        stdout: format!(
+            "Transpiled {}/{} files cleanly\n",
+            transpiled,
+            rsh_files.len()
+        ),
+        stderr: String::new(),
+    })
 }
 
 fn cmd_from_rust(args: &[String]) -> Result<CliOutput, String> {
@@ -255,7 +355,7 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
         discovered
     } else {
         let mut files = Vec::new();
-        collect_project_rs_files(&project_dir, &mut files);
+        collect_project_files(&project_dir, "rs", &mut files);
         files.sort_unstable();
         files
     };
@@ -384,7 +484,7 @@ fn convert_with_oracle(
     )
 }
 
-fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_project_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
     const SKIP: &[&str] = &[
         "target",
         "node_modules",
@@ -409,9 +509,9 @@ fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 && !SKIP.contains(&name)
                 && !(name == "vendor" && !in_src)
             {
-                collect_project_rs_files(&p, out);
+                collect_project_files(&p, ext, out);
             }
-        } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if p.extension().and_then(|e| e.to_str()) == Some(ext) {
             out.push(p);
         }
     }
