@@ -493,7 +493,7 @@ fn test_cli_from_rust_project_and_workspace_mode() {
         raw_ok.stdout
     );
 
-    // Single-file --workspace + --strict
+    // Single-file --workspace + --strict (ok and syntax error)
     let ws_ok = run_cli(&args(&[
         "from-rust",
         &lib_rs_str,
@@ -503,6 +503,17 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     ]));
     assert_eq!(ws_ok.exit_code, 0, "stderr: {}", ws_ok.stderr);
     assert!(ws_ok.stdout.contains("int y ="));
+
+    let bad_single = base.join("bad_single.rs");
+    std::fs::write(&bad_single, "fn broken( {").unwrap();
+    let ws_err = run_cli(&args(&[
+        "from-rust",
+        &bad_single.to_string_lossy(),
+        "--workspace",
+        &proj_str,
+    ]));
+    assert_eq!(ws_err.exit_code, 1);
+    assert!(ws_err.stderr.contains("error:"));
 
     // Project error collection: invalid Rust file + --strict on unnameable closure binding
     let bad_proj = base.join("bad_crate");
@@ -549,6 +560,74 @@ fn test_cli_from_rust_project_and_workspace_mode() {
         .output()
         .unwrap();
     assert!(!bad_ra_proj.status.success());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_cli_from_rust_project_parallel_determinism() {
+    let base = std::env::temp_dir().join(format!("rsharp_cli_par_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("many_files");
+    let src = proj.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    for i in 0..48 {
+        std::fs::write(
+            src.join(format!("mod_{i:02}.rs")),
+            format!("pub fn val_{i}(x: i32) -> i32 {{ let y = x + {i}; y }}\n"),
+        )
+        .unwrap();
+    }
+    let out_dir = base.join("out");
+    let ok = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj.to_string_lossy(),
+        "-o",
+        &out_dir.to_string_lossy(),
+        "--no-ra",
+        "--all-rs-files",
+        "--verify",
+        "--no-raw-rust",
+    ]));
+    assert_eq!(ok.exit_code, 0, "stderr: {}", ok.stderr);
+    assert!(
+        ok.stdout
+            .contains("Converted 48/48 files cleanly (0 rust{} blocks)")
+    );
+    for i in 0..48 {
+        let converted =
+            std::fs::read_to_string(out_dir.join("src").join(format!("mod_{i:02}.rsharp")))
+                .unwrap();
+        assert!(converted.contains(&format!("public int val_{i}(int x)")));
+    }
+
+    // Add multiple broken files and confirm deterministic sorted error ordering across runs.
+    for i in [5usize, 17, 33, 44] {
+        std::fs::write(src.join(format!("mod_{i:02}.rs")), "fn broken( {").unwrap();
+    }
+    let run1 = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj.to_string_lossy(),
+        "--no-ra",
+        "--all-rs-files",
+    ]));
+    let run2 = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj.to_string_lossy(),
+        "--no-ra",
+        "--all-rs-files",
+    ]));
+    assert_eq!(run1.exit_code, 1);
+    assert_eq!(run1.stderr, run2.stderr);
+    let p05 = run1.stderr.find("mod_05.rs:").unwrap();
+    let p17 = run1.stderr.find("mod_17.rs:").unwrap();
+    let p33 = run1.stderr.find("mod_33.rs:").unwrap();
+    let p44 = run1.stderr.find("mod_44.rs:").unwrap();
+    assert!(p05 < p17 && p17 < p33 && p33 < p44, "{}", run1.stderr);
 
     let _ = std::fs::remove_dir_all(&base);
 }

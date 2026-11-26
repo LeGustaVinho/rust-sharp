@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use rsharp_core::{
-    FromRustOptions, PreludeMode, RustAnalyzerOracle, TranspileOptions, TypeHintMap, build_rsharp,
-    check_rsharp, convert_from_rust, convert_from_rust_with_hints, count_raw_rust_blocks,
-    discover_cargo_rs_files, find_cargo_workspace_root, run_rsharp, transpile_to_rust,
+    FromRustOptions, PreludeMode, ProjectConvertOptions, ProjectFile, RustAnalyzerOracle,
+    TranspileOptions, build_rsharp, check_rsharp, convert_from_rust, convert_from_rust_with_hints,
+    convert_project_files, discover_cargo_rs_files, find_cargo_workspace_root, run_rsharp,
+    transpile_to_rust,
 };
 
 /// Result of executing a CLI invocation.
@@ -270,44 +271,57 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
     } else {
         Some(RustAnalyzerOracle::open(&ws_root).map_err(|e| e.to_string())?)
     };
+    let files: Vec<ProjectFile> = rs_files
+        .iter()
+        .map(|path| {
+            let rel = path
+                .strip_prefix(&project_dir)
+                .ok()
+                .or_else(|| {
+                    proj_canon
+                        .as_deref()
+                        .and_then(|c| path.strip_prefix(c).ok())
+                })
+                .unwrap_or(path)
+                .to_path_buf();
+            ProjectFile {
+                path: path.clone(),
+                rel,
+            }
+        })
+        .collect();
+    let outcomes = convert_project_files(
+        &files,
+        oracle.as_mut(),
+        &ProjectConvertOptions {
+            out_dir,
+            verify,
+            strict_unnameable,
+        },
+    );
+    if let Some(o) = oracle {
+        o.close();
+    }
+
     let mut converted = 0usize;
     let mut total_raw_rust = 0usize;
     let mut raw_rust_files = Vec::new();
     let mut errors = Vec::new();
-    for path in &rs_files {
-        let rel = path
-            .strip_prefix(&project_dir)
-            .ok()
-            .or_else(|| {
-                proj_canon
-                    .as_deref()
-                    .and_then(|c| path.strip_prefix(c).ok())
-            })
-            .unwrap_or(path);
-        match convert_project_file(
-            oracle.as_mut(),
-            path,
-            rel,
-            out_dir.as_deref(),
-            verify,
-            strict_unnameable,
-        ) {
+    for outcome in outcomes {
+        match outcome.result {
             Ok(raw_count) => {
                 converted += 1;
                 if raw_count > 0 {
                     total_raw_rust += raw_count;
                     raw_rust_files.push(format!(
                         "{}: {} rust{{}} block(s)",
-                        rel.display(),
+                        outcome.rel.display(),
                         raw_count
                     ));
                 }
             }
-            Err(e) => errors.push(format!("{}: {}", rel.display(), e)),
+            Err(e) => errors.push(format!("{}: {}", outcome.rel.display(), e)),
         }
-    }
-    if let Some(o) = oracle {
-        o.close();
     }
 
     if !errors.is_empty() {
@@ -347,7 +361,8 @@ fn convert_file_with_workspace(
     strict_unnameable: bool,
 ) -> Result<String, String> {
     let mut oracle = RustAnalyzerOracle::open(ws).map_err(|e| e.to_string())?;
-    let res = convert_with_oracle(&mut oracle, in_path, src, strict_unnameable);
+    let res = convert_with_oracle(&mut oracle, in_path, src, strict_unnameable)
+        .map_err(|e| e.to_string());
     oracle.close();
     res
 }
@@ -357,10 +372,8 @@ fn convert_with_oracle(
     in_path: &Path,
     src: &str,
     strict_unnameable: bool,
-) -> Result<String, String> {
-    let hints = oracle
-        .type_hints_for_file(in_path, src)
-        .map_err(|e| e.to_string())?;
+) -> rsharp_core::Result<String> {
+    let hints = oracle.type_hints_for_file(in_path, src)?;
     convert_from_rust_with_hints(
         src,
         FromRustOptions {
@@ -369,46 +382,6 @@ fn convert_with_oracle(
         &hints,
         strict_unnameable,
     )
-    .map_err(|e| e.to_string())
-}
-
-fn convert_project_file(
-    oracle: Option<&mut RustAnalyzerOracle>,
-    path: &Path,
-    rel: &Path,
-    out_dir: Option<&Path>,
-    verify: bool,
-    strict_unnameable: bool,
-) -> Result<usize, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let rsharp = match oracle {
-        Some(o) => convert_with_oracle(o, path, &src, strict_unnameable)?,
-        None => convert_from_rust_with_hints(
-            &src,
-            FromRustOptions {
-                use_rustc_inference: false,
-            },
-            &TypeHintMap::default(),
-            strict_unnameable,
-        )
-        .map_err(|e| e.to_string())?,
-    };
-    if verify {
-        transpile_to_rust(
-            &rsharp,
-            TranspileOptions {
-                prelude_mode: PreludeMode::None,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    }
-    if let Some(base_out) = out_dir {
-        let mut dest = base_out.join(rel);
-        dest.set_extension("rsharp");
-        std::fs::create_dir_all(dest.parent().unwrap_or(base_out)).map_err(|e| e.to_string())?;
-        std::fs::write(&dest, &rsharp).map_err(|e| e.to_string())?;
-    }
-    Ok(count_raw_rust_blocks(&rsharp))
 }
 
 fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -520,7 +493,8 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    fn mock_oracle(inlay_responses: usize) -> RustAnalyzerOracle {
+    #[test]
+    fn convert_with_oracle_covers_ok_and_hint_eof_error() {
         let frame = |body: &str| format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
         let mut buf = Vec::new();
         buf.extend(frame(r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#).as_bytes());
@@ -528,122 +502,13 @@ mod tests {
             frame(r#"{"jsonrpc":"2.0","method":"experimental/serverStatus","params":{"quiescent":true}}"#)
                 .as_bytes(),
         );
-        for k in 0..inlay_responses {
-            let id = 2 + k as i64;
-            let body = format!(r#"{{"jsonrpc":"2.0","id":{},"result":[]}}"#, id);
-            buf.extend(frame(&body).as_bytes());
-        }
-        let ws = std::env::temp_dir();
-        RustAnalyzerOracle::from_io(Cursor::new(buf), Vec::new(), &ws).unwrap()
-    }
-
-    #[test]
-    fn convert_project_file_covers_all_error_branches() {
-        let base = std::env::temp_dir().join(format!("rsharp_cli_unit_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-
-        // 1. Read failure (missing file)
-        let mut oracle = mock_oracle(0);
-        let err = convert_project_file(
-            Some(&mut oracle),
-            &base.join("missing.rs"),
-            Path::new("missing.rs"),
-            None,
-            false,
-            false,
-        );
-        assert!(err.is_err());
-
-        // 2. Hint failure (oracle reader at EOF)
-        let good_file = base.join("good.rs");
-        std::fs::write(&good_file, "fn main() {}").unwrap();
-        let err = convert_project_file(
-            Some(&mut oracle),
-            &good_file,
-            Path::new("good.rs"),
-            None,
-            false,
-            false,
-        );
-        assert!(err.is_err());
-
-        // 3. Verify failure (nightly multi-stmt `const { let ... }` pattern fails R# `--verify`)
-        let bad_verify = base.join("bad_verify.rs");
-        std::fs::write(
-            &bad_verify,
-            "fn f(x: i32) { match x { const { let a = 1; a } => {} _ => {} } }\n",
-        )
-        .unwrap();
-        // 4. Success with `out_dir = None`, mkdir failure, and write failure when destination is a directory
-        let mut oracle2 = mock_oracle(4);
-        let err = convert_project_file(
-            Some(&mut oracle2),
-            &bad_verify,
-            Path::new("bad_verify.rs"),
-            None,
-            true,
-            false,
-        );
-        assert!(err.is_err());
-
-        assert_eq!(
-            convert_project_file(
-                Some(&mut oracle2),
-                &good_file,
-                Path::new("good.rs"),
-                None,
-                false,
-                false,
-            )
-            .unwrap(),
-            0
-        );
-
-        let blocking = base.join("blocking");
-        std::fs::write(&blocking, "file").unwrap();
-        let err = convert_project_file(
-            Some(&mut oracle2),
-            &good_file,
-            Path::new("sub/good.rs"),
-            Some(&blocking),
-            false,
-            false,
-        );
-        assert!(err.is_err());
-
-        let out_dir = base.join("out");
-        std::fs::create_dir_all(out_dir.join("good.rsharp")).unwrap();
-        let err = convert_project_file(
-            Some(&mut oracle2),
-            &good_file,
-            Path::new("good.rs"),
-            Some(&out_dir),
-            false,
-            false,
-        );
-        assert!(err.is_err());
-
-        // 5. No-RA mode (`oracle = None`) succeeds with 0 raw rust blocks and reports parse errors.
-        assert_eq!(
-            convert_project_file(None, &good_file, Path::new("good.rs"), None, true, false)
-                .unwrap(),
-            0
-        );
-        let bad_syntax = base.join("bad_syntax.rs");
-        std::fs::write(&bad_syntax, "fn broken( {").unwrap();
+        buf.extend(frame(r#"{"jsonrpc":"2.0","id":2,"result":[]}"#).as_bytes());
+        let mut oracle =
+            RustAnalyzerOracle::from_io(Cursor::new(buf), Vec::new(), &std::env::temp_dir())
+                .unwrap();
+        assert!(convert_with_oracle(&mut oracle, Path::new("a.rs"), "fn main() {}", false).is_ok());
         assert!(
-            convert_project_file(
-                None,
-                &bad_syntax,
-                Path::new("bad_syntax.rs"),
-                None,
-                false,
-                false
-            )
-            .is_err()
+            convert_with_oracle(&mut oracle, Path::new("a.rs"), "fn main() {}", false).is_err()
         );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

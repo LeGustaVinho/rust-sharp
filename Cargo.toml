@@ -12,3 +12,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "R# (R Sharp) - Rust Performance. C# Productivity."
+
+[workspace.dependencies]
+rayon = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "sync"] }

@@ -258,7 +258,7 @@ rsharp from-rust --project path/to/project -o converted --verify --no-raw-rust
 ```
 
 - `--workspace` converts a single file with Cargo workspace context.
-- `--project` discovers compiled Cargo target `.rs` files via `cargo metadata` (automatically skipping non-member fixtures and templates; pass `--all-rs-files` to walk every `.rs` file) and writes converted `.rsharp` files under `-o` preserving relative paths.
+- `--project` discovers compiled Cargo target `.rs` files via `cargo metadata` (automatically skipping non-member fixtures and templates; pass `--all-rs-files` to walk every `.rs` file), converts files in parallel across CPU cores using Tokio and Rayon with deterministic output ordering, and writes converted `.rsharp` files under `-o` preserving relative paths.
 - `--verify` transpiles every converted `.rsharp` file back to Rust to verify syntax and codegen round-trip parity.
 - `--no-ra` skips `rust-analyzer` and converts immediately with local inference + `var`.
 - `--no-raw-rust` fails if any converted file requires a `rust { ... }` fallback block (reporting per-file counts).
