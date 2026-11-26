@@ -201,10 +201,8 @@ impl RustAnalyzerOracle {
                 },
                 "textDocument": {
                     "inlayHint": {
-                        "dynamicRegistration": false,
-                        "resolveSupport": {
-                            "properties": ["textEdits"]
-                        }
+                        // Let rust-analyzer include type edits in the initial response.
+                        "dynamicRegistration": false
                     }
                 }
             },
@@ -341,7 +339,7 @@ impl RustAnalyzerOracle {
         loop {
             while pending.len() < WINDOW {
                 let Some(item) = remaining.next() else { break };
-                if item.get("kind").and_then(Value::as_u64) != Some(1) {
+                if item.get("kind").and_then(Value::as_u64) != Some(1) || has_text_edits(item) {
                     continue;
                 }
                 let raw_label = extract_inlay_label(item);
@@ -555,15 +553,17 @@ fn read_lsp_message(reader: &mut dyn BufRead) -> Result<Value> {
         .map_err(|e| RSharpError::io(format!("Invalid JSON from rust-analyzer: {}", e)))
 }
 
+fn has_text_edits(item: &Value) -> bool {
+    item.get("textEdits")
+        .and_then(Value::as_array)
+        .is_some_and(|edits| !edits.is_empty())
+}
+
 fn mark_no_edit_if_empty(item: &mut Value) {
-    if let Some(obj) = item.as_object_mut() {
-        let has_edits = obj
-            .get("textEdits")
-            .and_then(Value::as_array)
-            .is_some_and(|a| !a.is_empty());
-        if !has_edits {
-            obj.insert("_rsharp_no_edit".to_string(), Value::Bool(true));
-        }
+    if !has_text_edits(item)
+        && let Some(obj) = item.as_object_mut()
+    {
+        obj.insert("_rsharp_no_edit".to_string(), Value::Bool(true));
     }
 }
 

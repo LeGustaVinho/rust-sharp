@@ -265,6 +265,13 @@ fn ra_oracle_mock_protocol_and_helpers_full_coverage() {
                 "position": { "line": 0, "character": 7 },
                 "label": ": Unresolvable",
                 "data": { "token": 2 }
+            },
+            {
+                "kind": 1,
+                "position": { "line": 0, "character": 8 },
+                "label": ": Eager",
+                "textEdits": [{ "newText": ": crate::Eager" }],
+                "data": { "token": 3 }
             }
         ]
     })));
@@ -316,10 +323,12 @@ fn ra_oracle_mock_protocol_and_helpers_full_coverage() {
     assert_eq!(hints.get_entry(1, 5), Some(("crate::NoDataWithEdit", true)));
     assert_eq!(hints.get_entry(1, 6), Some(("crate::Resolvable", true)));
     assert_eq!(hints.get_entry(1, 7), Some(("Unresolvable", false)));
+    assert_eq!(hints.get_entry(1, 8), Some(("crate::Eager", true)));
     oracle.close();
     let sent = String::from_utf8(outgoing.borrow().clone()).unwrap();
     assert!(sent.contains("\"method\":\"initialize\""));
-    assert!(sent.contains("\"method\":\"inlayHint/resolve\""));
+    assert!(!sent.contains("\"resolveSupport\""));
+    assert_eq!(sent.matches("\"method\":\"inlayHint/resolve\"").count(), 2);
     assert!(sent.contains("\"method\":\"shutdown\""));
     assert!(sent.contains("\"method\":\"exit\""));
 
