@@ -1,4 +1,6 @@
 import { execFile } from "child_process";
+import { mkdtemp, rename, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 export interface ProcessResult {
   exitCode: number;
@@ -107,6 +109,7 @@ export interface CommandHandlers {
   checkFile: () => Promise<void>;
   previewRust: () => Promise<void>;
   convertFromRust: () => Promise<void>;
+  convertProject: (projectDir: string) => Promise<void>;
 }
 
 export function createCommandHandlers(host: CommandHost): CommandHandlers {
@@ -197,6 +200,30 @@ export function createCommandHandlers(host: CommandHost): CommandHandlers {
         return;
       }
       await host.openUntitledRSharp(res.stdout);
+    },
+
+    convertProject: async (projectDir) => {
+      const bin = requireBinary();
+      if (!bin) {
+        return;
+      }
+
+      // The CLI can write some files before reporting a conversion error.
+      const staging = await mkdtemp(join(projectDir, ".rsharp-"));
+      const output = join(projectDir, basename(staging).slice(1));
+      try {
+        const res = await host.runProcess(bin, [
+          "from-rust", "--project", projectDir, "-o", staging, "--verify",
+        ]);
+        if (res.exitCode !== 0) {
+          throw new Error(res.stderr.trim());
+        }
+        await rename(staging, output);
+      } catch (error) {
+        await rm(staging, { recursive: true, force: true });
+        throw error;
+      }
+      host.showInfo(`R# sources saved to ${output}`);
     },
   };
 }

@@ -16,6 +16,12 @@ Language support for **R# (`.rsharp`)** in Visual Studio Code, powered by the na
   - `R#: Convert Rust File to R#`
   - `R#: Restart Language Server`
 
+## Convert a Rust project
+
+Open a trusted folder with a root `Cargo.toml`, Rust sources, and no R# sources. VS Code offers to convert the project even when no file is open. Close the notification to defer until you reopen the project, or select **Don't Ask Again Here** to remember that choice for this folder in the workspace.
+
+Select **Convert to R#** to convert the saved sources with `rsharp from-rust --project`. The extension verifies each result by translating it back to Rust, then puts the `.rsharp` files in a new `rsharp-…` folder inside the project. Project conversion requires the `rsharp` CLI with project support and the `rust-analyzer` and `rust-src` Rust components.
+
 ## Settings
 
 | Setting | Default | Description |
@@ -37,7 +43,7 @@ npm test
 
 # 3. Package a local .vsix and install it into VS Code
 npm run package
-code --install-extension rsharp-vscode-0.1.0.vsix
+code --install-extension rsharp-vscode-0.1.1.vsix
 ```
 
 Or open `editors/vscode` in VS Code and press **F5** to launch an Extension Development Host.

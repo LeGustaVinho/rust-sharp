@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import {
   ActiveFileInfo,
   CommandHost,
@@ -115,13 +118,14 @@ describe("commands and process runner", () => {
 
     const h = createCommandHandlers(host);
 
-    // Missing binary on all 4 commands
+    // A missing binary stops both file and project commands.
     binary = undefined;
     await h.runFile();
     await h.checkFile();
     await h.previewRust();
     await h.convertFromRust();
-    assert.equal(logs.filter((l) => l.startsWith("err:")).length, 4);
+    await h.convertProject("/ws");
+    assert.equal(logs.filter((l) => l.startsWith("err:")).length, 5);
     logs.length = 0;
 
     // Missing or wrong active file
@@ -178,5 +182,46 @@ describe("commands and process runner", () => {
     await h.convertFromRust();
     assert.ok(logs.includes("out:R# Convert:unresolved type"));
     assert.ok(logs.some((l) => l.includes("Failed to convert Rust file")));
+  });
+
+  it("publishes verified project output and discards partial conversions", async (t) => {
+    const project = await fs.mkdtemp(join(tmpdir(), "Rust project #"));
+    t.after(() => fs.rm(project, { recursive: true, force: true }));
+    await fs.writeFile(join(project, "lib.rs"), "fn f() {}");
+    await fs.mkdir(join(project, "rsharp-existing"));
+    await fs.writeFile(join(project, "rsharp-existing", "notes.txt"), "keep");
+    const info: string[] = [];
+    let fails = true;
+    const handlers = createCommandHandlers({
+      resolveBinary: () => "rsharp",
+      runProcess: async (binary, args) => {
+        const staging = args[4];
+        assert.equal(binary, "rsharp");
+        assert.deepEqual(args, ["from-rust", "--project", project, "-o", staging, "--verify"]);
+        assert.match(basename(staging), /^\.rsharp-/);
+        await fs.writeFile(join(staging, "lib.rsharp"), "void f() {}");
+        return { exitCode: fails ? 1 : 0, stdout: "", stderr: "type inference failed" };
+      },
+      showInfo: (message) => info.push(message),
+      getActiveFile: assert.fail,
+      runInTerminal: assert.fail,
+      showOutput: assert.fail,
+      showError: assert.fail,
+      openRustPreview: assert.fail,
+      openUntitledRSharp: assert.fail,
+    });
+    await assert.rejects(handlers.convertProject(project), /type inference failed/);
+    assert.deepEqual((await fs.readdir(project)).sort(), ["lib.rs", "rsharp-existing"]);
+    assert.deepEqual(info, []);
+
+    fails = false;
+    await handlers.convertProject(project);
+    const outputs = (await fs.readdir(project)).filter((entry) => /^rsharp-(?!existing$)/.test(entry));
+    assert.equal(outputs.length, 1);
+    const output = join(project, outputs[0]);
+    assert.deepEqual(info, [`R# sources saved to ${output}`]);
+    assert.equal(await fs.readFile(join(output, "lib.rsharp"), "utf8"), "void f() {}");
+    assert.equal(await fs.readFile(join(project, "lib.rs"), "utf8"), "fn f() {}");
+    assert.equal(await fs.readFile(join(project, "rsharp-existing", "notes.txt"), "utf8"), "keep");
   });
 });

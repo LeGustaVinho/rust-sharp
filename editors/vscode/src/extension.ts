@@ -20,6 +20,7 @@ import {
   ServerOptions,
 } from "vscode-languageclient/node";
 import { defaultBinaryOptions, resolveRSharpBinary } from "./binary";
+import { registerProjectSuggestions } from "./projectSuggestion";
 import {
   RUST_PREVIEW_SCHEME,
   RustPreviewModel,
@@ -187,6 +188,21 @@ export async function activate(context: ExtensionContext): Promise<void> {
     },
   });
 
+  let serverRequested = false;
+  const restartServer = async () => {
+    serverRequested = true;
+    await stopLanguageClient();
+    await startLanguageClient(outputChannel);
+  };
+  const startForOpenDocuments = async () => {
+    if (
+      !serverRequested &&
+      workspace.textDocuments.some((doc) => doc.languageId === "rsharp")
+    ) {
+      await restartServer();
+    }
+  };
+
   context.subscriptions.push(
     commands.registerCommand("rsharp.runFile", handlers.runFile),
     commands.registerCommand("rsharp.checkFile", handlers.checkFile),
@@ -195,14 +211,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
       "rsharp.convertFromRust",
       handlers.convertFromRust,
     ),
-    commands.registerCommand("rsharp.restartServer", async () => {
-      await stopLanguageClient();
-      await startLanguageClient(outputChannel);
-    }),
+    commands.registerCommand("rsharp.restartServer", restartServer),
+    workspace.onDidOpenTextDocument(startForOpenDocuments),
     workspace.onDidChangeConfiguration(async (event) => {
-      if (event.affectsConfiguration("rsharp.executablePath")) {
-        await stopLanguageClient();
-        await startLanguageClient(outputChannel);
+      if (event.affectsConfiguration("rsharp.executablePath") && serverRequested) {
+        await restartServer();
       } else if (event.affectsConfiguration("rsharp.checkOnSave") && client) {
         await client.sendNotification("workspace/didChangeConfiguration", {
           settings: { rsharp: { checkOnSave: getCheckOnSave() } },
@@ -211,7 +224,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
-  await startLanguageClient(outputChannel);
+  registerProjectSuggestions(context, outputChannel, handlers.convertProject);
+  await startForOpenDocuments();
 }
 
 export async function deactivate(): Promise<void> {

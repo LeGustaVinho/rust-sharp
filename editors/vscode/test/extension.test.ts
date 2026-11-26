@@ -7,6 +7,8 @@ import Module = require("node:module");
 
 interface FakeState {
   workspaceFolders: Array<{ uri: { fsPath: string } }> | undefined;
+  textDocuments: Array<{ languageId: string }>;
+  openListeners: Array<() => Promise<void>>;
   config: Record<string, unknown>;
   activeTextEditor:
     | {
@@ -40,6 +42,8 @@ interface FakeState {
 function createFakeEnv() {
   const state: FakeState = {
     workspaceFolders: undefined,
+    textDocuments: [],
+    openListeners: [],
     config: { executablePath: "", checkOnSave: true },
     activeTextEditor: undefined,
     commands: new Map(),
@@ -100,6 +104,14 @@ function createFakeEnv() {
       get workspaceFolders() {
         return state.workspaceFolders;
       },
+      get textDocuments() {
+        return state.textDocuments;
+      },
+      onDidOpenTextDocument: (listener: () => Promise<void>) => {
+        state.openListeners.push(listener);
+        return { dispose: () => {} };
+      },
+      onDidChangeWorkspaceFolders: () => ({ dispose: () => {} }),
       getConfiguration: () => ({
         get: <T>(key: string, def: T): T =>
           key in state.config ? (state.config[key] as T) : def,
@@ -229,11 +241,17 @@ describe("VS Code extension lifecycle and wiring", () => {
         deactivate: () => Promise<void>;
       };
 
-      // 1. Activate without binary -> warning emitted, deactivate is a no-op
+      // A Rust-only window can offer conversion without starting the R# server.
       const ctx = { subscriptions: [] as unknown[] };
+      state.textDocuments.push({ languageId: "rust" });
       await ext.activate(ctx);
-      assert.ok(state.messages.some((m) => m.startsWith("warn:")));
+      await state.configListeners[0]({ affectsConfiguration: () => true });
+      assert.equal(state.messages.length, 0);
       assert.equal(state.clientStarts, 0);
+      state.textDocuments.push({ languageId: "rsharp" });
+      await state.openListeners[0]();
+      await state.openListeners[0]();
+      assert.equal(state.messages.filter((m) => m.startsWith("warn:")).length, 1);
       await ext.deactivate();
 
       // 2. Point config at fake binary + workspace folder, trigger executablePath config change

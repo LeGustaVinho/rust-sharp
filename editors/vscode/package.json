@@ -2,7 +2,7 @@
   "name": "rsharp-vscode",
   "displayName": "R# Language Support",
   "description": "C#-like syntax and semantic highlighting, live syntax checking, rustc borrow/type checking, and core IDE features for R# (.rsharp).",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "rsharp",
   "license": "MIT",
   "engines": {
@@ -21,6 +21,7 @@
     "lsp"
   ],
   "activationEvents": [
+    "workspaceContains:Cargo.toml",
     "onLanguage:rsharp",
     "onCommand:rsharp.convertFromRust"
   ],
