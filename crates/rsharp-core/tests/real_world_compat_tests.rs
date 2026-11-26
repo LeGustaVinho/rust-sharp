@@ -2508,7 +2508,7 @@ fn from_rust_20_cases(opt: Option<i32>, flag: bool, p_const: *const bool, p_mut:
     let (rsh_fr20, rust_fr20) = roundtrip_and_check(rust_src_20, &hints_20, false);
     assert!(rsh_fr20.contains("VerbatimTop"), "got:\n{rsh_fr20}");
     assert!(
-        rsh_fr20.contains("require (opt is Some(req_val) : int?) else {"),
+        rsh_fr20.contains("require (opt is Some(req_val) : int?) else\n    {"),
         "got:\n{rsh_fr20}"
     );
     assert!(rsh_fr20.contains("bool b_val ="), "got:\n{rsh_fr20}");

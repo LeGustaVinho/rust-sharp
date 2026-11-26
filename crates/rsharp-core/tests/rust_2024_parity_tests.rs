@@ -711,7 +711,7 @@ pub fn patterns_and_exprs(flag: bool, n: i32, opt: Option<String>, r: &i32) -> i
     assert!(rsharp.contains("borrow write"));
     assert!(rsharp.contains("deref v"));
     assert!(rsharp.contains("1..=5 as int v"));
-    assert!(rsharp.contains("if (flag) {\n"), "got:\n{rsharp}");
+    assert!(rsharp.contains("if (flag)\n    {\n"), "got:\n{rsharp}");
     assert!(!rsharp.contains("__if_val:"), "got:\n{rsharp}");
     assert!(rsharp.contains("extern crate alloc;"));
 }

@@ -352,7 +352,8 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     ]));
     assert_eq!(ok.exit_code, 0, "stderr: {}", ok.stderr);
     assert!(ok.stdout.contains("Converted 3/3 files cleanly"));
-    assert!(out_dir.join("src").join("lib.rsharp").is_file());
+    let converted_lib = std::fs::read_to_string(out_dir.join("src").join("lib.rsharp")).unwrap();
+    assert!(converted_lib.starts_with("public int double(int x)\n{\n"));
     assert!(
         out_dir
             .join("src")

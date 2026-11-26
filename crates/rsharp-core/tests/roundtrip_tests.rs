@@ -5,6 +5,65 @@ use rsharp_core::{
 };
 
 #[test]
+fn conversion_uses_rider_csharp_block_layout() {
+    let rust = r#"
+struct Number { value: i32 }
+impl Number {
+    fn get(&self) -> i32 {
+        if self.value > 1 {
+            self.value
+        } else if self.value < 0 {
+            0
+        } else {
+            1
+        }
+    }
+}
+fn main() {
+    let number = Number { value: 42 };
+    println!("{{{}}}", number.get());
+    if false {}
+}
+"#;
+    let rsharp = convert_from_rust(rust, FromRustOptions::default()).unwrap();
+    assert_eq!(
+        rsharp,
+        r#"struct Number
+{
+    int value;
+}
+impl Number
+{
+    int get(read this)
+    {
+        if ((this.value > 1))
+        {
+            return this.value;
+        }
+        else if ((this.value < 0))
+        {
+            return 0;
+        }
+        else
+        {
+            return 1;
+        }
+    }
+}
+void main()
+{
+    Number number = new Number { value = 42 };
+    println!("{{{}}}" , number . get ());
+    if (false)
+    {
+    }
+}
+"#
+    );
+    assert_eq!(run_rsharp(&rsharp).unwrap().stdout.trim(), "{42}");
+}
+
+#[test]
 fn roundtrip_rust_to_rsharp_to_rust_preserves_behavior() {
     let rust_src = r#"
 #![allow(dead_code)]

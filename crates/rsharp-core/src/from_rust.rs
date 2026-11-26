@@ -14,6 +14,8 @@ use crate::ra_oracle::TypeHintMap;
 use crate::rustc_runner;
 use crate::token::Keyword;
 
+const INDENT: &str = "    ";
+
 /// Options controlling Rust -> R# conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FromRustOptions {
@@ -373,7 +375,7 @@ impl RustToRSharp {
 
     fn write_indent(&mut self) {
         for _ in 0..self.indent {
-            self.out.push_str("    ");
+            self.out.push_str(INDENT);
         }
     }
 
@@ -381,6 +383,23 @@ impl RustToRSharp {
         self.write_indent();
         self.out.push_str(s);
         self.out.push('\n');
+    }
+
+    fn open_block(&mut self, header: &str) {
+        self.line(header);
+        self.line("{");
+    }
+
+    fn fmt_block(&self, body: &str) -> String {
+        format!("{{\n{body}{}}}", INDENT.repeat(self.indent))
+    }
+
+    fn fmt_named_block(&self, header: &str, body: &str) -> String {
+        format!(
+            "{header}\n{}{}",
+            INDENT.repeat(self.indent),
+            self.fmt_block(body)
+        )
     }
 
     fn push_scope(&mut self) {
@@ -645,7 +664,7 @@ impl RustToRSharp {
                 let vis = fmt_vis(&m.vis);
                 let name = escape_ident(&m.ident.to_string());
                 if let Some((_, items)) = &m.content {
-                    self.line(&format!("{}namespace {} {{", vis, name));
+                    self.open_block(&format!("{}namespace {}", vis, name));
                     let mut sub = self.child();
                     sub.known_path_roots.clear();
                     sub.in_scope_traits.clear();
@@ -700,7 +719,7 @@ impl RustToRSharp {
                         ));
                     }
                     syn::Fields::Named(nf) => {
-                        self.line(&format!("{}struct {}{}{} {{", vis, name, gens, wh));
+                        self.open_block(&format!("{}struct {}{}{}", vis, name, gens, wh));
                         self.indent += 1;
                         for f in &nf.named {
                             for a in &f.attrs {
@@ -724,7 +743,7 @@ impl RustToRSharp {
                 let name = escape_ident(&e.ident.to_string());
                 let gens = self.fmt_generics(&e.generics);
                 let wh = self.fmt_where(&e.generics);
-                self.line(&format!("{}enum {}{}{} {{", vis, name, gens, wh));
+                self.open_block(&format!("{}enum {}{}{}", vis, name, gens, wh));
                 self.indent += 1;
                 for v in &e.variants {
                     for a in &v.attrs {
@@ -754,7 +773,7 @@ impl RustToRSharp {
                             self.line(&format!("{}({}){},", vname, ts.join(", "), disc));
                         }
                         syn::Fields::Named(nf) => {
-                            self.line(&format!("{} {{", vname));
+                            self.open_block(&vname);
                             self.indent += 1;
                             for f in &nf.named {
                                 for a in &f.attrs {
@@ -780,7 +799,7 @@ impl RustToRSharp {
                 let name = escape_ident(&u.ident.to_string());
                 let gens = self.fmt_generics(&u.generics);
                 let wh = self.fmt_where(&u.generics);
-                self.line(&format!("{}union {}{}{} {{", vis, name, gens, wh));
+                self.open_block(&format!("{}union {}{}{}", vis, name, gens, wh));
                 self.indent += 1;
                 for f in &u.fields.named {
                     for a in &f.attrs {
@@ -808,8 +827,8 @@ impl RustToRSharp {
                     format!(" : {}", bs.join(", "))
                 };
                 let wh = self.fmt_where(&t.generics);
-                self.line(&format!(
-                    "{}{}{}trait {}{}{}{} {{",
+                self.open_block(&format!(
+                    "{}{}{}trait {}{}{}{}",
                     vis, unsf, auto_kw, name, gens, supers, wh
                 ));
                 self.indent += 1;
@@ -918,7 +937,7 @@ impl RustToRSharp {
                     Some((neg, tp, _)) => {
                         let bang = if neg.is_some() { "!" } else { "" };
                         format!(
-                            "{}{}impl{} {}{} for {}{} {{",
+                            "{}{}impl{} {}{} for {}{}",
                             def,
                             unsf,
                             gens,
@@ -928,9 +947,9 @@ impl RustToRSharp {
                             wh
                         )
                     }
-                    None => format!("{}{}impl{} {}{} {{", def, unsf, gens, target, wh),
+                    None => format!("{}{}impl{} {}{}", def, unsf, gens, target, wh),
                 };
-                self.line(&header);
+                self.open_block(&header);
                 self.indent += 1;
                 self.emit_split_attrs(&im.attrs, true, "inner");
                 for sub in &im.items {
@@ -1067,7 +1086,7 @@ impl RustToRSharp {
                     .as_ref()
                     .map(|l| format!(" \"{}\"", l.value()))
                     .unwrap_or_default();
-                self.line(&format!("{}extern{} {{", unsf, abi));
+                self.open_block(&format!("{}extern{}", unsf, abi));
                 self.indent += 1;
                 self.emit_split_attrs(&fm.attrs, true, "inner");
                 for fi in &fm.items {
@@ -1329,7 +1348,7 @@ impl RustToRSharp {
         };
 
         if let Some(blk) = body {
-            self.line(&format!("{} {{", header));
+            self.open_block(&header);
             self.indent += 1;
             for a in inner_attrs {
                 self.emit_attr_with_target(a, Some("inner"));
@@ -1623,7 +1642,7 @@ impl RustToRSharp {
             } else {
                 self.fmt_pat(&local.pat, None)
             };
-            self.line(&format!("require ({} is {}) else {{", expr_s, pat_s));
+            self.open_block(&format!("require ({} is {}) else", expr_s, pat_s));
             self.indent += 1;
             self.emit_expr_as_block_body(diverge, BlockTail::None);
             self.indent -= 1;
@@ -2213,7 +2232,7 @@ impl RustToRSharp {
                     .map(|l| format!("{}: ", escape_lifetime(&l.name)))
                     .unwrap_or_default();
                 let cond = self.fmt_condition(&ew.cond);
-                self.line(&format!("{}while ({}) {{", lbl, cond));
+                self.open_block(&format!("{}while ({})", lbl, cond));
                 self.indent += 1;
                 self.emit_block_stmts(&ew.body, BlockTail::None);
                 self.indent -= 1;
@@ -2227,7 +2246,7 @@ impl RustToRSharp {
                     .unwrap_or_default();
                 let pat = self.fmt_for_loop_pat(&ef.pat, &ef.expr);
                 let iter = self.fmt_expr(&ef.expr);
-                self.line(&format!("{}foreach ({} in {}) {{", lbl, pat, iter));
+                self.open_block(&format!("{}foreach ({} in {})", lbl, pat, iter));
                 self.indent += 1;
                 self.emit_block_stmts(&ef.body, BlockTail::None);
                 self.indent -= 1;
@@ -2239,7 +2258,7 @@ impl RustToRSharp {
                     .as_ref()
                     .map(|l| format!("{}: ", escape_lifetime(&l.name)))
                     .unwrap_or_default();
-                self.line(&format!("{}loop {{", lbl));
+                self.open_block(&format!("{}loop", lbl));
                 self.indent += 1;
                 self.emit_block_stmts(&el.body, BlockTail::None);
                 self.indent -= 1;
@@ -2257,7 +2276,7 @@ impl RustToRSharp {
                 self.line("}");
             }
             Expr::Unsafe(eu) => {
-                self.line("unsafe {");
+                self.open_block("unsafe");
                 self.indent += 1;
                 self.emit_block_stmts(&eu.block, BlockTail::None);
                 self.indent -= 1;
@@ -2300,29 +2319,27 @@ impl RustToRSharp {
     fn emit_if(&mut self, eif: &syn::ExprIf, is_else_if: bool, tail: BlockTail) {
         let kw = if is_else_if { "else if" } else { "if" };
         let cond = self.fmt_condition(&eif.cond);
-        self.line(&format!("{} ({}) {{", kw, cond));
+        self.open_block(&format!("{} ({})", kw, cond));
         self.indent += 1;
         self.emit_block_stmts(&eif.then_branch, tail);
         self.indent -= 1;
+        self.line("}");
         if let Some((_, else_expr)) = &eif.else_branch {
             if let Expr::If(next) = else_expr.as_ref() {
-                self.line("}");
                 self.emit_if(next, true, tail);
             } else {
-                self.line("} else {");
+                self.open_block("else");
                 self.indent += 1;
                 self.emit_expr_as_block_body(else_expr, tail);
                 self.indent -= 1;
                 self.line("}");
             }
-        } else {
-            self.line("}");
         }
     }
 
     fn emit_match_stmt(&mut self, em: &syn::ExprMatch, tail_returns: bool) {
         let scr = self.fmt_expr(&em.expr);
-        self.line(&format!("match ({}) {{", scr));
+        self.open_block(&format!("match ({})", scr));
         self.indent += 1;
         let block_tail = if tail_returns {
             BlockTail::Return
@@ -2341,7 +2358,7 @@ impl RustToRSharp {
                 None => String::new(),
             };
             if tail_returns || matches!(arm.body.as_ref(), Expr::Block(_)) {
-                self.line(&format!("{}{} => {{", pat, guard));
+                self.open_block(&format!("{}{} =>", pat, guard));
                 self.indent += 1;
                 self.emit_expr_as_block_body(&arm.body, block_tail);
                 self.indent -= 1;
@@ -2530,7 +2547,7 @@ impl RustToRSharp {
                 return format!("{{ {} }}", sub.fmt_expr(single));
             }
             sub.emit_block_stmts(&eb.block, BlockTail::Return);
-            return format!("{{\n{}}}", sub.out);
+            return self.fmt_block(&sub.out);
         }
         sub.fmt_expr(expr)
     }
@@ -3084,7 +3101,7 @@ impl RustToRSharp {
                 } else {
                     let mut sub = self.child();
                     sub.emit_block_stmts(&ec.block, BlockTail::Return);
-                    format!("const {{\n{}}}", sub.out)
+                    self.fmt_named_block("const", &sub.out)
                 }
             }
             Expr::Binary(eb) => {
@@ -3232,7 +3249,7 @@ impl RustToRSharp {
                     .unwrap_or_default();
                 let mut sub = self.child();
                 sub.emit_block_stmts(&el.body, BlockTail::None);
-                format!("{}loop {{\n{}}}", lbl, sub.out)
+                self.fmt_named_block(&format!("{}loop", lbl), &sub.out)
             }
             Expr::While(ew) => {
                 let lbl = ew
@@ -3243,7 +3260,7 @@ impl RustToRSharp {
                 let cond = self.fmt_condition(&ew.cond);
                 let mut sub = self.child();
                 sub.emit_block_stmts(&ew.body, BlockTail::None);
-                format!("{}while ({}) {{\n{}}}", lbl, cond, sub.out)
+                self.fmt_named_block(&format!("{}while ({})", lbl, cond), &sub.out)
             }
             Expr::ForLoop(ef) => {
                 let lbl = ef
@@ -3255,7 +3272,7 @@ impl RustToRSharp {
                 let iter = self.fmt_expr(&ef.expr);
                 let mut sub = self.child();
                 sub.emit_block_stmts(&ef.body, BlockTail::None);
-                format!("{}foreach ({} in {}) {{\n{}}}", lbl, pat, iter, sub.out)
+                self.fmt_named_block(&format!("{}foreach ({} in {})", lbl, pat, iter), &sub.out)
             }
             Expr::Return(er) => match &er.expr {
                 Some(e) => format!("return {}", self.fmt_expr(e)),
@@ -3278,7 +3295,9 @@ impl RustToRSharp {
             },
             Expr::Match(em) => {
                 let scr = self.fmt_expr(&em.expr);
-                let mut arms = Vec::new();
+                let mut arms = String::new();
+                self.indent += 1;
+                let indent = INDENT.repeat(self.indent);
                 for arm in &em.arms {
                     let mut pfx = String::new();
                     for a in &arm.attrs {
@@ -3292,7 +3311,8 @@ impl RustToRSharp {
                         Some((_, ge)) => format!(" when {}", self.fmt_condition(ge)),
                         None => String::new(),
                     };
-                    let body = if let Expr::Block(eb) = arm.body.as_ref()
+                    let header = format!("{}{}{} =>", pfx, pat, g);
+                    let arm = if let Expr::Block(eb) = arm.body.as_ref()
                         && eb.label.is_none()
                         && eb.attrs.is_empty()
                         && single_tail_expr(&eb.block).is_none()
@@ -3305,19 +3325,20 @@ impl RustToRSharp {
                             Some(Stmt::Macro(sm)) if sm.semi_token.is_none()
                         );
                         if has_val_tail {
-                            format!("({})", self.fmt_expr(&arm.body))
+                            format!("{} ({})", header, self.fmt_expr(&arm.body))
                         } else {
                             let mut sub = self.child();
                             sub.emit_block_stmts(&eb.block, BlockTail::None);
-                            format!("{{\n{}}}", sub.out)
+                            self.fmt_named_block(&header, &sub.out)
                         }
                     } else {
-                        self.fmt_expr(&arm.body)
+                        format!("{} {}", header, self.fmt_expr(&arm.body))
                     };
                     self.pop_scope();
-                    arms.push(format!("{}{}{} => {}", pfx, pat, g, body));
+                    arms.push_str(&format!("{indent}{arm},\n"));
                 }
-                format!("match ({}) {{ {} }}", scr, arms.join(", "))
+                self.indent -= 1;
+                self.fmt_named_block(&format!("match ({})", scr), &arms)
             }
             Expr::Closure(ec) => {
                 let mut prefix = String::new();
@@ -3415,7 +3436,10 @@ impl RustToRSharp {
                             BlockTail::None
                         };
                         sub.emit_block_stmts(&eb.block, tail);
-                        format!("{}({}){} => {{\n{}}}", prefix, ps.join(", "), ret, sub.out)
+                        self.fmt_named_block(
+                            &format!("{}({}){} =>", prefix, ps.join(", "), ret),
+                            &sub.out,
+                        )
                     }
                     other => format!(
                         "{}({}){} => {}",
@@ -3432,7 +3456,7 @@ impl RustToRSharp {
                 if let Some(lbl) = &eb.label {
                     let mut sub = self.child();
                     sub.emit_block_stmts(&eb.block, BlockTail::None);
-                    format!("{}: {{\n{}}}", escape_lifetime(&lbl.name), sub.out)
+                    self.fmt_named_block(&format!("{}:", escape_lifetime(&lbl.name)), &sub.out)
                 } else if let Some(single) = single_tail_expr(&eb.block) {
                     if matches!(single, Expr::Field(_)) {
                         format!("{{ return {}; }}", self.fmt_expr(single))
@@ -3442,24 +3466,28 @@ impl RustToRSharp {
                 } else {
                     let mut sub = self.child();
                     sub.emit_block_stmts(&eb.block, BlockTail::Value);
-                    format!("{{\n{}}}", sub.out)
+                    self.fmt_block(&sub.out)
                 }
             }
             Expr::Async(ea) => {
-                let mv = if ea.capture.is_some() { "take " } else { "" };
+                let header = if ea.capture.is_some() {
+                    "async take"
+                } else {
+                    "async"
+                };
                 let mut sub = self.child();
                 sub.emit_block_stmts(&ea.block, BlockTail::Return);
-                format!("async {}{{\n{}}}", mv, sub.out)
+                self.fmt_named_block(header, &sub.out)
             }
             Expr::Unsafe(eu) => {
                 let mut sub = self.child();
                 sub.emit_block_stmts(&eu.block, BlockTail::Value);
-                format!("unsafe {{\n{}}}", sub.out)
+                self.fmt_named_block("unsafe", &sub.out)
             }
             Expr::TryBlock(etb) => {
                 let mut sub = self.child();
                 sub.emit_block_stmts(&etb.block, BlockTail::Value);
-                format!("try {{\n{}}}", sub.out)
+                self.fmt_named_block("try", &sub.out)
             }
             Expr::Yield(ey) => match &ey.expr {
                 Some(e) => format!("yield {}", self.fmt_expr(e)),
