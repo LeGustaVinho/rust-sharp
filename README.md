@@ -1,5 +1,10 @@
 # R# (R Sharp)
 
+[![Rust 2024](https://img.shields.io/badge/Rust-2024-CE412B?logo=rust&logoColor=white)](Cargo.toml)
+[![Workspace version 0.1.0](https://img.shields.io/badge/version-0.1.0-2F6FEB)](Cargo.toml)
+[![MIT license](https://img.shields.io/badge/license-MIT-22863A)](#license)
+[![VS Code extension](https://img.shields.io/badge/VS%20Code-extension-007ACC)](editors/vscode/README.md)
+
 R# is a programming language with C#-inspired syntax and Rust ownership semantics. It translates `.rsharp` files to Rust 2024 and uses `rustc` to type-check, borrow-check, and compile them to native binaries.
 
 Write explicit types and method signatures, use `read` and `write` for shared and mutable borrows, and propagate errors with `try`. You can also convert Rust source to R# or embed Rust directly in a `rust { ... }` block.
