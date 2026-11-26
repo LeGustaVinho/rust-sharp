@@ -560,3 +560,292 @@ fn cargo_metadata_discovery_and_raw_rust_counter_full_coverage() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn github_40_repos_all_15_root_causes_zero_fallback_and_stress() {
+    // 1. Global aliased `using` (hyperswitch, tokio, iced, wezterm x2) + root glob/group
+    let use_rust = r#"
+use ::image as img;
+use ::window::glium::backend::Context as GliumContext;
+use ::std::fmt::Display;
+use ::foo::*;
+use ::{alpha, beta};
+use ::std::{fmt, io};
+"#;
+    let (use_rsh, use_rs) = convert_no_ra(use_rust);
+    assert_eq!(count_raw_rust_blocks(&use_rsh), 0);
+    assert!(
+        use_rsh.contains("using img = global::image;"),
+        "got:\n{use_rsh}"
+    );
+    assert!(
+        use_rsh.contains("using GliumContext = global::window.glium.backend.Context;"),
+        "got:\n{use_rsh}"
+    );
+    assert!(use_rs.contains("use ::image as img;"), "got:\n{use_rs}");
+    assert!(
+        use_rs.contains("use ::window::glium::backend::Context as GliumContext;"),
+        "got:\n{use_rs}"
+    );
+
+    // 2. All remaining 14 root causes from the 40-repo GitHub benchmark (ZERO rust {} fallbacks)
+    let compat_rust = r##"
+mod err {
+    pub struct Error;
+}
+struct InstallOptions { a: i32 }
+struct Signals { a: i32, b: i32 }
+struct State<P> { value: P }
+enum RuleState { A(i32), B(i32) }
+enum Target { Rust }
+struct Wrapper(i32);
+
+struct Runner;
+impl Runner {
+    #[ref_cast_custom]
+    pub(super) const fn new_unchecked(p: &str) -> &Self;
+    fn collect_run<const B: bool>() {}
+    fn parent<T>() -> i32 { 1 }
+    fn handle(&self, e: &self::err::Error, w: &mut self::err::Error) {
+        let _ = (e, w);
+    }
+}
+
+#[linkme::distributed_slice]
+pub static TESTS: [i32];
+
+fn local_ref_cast_and_empty_semi() {
+    #[ref_cast_custom]
+    fn ref_cast<T>(p: &str) -> &T;
+    fn inner() {};
+    let _ = ref_cast::<i32>;
+}
+
+fn receiver_this_path(e: &self::err::Error, w: &mut self::err::Error) {
+    let _ = (e, w);
+}
+
+#[case(br#"$"('" "')""#)]
+#[case::postgres_password("pw", r#""postgres://user:pass@localhost/db""#)]
+#[case(r"plain_raw")]
+#[case(b"byte_str")]
+#[case(c"c_str")]
+#[case(cr#"c_raw"#)]
+#[case(b'x')]
+#[doc("bar")]
+fn all_40_repo_patterns(
+    state: RuleState,
+    target: Target,
+    opts: &InstallOptions,
+    c1: bool,
+    c2: bool,
+    c3: bool,
+) {
+    // Non-ident patterns in `let` (biome, SpacetimeDB, mise, surrealdb)
+    let (RuleState::A(d1) | RuleState::B(d1)) = state;
+    let Target::Rust = target;
+    let 1 = unknown_v();
+    let 1..=2 = unknown_v();
+    let const { 1 } = unknown_v();
+    let ((pa, pb)) = unknown_v();
+    let (bound_a @ _) = unknown_v();
+
+    // Uninitialized destructuring with and without explicit types (hyperswitch, egui)
+    let [left, right, top, bottom]: [bool; 4];
+    let (mut ta, mut tb, tc): (_, _, i32);
+    let [u_slice];
+    let InstallOptions { a: u_field };
+    let Wrapper(u_wrap);
+    let &u_ref;
+    left = true; right = false; top = true; bottom = false;
+    ta = 1; tb = 2; tc = 3;
+    u_slice = 0; u_field = 0; u_wrap = 0; u_ref = 0;
+
+    // `deref Struct { ... } = opts;` (mise, rustfs, qdrant, jj)
+    let &InstallOptions { a: opt_a } = opts;
+
+    // Chained `@` subpatterns (hyperswitch x4)
+    let created_at @ modified_at @ last_synced = unknown_v();
+
+    // `_` element types in destructured closure params (zed, hyperswitch, qdrant)
+    let _ = |(window, workspace): (_, i32)| { let _ = (window, workspace); };
+    let _ = |(mut window, workspace): (_, i32)| { window = workspace; };
+
+    // `[stmt] : Statement[1] = ...` & `[hunk] : _[1] = ...` (polars, zed)
+    let [stmt]: [i32; 1] = [1];
+    let [hunk]: [_; 1] = [2];
+    let arr_lit = [foo(1)];
+
+    // Generic struct pattern, ternary generic fn, empty `<>()` turbofish (dioxus, iced, polars, biome)
+    let State::<i32> { value: sv } = unknown_v();
+    let _fn_ptr = if c1 { Runner::collect_run::<true> } else { Runner::collect_run::<false> };
+    let _p = Runner::parent::<>();
+    let _m = unknown_v().parent::<>();
+
+    // `break format!(...)` vs `break outer !(cond)` (rustfs)
+    let _b1 = loop {
+        break format!("ok");
+    };
+    let _b2 = 'outer: loop {
+        break 'outer !(c1);
+    };
+
+    // Dangling-else inside `if` expression (surrealdb/each.rs)
+    let _e1 = if c1 {
+        if c2 {
+            1
+        }
+    } else {
+        2
+    };
+    let _e2 = if c1 {
+        if c2 {
+            1
+        } else if c3 {
+            2
+        }
+    } else {
+        3
+    };
+    let _e3 = if c1 {
+        if c2 { 1 } else { 2 }
+    } else {
+        3
+    };
+
+    // `&..` / `&mut ..` (SpacetimeDB)
+    let _r1 = &..;
+    let _r2 = &mut ..;
+
+    // Stale `var_types` when `var` shadows a previously typed struct variable (surrealdb/morsel/set.rs)
+    let signals = Signals { a: 1, b: 2 };
+    let (_answer, signals) = unknown_pair();
+    let _s2 = Signals { a: 3, ..signals };
+
+    // Additional chain & receiver paren coverage (`x?.field`, `f?()`, `let _;`)
+    let _;
+    let _field_after_try = get_opt()?.a;
+    let _call_after_try = get_cb()?();
+
+    let _ = (
+        d1, pa, pb, bound_a, left, right, top, bottom, ta, tb, tc,
+        u_slice, u_field, u_wrap, u_ref, opt_a, created_at, modified_at, last_synced,
+        stmt, hunk, arr_lit, sv, _fn_ptr, _p, _m, _b1, _b2, _e1, _e2, _e3, _r1, _r2, _s2,
+        _field_after_try, _call_after_try,
+    );
+}
+
+async fn await_then_method<F: std::future::Future<Output = Runner>>(f: F) {
+    let _ = f.await.parent::<()>();
+}
+"##;
+    let (compat_rsh, compat_rs) = convert_no_ra(compat_rust);
+    assert_eq!(
+        count_raw_rust_blocks(&compat_rsh),
+        0,
+        "expected ZERO rust{{}} blocks, got:\n{compat_rsh}"
+    );
+    assert!(
+        compat_rsh.contains("var [left, right, top, bottom] : bool[4];"),
+        "got:\n{compat_rsh}"
+    );
+    assert!(
+        compat_rsh.contains("var deref InstallOptions { a: opt_a } = opts;"),
+        "got:\n{compat_rsh}"
+    );
+    assert!(
+        compat_rsh.contains("new Signals { a = 3, ..signals }"),
+        "got:\n{compat_rsh}"
+    );
+    assert!(
+        compat_rs.contains("let created_at @ modified_at @ last_synced ="),
+        "got:\n{compat_rs}"
+    );
+    assert!(
+        compat_rs.contains("e: &self::err::Error"),
+        "got:\n{compat_rs}"
+    );
+
+    // 3. Direct R# parser & codegen checks: `_ ident`, `mut _ ident`, `read ..`, `this.Mod.T`,
+    //    `(a, b) : (_, int)` param, empty `<>` reject when not followed by `(`, and unary/binary precedence.
+    let direct_rsh = r#"
+void direct_checks(
+    read this.err.Error e,
+    write this.err.Error w,
+    this.Mod.T plain
+) {
+    var f1 = ((_ window, int n)) => n;
+    var f2 = ((mut _ window, int n)) => { window = n; return window; };
+    var f3 = ((a, b) : (_, int)) => b;
+    var A(or_x) | B(or_x) = state;
+    var r = read ..;
+    var x = foo<>();
+    var cmp = 1 < 2 && 3 <= 4 || 5 > 4 && 6 >= 6;
+    var bits = (1 | 2 ^ 3 & 4) == 5 && 1 != 2;
+    var math = ((1 << 2) >> 1) + 3 - 4 * 5 / 2 % 3;
+    var is_p = opt is Some(int v) && opt is not None;
+    var un = -!~1;
+    var f4 = take () => 1;
+    var p_try = try panic("boom");
+    (int x, int y) pt = (1, 2);
+    var px = pt.x.abs();
+    var ti = (deref pair_ref).0;
+    _ = (e, w, plain, f1, f2, f3, f4, or_x, r, x, cmp, bits, math, is_p, un, p_try, px, ti);
+}
+"#;
+    let direct_rs = transpile_to_rust(
+        direct_rsh,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("direct R# constructs should transpile cleanly");
+    assert!(
+        !direct_rs.contains("let _: &_ = &window;"),
+        "got:\n{direct_rs}"
+    );
+    assert!(direct_rs.contains("&(..)"), "got:\n{direct_rs}");
+    assert!(
+        direct_rs.contains("e: &self::err::Error"),
+        "got:\n{direct_rs}"
+    );
+
+    // `a <> b` is NOT empty turbofish (not followed by `(`); invalid `take this.X` is not a receiver;
+    // error paths on `(..` and `().` postfix.
+    for invalid in [
+        "void f() { var x = a <> b; }",
+        "void f(take this.X x) {}",
+        "void f(take Box<Self> this.X x) {}",
+        "void f(Box<Self> this.X x) {}",
+        "void f() { var x = (..1 +); }",
+        "void f() { var x = ().; }",
+    ] {
+        assert!(
+            parser::parse_file(invalid).is_err(),
+            "should fail: {invalid}"
+        );
+    }
+
+    // Exercise `rustc` probe with both explicit and inferred `Pat::Type`, `Pat::Paren`, uninitialized `let`, and `column!()` via lib crate.
+    let probed_infer = rsharp_core::convert_from_rust(
+        "fn main() { let first: u8; first = 1; let explicit: u8 = first; let (n): _ = std::hint::black_box(explicit); let a = std::hint::black_box([0u8; column!() as usize]); let _ = (n, a); }",
+        FromRustOptions::default(),
+    )
+    .expect("rustc probe on parenthesized inferred local should succeed");
+    assert!(probed_infer.contains("(byte n)"), "got:\n{probed_infer}");
+
+    // 4. Deeply nested chained `try (...).set_default(i)` stress test (150 levels — 2x atuin's 79!)
+    //    Runs directly on the default debug stack (proving O(1) stack across from_rust, parser, and codegen!).
+    let make_deep = |n: usize| {
+        let mut s =
+            String::from("fn deep_builder(mut b: Builder) -> Result<Builder, ()> {\n    Ok(b");
+        for i in 0..n {
+            s.push_str(&format!(".set_default(\"k{i}\", {i})?"));
+        }
+        s.push_str(")\n}\n");
+        s
+    };
+    let (deep150_rsh, deep150_rs) = convert_no_ra(&make_deep(150));
+    assert_eq!(count_raw_rust_blocks(&deep150_rsh), 0);
+    assert!(deep150_rs.contains(".set_default(\"k149\", 149))?"));
+}

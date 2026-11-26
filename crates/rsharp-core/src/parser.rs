@@ -363,6 +363,7 @@ impl<'a> Parser<'a> {
             && matches!(
                 self.peek_kind(),
                 TokenKind::Eq
+                    | TokenKind::Colon
                     | TokenKind::Dot
                     | TokenKind::ColonColon
                     | TokenKind::LBracket
@@ -520,7 +521,7 @@ impl<'a> Parser<'a> {
             }
             let (inners, outers): (Vec<_>, Vec<_>) = attrs.into_iter().partition(|a| a.inner);
             inner_attrs.extend(inners);
-            let item = self.parse_item_after_meta(docs, outers, false)?;
+            let item = self.parse_item_after_meta(docs, outers)?;
             items.push(item);
         }
         Ok(FileAst {
@@ -533,15 +534,10 @@ impl<'a> Parser<'a> {
 
     fn parse_item(&mut self) -> Result<Item> {
         let (docs, attrs) = self.collect_outer_meta()?;
-        self.parse_item_after_meta(docs, attrs, false)
+        self.parse_item_after_meta(docs, attrs)
     }
 
-    fn parse_item_after_meta(
-        &mut self,
-        docs: Vec<String>,
-        attrs: Vec<Attribute>,
-        in_extern: bool,
-    ) -> Result<Item> {
+    fn parse_item_after_meta(&mut self, docs: Vec<String>, attrs: Vec<Attribute>) -> Result<Item> {
         if let TokenKind::RustBlock(raw) = self.peek_kind().clone() {
             self.bump();
             return Ok(Item {
@@ -778,7 +774,7 @@ impl<'a> Parser<'a> {
 
         // Distinguish `safe?/unsafe? static mut? Type Name (= Expr)?;` vs `static ReturnType Fn(...)`
         if self.is_static_item() {
-            let s = self.parse_static_decl(in_extern)?;
+            let s = self.parse_static_decl()?;
             return Ok(Item {
                 docs,
                 attrs,
@@ -1745,14 +1741,14 @@ impl<'a> Parser<'a> {
         Ok(ConstDecl { ty, name, value })
     }
 
-    fn parse_static_decl(&mut self, in_extern: bool) -> Result<StaticDecl> {
+    fn parse_static_decl(&mut self) -> Result<StaticDecl> {
         let is_safe = self.eat_contextual("safe");
         let is_unsafe = !is_safe && self.eat_kw(Keyword::Unsafe);
         self.bump(); // 'static'
         let is_mut = self.eat_kw(Keyword::Mut);
         let ty = self.parse_type()?;
         let name = self.expect_ident()?;
-        let value = if in_extern && self.check(&TokenKind::Semicolon) {
+        let value = if self.check(&TokenKind::Semicolon) {
             None
         } else {
             self.expect(&TokenKind::Eq, "'='")?;
@@ -1785,7 +1781,7 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            items.push(self.parse_item_after_meta(docs, attrs, true)?);
+            items.push(self.parse_item_after_meta(docs, attrs)?);
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
         Ok(ExternBlock {
@@ -1952,7 +1948,7 @@ impl<'a> Parser<'a> {
             } else {
                 let pat = self.parse_pattern()?;
                 let explicit_ty = if self.eat(&TokenKind::Colon) {
-                    Some(self.parse_type()?)
+                    Some(self.parse_type_inner(true)?)
                 } else {
                     None
                 };
@@ -1992,25 +1988,32 @@ impl<'a> Parser<'a> {
         let save = self.checkpoint();
         if self.eat_kw(Keyword::Read) {
             let life = self.try_parse_lifetime_angle();
-            if self.eat_kw(Keyword::This) {
+            if self.eat_kw(Keyword::This)
+                && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RParen)
+            {
                 return Some(ReceiverKind::Read(life));
             }
             self.restore(save);
         }
         if self.eat_kw(Keyword::Write) {
             let life = self.try_parse_lifetime_angle();
-            if self.eat_kw(Keyword::This) {
+            if self.eat_kw(Keyword::This)
+                && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RParen)
+            {
                 return Some(ReceiverKind::Write(life));
             }
             self.restore(save);
         }
         let is_mut = self.eat_kw(Keyword::Mut);
         if self.eat_kw(Keyword::Take) {
-            if self.eat_kw(Keyword::This) {
+            if self.eat_kw(Keyword::This)
+                && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RParen)
+            {
                 return Some(ReceiverKind::Take { is_mut });
             }
             if let Ok(ty) = self.parse_type()
                 && self.eat_kw(Keyword::This)
+                && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RParen)
             {
                 return Some(ReceiverKind::Typed { is_mut, ty });
             }
@@ -2019,6 +2022,7 @@ impl<'a> Parser<'a> {
         }
         if let Ok(ty) = self.parse_type()
             && self.eat_kw(Keyword::This)
+            && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::RParen)
         {
             return Some(ReceiverKind::Typed { is_mut, ty });
         }
@@ -2731,7 +2735,7 @@ impl<'a> Parser<'a> {
 
         // Nested item statements (const item vs const expr block handled carefully!)
         if self.is_nested_item_start() {
-            let item = self.parse_item_after_meta(docs, attrs, false)?;
+            let item = self.parse_item_after_meta(docs, attrs)?;
             return Ok(Stmt::plain(StmtKind::Item(Box::new(item))));
         }
 
@@ -2880,7 +2884,7 @@ impl<'a> Parser<'a> {
             && self.check(&TokenKind::LParen)
             && self.parse_params().is_ok()
             && self.parse_where_clause().is_ok()
-            && self.check(&TokenKind::LBrace);
+            && (self.check(&TokenKind::LBrace) || self.check(&TokenKind::Semicolon));
         self.restore(save);
         ok
     }
@@ -2895,9 +2899,9 @@ impl<'a> Parser<'a> {
                 self.restore(save);
                 return Ok(None);
             }
-            let pat = self.parse_single_pattern()?;
+            let pat = self.parse_pattern()?;
             let explicit_ty = if self.eat(&TokenKind::Colon) {
-                Some(self.parse_type()?)
+                Some(self.parse_type_inner(true)?)
             } else {
                 None
             };
@@ -2944,7 +2948,7 @@ impl<'a> Parser<'a> {
                 _ => false,
             };
             let explicit_ty = if allowed && self.eat(&TokenKind::Colon) {
-                if let Ok(ty) = self.parse_type() {
+                if let Ok(ty) = self.parse_type_inner(true) {
                     Some(ty)
                 } else {
                     self.restore(save);
@@ -3215,9 +3219,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_single_pattern(&mut self) -> Result<Pattern> {
-        let base = self.parse_atom_pattern()?;
-        // Optional subpattern binding: `<pattern> as [borrow (read|write) | mut] <Type> <name>`
-        if self.eat_kw(Keyword::As) {
+        let mut base = self.parse_atom_pattern()?;
+        // Optional (possibly chained) subpattern binding: `<pattern> as [borrow (read|write) | mut] <Type> <name>`
+        while self.eat_kw(Keyword::As) {
             let (ref_mode, is_mut) = if self.eat_kw(Keyword::Borrow) {
                 if self.eat_kw(Keyword::Write) {
                     (Some(RefMode::Write), false)
@@ -3230,21 +3234,28 @@ impl<'a> Parser<'a> {
             };
             let ty = self.parse_type_inner(true)?;
             let name = self.expect_ident()?;
-            return Ok(Pattern::BindAt {
+            base = Pattern::BindAt {
                 ref_mode,
                 is_mut,
                 ty,
                 name,
                 subpat: Box::new(base),
-            });
+            };
         }
         Ok(base)
     }
 
     fn parse_atom_pattern(&mut self) -> Result<Pattern> {
-        // Wildcard `_`
+        // Wildcard `_` or inferred-type binding `_ name`
         if matches!(self.peek_kind(), TokenKind::Ident { name, .. } if name == "_") {
             self.bump();
+            if let Some(name) = self.eat_ident() {
+                return Ok(Pattern::Binding {
+                    is_mut: false,
+                    ty: Some(Type::Infer),
+                    name,
+                });
+            }
             return Ok(Pattern::Wildcard);
         }
 
@@ -3564,7 +3575,7 @@ impl<'a> Parser<'a> {
         } else {
             self.expect_member_ident()?
         };
-        let first_args = self.try_parse_expr_generic_args();
+        let first_args = self.try_parse_expr_generic_args().unwrap_or_default();
         segments.push(TypePathSegment {
             name: first_name,
             args: if first_args.is_empty() {
@@ -3575,7 +3586,7 @@ impl<'a> Parser<'a> {
         });
         while self.eat(&TokenKind::Dot) || self.eat(&TokenKind::ColonColon) {
             let name = self.expect_member_ident()?;
-            let gargs = self.try_parse_expr_generic_args();
+            let gargs = self.try_parse_expr_generic_args().unwrap_or_default();
             segments.push(TypePathSegment {
                 name,
                 args: if gargs.is_empty() {
@@ -3780,7 +3791,7 @@ impl<'a> Parser<'a> {
     fn try_parse_typed_pattern_binding(&mut self) -> Option<Pattern> {
         let save = self.checkpoint();
         let is_mut = self.eat_kw(Keyword::Mut);
-        let Ok(ty) = self.parse_type() else {
+        let Ok(ty) = self.parse_type_inner(true) else {
             self.restore(save);
             return None;
         };
@@ -3802,93 +3813,7 @@ impl<'a> Parser<'a> {
     // ==================== EXPRESSIONS ====================
 
     fn parse_expr(&mut self) -> Result<Expr> {
-        self.parse_assign()
-    }
-
-    fn parse_assign(&mut self) -> Result<Expr> {
-        let lhs = self.parse_ternary()?;
-        let op = match self.peek_kind() {
-            TokenKind::Eq => Some(AssignOp::Assign),
-            TokenKind::PlusEq => Some(AssignOp::AddAssign),
-            TokenKind::MinusEq => Some(AssignOp::SubAssign),
-            TokenKind::StarEq => Some(AssignOp::MulAssign),
-            TokenKind::SlashEq => Some(AssignOp::DivAssign),
-            TokenKind::PercentEq => Some(AssignOp::RemAssign),
-            TokenKind::AmpEq => Some(AssignOp::BitAndAssign),
-            TokenKind::PipeEq => Some(AssignOp::BitOrAssign),
-            TokenKind::CaretEq => Some(AssignOp::BitXorAssign),
-            TokenKind::ShlEq => Some(AssignOp::ShlAssign),
-            TokenKind::ShrEq => Some(AssignOp::ShrAssign),
-            _ => None,
-        };
-        if let Some(op) = op {
-            self.bump();
-            let rhs = self.parse_assign()?;
-            return Ok(Expr::Assign {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            });
-        }
-        Ok(lhs)
-    }
-
-    fn parse_ternary(&mut self) -> Result<Expr> {
-        let expr = self.parse_coalesce()?;
-        if self.eat(&TokenKind::Question) {
-            let then_expr = self.parse_expr()?;
-            self.expect(&TokenKind::Colon, "':' in ternary expression")?;
-            let else_expr = self.parse_ternary()?;
-            return Ok(Expr::Ternary {
-                cond: Box::new(expr),
-                then_expr: Box::new(then_expr),
-                else_expr: Box::new(else_expr),
-            });
-        }
-        Ok(expr)
-    }
-
-    fn parse_coalesce(&mut self) -> Result<Expr> {
-        let lhs = self.parse_range()?;
-        if self.eat(&TokenKind::QuestionQuestion) {
-            let rhs = self.parse_coalesce()?;
-            return Ok(Expr::Coalesce {
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            });
-        }
-        Ok(lhs)
-    }
-
-    fn parse_range(&mut self) -> Result<Expr> {
-        if self.eat(&TokenKind::DotDot) || self.eat(&TokenKind::DotDotEq) {
-            let inclusive = matches!(self.tokens[self.pos - 1].kind, TokenKind::DotDotEq);
-            let end = if self.starts_expr_after_range() {
-                Some(Box::new(self.parse_or()?))
-            } else {
-                None
-            };
-            return Ok(Expr::Range {
-                start: None,
-                end,
-                inclusive,
-            });
-        }
-        let lhs = self.parse_or()?;
-        if self.eat(&TokenKind::DotDot) || self.eat(&TokenKind::DotDotEq) {
-            let inclusive = matches!(self.tokens[self.pos - 1].kind, TokenKind::DotDotEq);
-            let end = if self.starts_expr_after_range() {
-                Some(Box::new(self.parse_or()?))
-            } else {
-                None
-            };
-            return Ok(Expr::Range {
-                start: Some(Box::new(lhs)),
-                end,
-                inclusive,
-            });
-        }
-        Ok(lhs)
+        self.parse_expr_bp(1)
     }
 
     fn starts_expr_after_range(&self) -> bool {
@@ -3905,89 +3830,36 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn parse_or(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_and()?;
-        while self.eat(&TokenKind::PipePipe) {
-            let rhs = self.parse_and()?;
-            lhs = Expr::Binary {
-                op: BinaryOp::Or,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr> {
+        let lhs = if min_bp <= 4 && (self.eat(&TokenKind::DotDot) || self.eat(&TokenKind::DotDotEq))
+        {
+            let inclusive = matches!(self.tokens[self.pos - 1].kind, TokenKind::DotDotEq);
+            let end = if self.starts_expr_after_range() {
+                Some(Box::new(self.parse_expr_bp(5)?))
+            } else {
+                None
             };
-        }
-        Ok(lhs)
+            Expr::Range {
+                start: None,
+                end,
+                inclusive,
+            }
+        } else {
+            self.parse_unary()?
+        };
+        self.finish_expr_bp(lhs, min_bp)
     }
 
-    fn parse_and(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_bitor()?;
-        while self.eat(&TokenKind::AmpAmp) {
-            let rhs = self.parse_bitor()?;
-            lhs = Expr::Binary {
-                op: BinaryOp::And,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
+    fn finish_expr_bp(&mut self, mut lhs: Expr, min_bp: u8) -> Result<Expr> {
+        while self.eat_kw(Keyword::As) {
+            let ty = self.parse_type_inner(true)?;
+            lhs = Expr::Cast {
+                expr: Box::new(lhs),
+                ty,
             };
         }
-        Ok(lhs)
-    }
-
-    fn parse_bitor(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_bitxor()?;
-        while self.eat(&TokenKind::Pipe) {
-            let rhs = self.parse_bitxor()?;
-            lhs = Expr::Binary {
-                op: BinaryOp::BitOr,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
-    }
-
-    fn parse_bitxor(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_bitand()?;
-        while self.eat(&TokenKind::Caret) {
-            let rhs = self.parse_bitand()?;
-            lhs = Expr::Binary {
-                op: BinaryOp::BitXor,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
-    }
-
-    fn parse_bitand(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_equality()?;
-        while self.eat(&TokenKind::Amp) {
-            let rhs = self.parse_equality()?;
-            lhs = Expr::Binary {
-                op: BinaryOp::BitAnd,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
-    }
-
-    fn parse_equality(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_comparison()?;
         loop {
-            if self.eat(&TokenKind::EqEq) {
-                let rhs = self.parse_comparison()?;
-                lhs = Expr::Binary {
-                    op: BinaryOp::Eq,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                };
-            } else if self.eat(&TokenKind::BangEq) {
-                let rhs = self.parse_comparison()?;
-                lhs = Expr::Binary {
-                    op: BinaryOp::Ne,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                };
-            } else if self.eat_kw(Keyword::Is) {
+            if min_bp <= 10 && self.eat_kw(Keyword::Is) {
                 let negated = self.eat_kw(Keyword::Not);
                 let pat = self.parse_pattern()?;
                 lhs = Expr::IsPattern {
@@ -3995,191 +3867,213 @@ impl<'a> Parser<'a> {
                     negated,
                     pat,
                 };
-            } else {
-                break;
+                continue;
             }
-        }
-        Ok(lhs)
-    }
-
-    fn parse_comparison(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_shift()?;
-        loop {
-            let op = match self.peek_kind() {
-                TokenKind::Lt => Some(BinaryOp::Lt),
-                TokenKind::Le => Some(BinaryOp::Le),
-                TokenKind::Gt => Some(BinaryOp::Gt),
-                TokenKind::Ge => Some(BinaryOp::Ge),
-                _ => None,
-            };
-            if let Some(op) = op {
+            if let Some((prec, op)) = binary_op_prec(self.peek_kind()) {
+                if prec < min_bp {
+                    break;
+                }
                 self.bump();
-                let rhs = self.parse_shift()?;
+                let rhs = self.parse_expr_bp(prec + 1)?;
                 lhs = Expr::Binary {
                     op,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 };
-            } else {
-                break;
+                continue;
             }
-        }
-        Ok(lhs)
-    }
-
-    fn parse_shift(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_additive()?;
-        loop {
-            let op = match self.peek_kind() {
-                TokenKind::Shl => Some(BinaryOp::Shl),
-                TokenKind::Shr => Some(BinaryOp::Shr),
-                _ => None,
-            };
-            if let Some(op) = op {
+            if min_bp <= 4 && (self.eat(&TokenKind::DotDot) || self.eat(&TokenKind::DotDotEq)) {
+                let inclusive = matches!(self.tokens[self.pos - 1].kind, TokenKind::DotDotEq);
+                let end = if self.starts_expr_after_range() {
+                    Some(Box::new(self.parse_expr_bp(5)?))
+                } else {
+                    None
+                };
+                lhs = Expr::Range {
+                    start: Some(Box::new(lhs)),
+                    end,
+                    inclusive,
+                };
+                continue;
+            }
+            if min_bp <= 3 && self.eat(&TokenKind::QuestionQuestion) {
+                let rhs = self.parse_expr_bp(3)?;
+                lhs = Expr::Coalesce {
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                };
+                continue;
+            }
+            if min_bp <= 2 && self.eat(&TokenKind::Question) {
+                let then_expr = self.parse_expr_bp(1)?;
+                self.expect(&TokenKind::Colon, "':' in ternary expression")?;
+                let else_expr = self.parse_expr_bp(2)?;
+                lhs = Expr::Ternary {
+                    cond: Box::new(lhs),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                };
+                continue;
+            }
+            if min_bp <= 1
+                && let Some(op) = assign_op(self.peek_kind())
+            {
                 self.bump();
-                let rhs = self.parse_additive()?;
-                lhs = Expr::Binary {
+                let rhs = self.parse_expr_bp(1)?;
+                lhs = Expr::Assign {
                     op,
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 };
-            } else {
-                break;
+                continue;
             }
+            break;
         }
         Ok(lhs)
     }
 
-    fn parse_additive(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_multiplicative()?;
-        loop {
-            let op = match self.peek_kind() {
-                TokenKind::Plus => Some(BinaryOp::Add),
-                TokenKind::Minus => Some(BinaryOp::Sub),
-                _ => None,
-            };
-            if let Some(op) = op {
-                self.bump();
-                let rhs = self.parse_multiplicative()?;
-                lhs = Expr::Binary {
-                    op,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
+    fn parse_unary(&mut self) -> Result<Expr> {
+        let orig_guard = self.in_match_guard;
+        let res = self.parse_unary_inner();
+        self.in_match_guard = orig_guard;
+        res
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr> {
+        enum PrefixOp {
+            Neg,
+            Not,
+            BitNot,
+            StepInc,
+            StepDec,
+            Try,
+            Await,
+            Deref,
+            ReadSlice,
+            RawReadPtr,
+            Read,
+            WriteSlice,
+            RawWritePtr,
+            Write,
+            Take,
+        }
+        let apply_ops = |ops: Vec<PrefixOp>, mut expr: Expr| -> Expr {
+            for op in ops.into_iter().rev() {
+                expr = match op {
+                    PrefixOp::Neg => Expr::Unary {
+                        op: UnaryOp::Neg,
+                        expr: Box::new(expr),
+                    },
+                    PrefixOp::Not => Expr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(expr),
+                    },
+                    PrefixOp::BitNot => Expr::Unary {
+                        op: UnaryOp::BitNot,
+                        expr: Box::new(expr),
+                    },
+                    PrefixOp::StepInc => Expr::Step {
+                        inc: true,
+                        target: Box::new(expr),
+                    },
+                    PrefixOp::StepDec => Expr::Step {
+                        inc: false,
+                        target: Box::new(expr),
+                    },
+                    PrefixOp::Try => Expr::Try(Box::new(expr)),
+                    PrefixOp::Await => Expr::Await(Box::new(expr)),
+                    PrefixOp::Deref => Expr::Deref(Box::new(expr)),
+                    PrefixOp::ReadSlice => Expr::ReadSlice(Box::new(expr)),
+                    PrefixOp::RawReadPtr => Expr::RawReadPtr(Box::new(expr)),
+                    PrefixOp::Read => Expr::Read(Box::new(expr)),
+                    PrefixOp::WriteSlice => Expr::WriteSlice(Box::new(expr)),
+                    PrefixOp::RawWritePtr => Expr::RawWritePtr(Box::new(expr)),
+                    PrefixOp::Write => Expr::Write(Box::new(expr)),
+                    PrefixOp::Take => Expr::Take(Box::new(expr)),
                 };
-            } else {
-                break;
             }
-        }
-        Ok(lhs)
-    }
+            expr
+        };
 
-    fn parse_multiplicative(&mut self) -> Result<Expr> {
-        let mut lhs = self.parse_cast()?;
-        loop {
-            let op = match self.peek_kind() {
-                TokenKind::Star => Some(BinaryOp::Mul),
-                TokenKind::Slash => Some(BinaryOp::Div),
-                TokenKind::Percent => Some(BinaryOp::Rem),
-                _ => None,
-            };
-            if let Some(op) = op {
+        // Flatten arbitrarily deep left-nested `(try (...).method())` chains iteratively.
+        let mut frames: Vec<(Vec<PrefixOp>, bool)> = Vec::new();
+        let mut ops = Vec::new();
+        let mut expr = loop {
+            if self.eat(&TokenKind::Minus) {
+                ops.push(PrefixOp::Neg);
+            } else if self.eat(&TokenKind::Bang) {
+                ops.push(PrefixOp::Not);
+            } else if self.eat(&TokenKind::Tilde) {
+                ops.push(PrefixOp::BitNot);
+            } else if self.eat(&TokenKind::PlusPlus) {
+                ops.push(PrefixOp::StepInc);
+            } else if self.eat(&TokenKind::MinusMinus) {
+                ops.push(PrefixOp::StepDec);
+            } else if self.check_kw(Keyword::Try)
+                && !matches!(self.peek_at(1).kind, TokenKind::LBrace)
+            {
                 self.bump();
-                let rhs = self.parse_cast()?;
-                lhs = Expr::Binary {
-                    op,
-                    lhs: Box::new(lhs),
-                    rhs: Box::new(rhs),
-                };
+                ops.push(PrefixOp::Try);
+            } else if self.eat_kw(Keyword::Await) {
+                ops.push(PrefixOp::Await);
+            } else if self.eat_kw(Keyword::Deref) {
+                ops.push(PrefixOp::Deref);
+            } else if self.eat_kw(Keyword::Read) {
+                if self.eat_kw(Keyword::Slice) {
+                    ops.push(PrefixOp::ReadSlice);
+                } else if self.eat_kw(Keyword::Ptr) {
+                    ops.push(PrefixOp::RawReadPtr);
+                } else {
+                    ops.push(PrefixOp::Read);
+                }
+            } else if self.eat_kw(Keyword::Write) {
+                if self.eat_kw(Keyword::Slice) {
+                    ops.push(PrefixOp::WriteSlice);
+                } else if self.eat_kw(Keyword::Ptr) {
+                    ops.push(PrefixOp::RawWritePtr);
+                } else {
+                    ops.push(PrefixOp::Write);
+                }
+            } else if self.check_kw(Keyword::Take) {
+                if let Some(lambda) = self.try_parse_lambda()? {
+                    break lambda;
+                }
+                self.bump();
+                ops.push(PrefixOp::Take);
+            } else if self.check(&TokenKind::LParen) {
+                if let Some(lambda) = self.try_parse_lambda()? {
+                    break lambda;
+                }
+                if let Some(ufcs) = self.try_parse_ufcs() {
+                    break self.finish_postfix(ufcs)?;
+                }
+                if matches!(
+                    self.peek_at(1).kind,
+                    TokenKind::RParen | TokenKind::DotDot | TokenKind::DotDotEq
+                ) {
+                    let primary = self.parse_paren_or_tuple()?;
+                    break self.finish_postfix(primary)?;
+                }
+                frames.push((std::mem::take(&mut ops), self.in_match_guard));
+                self.bump(); // '('
+                self.in_match_guard = false;
             } else {
-                break;
+                let primary = self.parse_primary()?;
+                break self.finish_postfix(primary)?;
             }
-        }
-        Ok(lhs)
-    }
-
-    fn parse_cast(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_unary()?;
-        while self.eat_kw(Keyword::As) {
-            let ty = self.parse_type_inner(true)?;
-            expr = Expr::Cast {
-                expr: Box::new(expr),
-                ty,
-            };
+        };
+        expr = apply_ops(ops, expr);
+        while let Some((outer_ops, prev_guard)) = frames.pop() {
+            expr = self.finish_expr_bp(expr, 1)?;
+            expr = self.finish_paren_after_first(expr)?;
+            self.in_match_guard = prev_guard;
+            expr = self.finish_postfix(expr)?;
+            expr = apply_ops(outer_ops, expr);
         }
         Ok(expr)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr> {
-        if self.eat(&TokenKind::Minus) {
-            return Ok(Expr::Unary {
-                op: UnaryOp::Neg,
-                expr: Box::new(self.parse_unary()?),
-            });
-        }
-        if self.eat(&TokenKind::Bang) {
-            return Ok(Expr::Unary {
-                op: UnaryOp::Not,
-                expr: Box::new(self.parse_unary()?),
-            });
-        }
-        if self.eat(&TokenKind::Tilde) {
-            return Ok(Expr::Unary {
-                op: UnaryOp::BitNot,
-                expr: Box::new(self.parse_unary()?),
-            });
-        }
-        if self.eat(&TokenKind::PlusPlus) {
-            return Ok(Expr::Step {
-                inc: true,
-                target: Box::new(self.parse_unary()?),
-            });
-        }
-        if self.eat(&TokenKind::MinusMinus) {
-            return Ok(Expr::Step {
-                inc: false,
-                target: Box::new(self.parse_unary()?),
-            });
-        }
-        if self.check_kw(Keyword::Try) && !matches!(self.peek_at(1).kind, TokenKind::LBrace) {
-            self.bump();
-            return Ok(Expr::Try(Box::new(self.parse_unary()?)));
-        }
-        if self.eat_kw(Keyword::Await) {
-            return Ok(Expr::Await(Box::new(self.parse_unary()?)));
-        }
-        if self.eat_kw(Keyword::Deref) {
-            return Ok(Expr::Deref(Box::new(self.parse_unary()?)));
-        }
-        if self.eat_kw(Keyword::Read) {
-            if self.eat_kw(Keyword::Slice) {
-                return Ok(Expr::ReadSlice(Box::new(self.parse_unary()?)));
-            }
-            if self.eat_kw(Keyword::Ptr) {
-                return Ok(Expr::RawReadPtr(Box::new(self.parse_unary()?)));
-            }
-            return Ok(Expr::Read(Box::new(self.parse_unary()?)));
-        }
-        if self.eat_kw(Keyword::Write) {
-            if self.eat_kw(Keyword::Slice) {
-                return Ok(Expr::WriteSlice(Box::new(self.parse_unary()?)));
-            }
-            if self.eat_kw(Keyword::Ptr) {
-                return Ok(Expr::RawWritePtr(Box::new(self.parse_unary()?)));
-            }
-            return Ok(Expr::Write(Box::new(self.parse_unary()?)));
-        }
-        if self.check_kw(Keyword::Take) {
-            if let Some(lambda) = self.try_parse_lambda()? {
-                return Ok(lambda);
-            }
-            self.bump();
-            return Ok(Expr::Take(Box::new(self.parse_unary()?)));
-        }
-        self.parse_postfix()
-    }
-
-    fn parse_postfix(&mut self) -> Result<Expr> {
-        let mut expr = self.parse_primary()?;
+    fn finish_postfix(&mut self, mut expr: Expr) -> Result<Expr> {
         loop {
             let saw_dot = self.eat(&TokenKind::Dot);
             let saw_cc = !saw_dot && self.eat(&TokenKind::ColonColon);
@@ -4209,7 +4103,7 @@ impl<'a> Parser<'a> {
                     };
                 } else {
                     let field = self.expect_member_ident()?;
-                    let type_args = self.try_parse_expr_generic_args();
+                    let type_args = self.try_parse_expr_generic_args().unwrap_or_default();
                     if saw_cc {
                         expr = match expr {
                             Expr::This => Expr::Path {
@@ -4263,8 +4157,7 @@ impl<'a> Parser<'a> {
                     }
                 }
             } else if self.check(&TokenKind::Lt) {
-                let type_args = self.try_parse_expr_generic_args();
-                if !type_args.is_empty() {
+                if let Some(type_args) = self.try_parse_expr_generic_args() {
                     if self.eat(&TokenKind::LParen) {
                         let args = self.parse_arg_list()?;
                         expr = Expr::Call {
@@ -4339,35 +4232,41 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    fn try_parse_expr_generic_args(&mut self) -> Vec<GenericArg> {
+    fn try_parse_expr_generic_args(&mut self) -> Option<Vec<GenericArg>> {
         if !self.check(&TokenKind::Lt) {
-            return Vec::new();
+            return None;
         }
         let save = self.checkpoint();
         self.bump(); // '<'
         let Ok(args) = self.parse_generic_arg_list() else {
             self.restore(save);
-            return Vec::new();
+            return None;
         };
-        if !args.is_empty()
-            && self.eat_gt()
-            && matches!(
-                self.peek_kind(),
-                TokenKind::LParen
-                    | TokenKind::Dot
-                    | TokenKind::ColonColon
-                    | TokenKind::Kw(Keyword::Is | Keyword::As)
-                    | TokenKind::Comma
-                    | TokenKind::Semicolon
-                    | TokenKind::RParen
-                    | TokenKind::RBrace
-                    | TokenKind::RBracket
-            )
-        {
-            return args;
+        if self.eat_gt() {
+            let valid_follow = if args.is_empty() {
+                self.check(&TokenKind::LParen)
+            } else {
+                matches!(
+                    self.peek_kind(),
+                    TokenKind::LParen
+                        | TokenKind::LBrace
+                        | TokenKind::Dot
+                        | TokenKind::ColonColon
+                        | TokenKind::Colon
+                        | TokenKind::Kw(Keyword::Is | Keyword::As)
+                        | TokenKind::Comma
+                        | TokenKind::Semicolon
+                        | TokenKind::RParen
+                        | TokenKind::RBrace
+                        | TokenKind::RBracket
+                )
+            };
+            if valid_follow {
+                return Some(args);
+            }
         }
         self.restore(save);
-        Vec::new()
+        None
     }
 
     fn parse_arg_list(&mut self) -> Result<Vec<Expr>> {
@@ -4399,6 +4298,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
+        if self.check(&TokenKind::LParen) {
+            return self.parse_paren_or_tuple();
+        }
+        self.parse_primary_other()
+    }
+
+    fn parse_primary_other(&mut self) -> Result<Expr> {
         // Expression-level attributes: `[Allow(unused)] expr` (avoid stealing array literals `[x]`)
         if self.check(&TokenKind::LBracket) {
             let save = self.checkpoint();
@@ -4599,23 +4505,11 @@ impl<'a> Parser<'a> {
         // Global path expression: `global::std.mem.size_of<int>()` or `::std.mem.size_of<int>()`
         if self.eat_global_prefix() {
             let name = self.expect_path_segment_ident()?;
-            let type_args = self.try_parse_expr_generic_args();
+            let type_args = self.try_parse_expr_generic_args().unwrap_or_default();
             return Ok(Expr::Path {
                 global: true,
                 segments: vec![PathExprSegment { name, type_args }],
             });
-        }
-
-        // Lambda `(int x) : int => ...` or `() => ...`
-        if let Some(lambda) = self.try_parse_lambda()? {
-            return Ok(lambda);
-        }
-
-        // UFCS `(Type as TraitPath).member` when `Type` is not a plain cast expression
-        if self.check(&TokenKind::LParen)
-            && let Some(ufcs) = self.try_parse_ufcs()
-        {
-            return Ok(ufcs);
         }
 
         match self.peek_kind().clone() {
@@ -4700,48 +4594,6 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Ident(name))
                 }
             }
-            TokenKind::LParen => {
-                self.bump();
-                if self.eat(&TokenKind::RParen) {
-                    return Ok(Expr::TupleLit(Vec::new()));
-                }
-                let prev_guard = self.in_match_guard;
-                self.in_match_guard = false;
-                let res = (|| {
-                    let first = self.parse_expr()?;
-                    if self.eat(&TokenKind::Comma) {
-                        let mut elems = vec![first];
-                        while !self.check(&TokenKind::RParen) && !self.is_eof() {
-                            elems.push(self.parse_expr()?);
-                            if !self.eat(&TokenKind::Comma) {
-                                break;
-                            }
-                        }
-                        self.expect(&TokenKind::RParen, "')'")?;
-                        Ok(Expr::TupleLit(elems))
-                    } else {
-                        self.expect(&TokenKind::RParen, "')'")?;
-                        let keep_group = (matches!(
-                            first,
-                            Expr::Member { .. } | Expr::TupleIndex { .. } | Expr::Lambda { .. }
-                        ) && self.check(&TokenKind::LParen))
-                            || (matches!(
-                                first,
-                                Expr::Path { .. }
-                                    | Expr::Member { .. }
-                                    | Expr::Ident(_)
-                                    | Expr::IfExpr { .. }
-                            ) && self.check(&TokenKind::Dot));
-                        if keep_group {
-                            Ok(Expr::Group(Box::new(first)))
-                        } else {
-                            Ok(first)
-                        }
-                    }
-                })();
-                self.in_match_guard = prev_guard;
-                res
-            }
             TokenKind::LBracket => {
                 self.bump();
                 if self.eat(&TokenKind::RBracket) {
@@ -4767,7 +4619,67 @@ impl<'a> Parser<'a> {
                     Ok(Expr::ArrayLit(elems))
                 }
             }
+            TokenKind::DotDot
+                if matches!(
+                    self.peek_at(1).kind,
+                    TokenKind::Comma
+                        | TokenKind::RParen
+                        | TokenKind::RBracket
+                        | TokenKind::RBrace
+                        | TokenKind::Semicolon
+                ) =>
+            {
+                self.bump();
+                Ok(Expr::Range {
+                    start: None,
+                    end: None,
+                    inclusive: false,
+                })
+            }
             _ => Err(self.err_here(format!("Expected expression, found {:?}", self.peek_kind()))),
+        }
+    }
+
+    fn parse_paren_or_tuple(&mut self) -> Result<Expr> {
+        self.bump(); // '('
+        if self.eat(&TokenKind::RParen) {
+            return Ok(Expr::TupleLit(Vec::new()));
+        }
+        let prev_guard = self.in_match_guard;
+        self.in_match_guard = false;
+        let res = self
+            .parse_expr()
+            .and_then(|first| self.finish_paren_after_first(first));
+        self.in_match_guard = prev_guard;
+        res
+    }
+
+    fn finish_paren_after_first(&mut self, first: Expr) -> Result<Expr> {
+        if self.eat(&TokenKind::Comma) {
+            let mut elems = vec![first];
+            while !self.check(&TokenKind::RParen) && !self.is_eof() {
+                elems.push(self.parse_expr()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(&TokenKind::RParen, "')'")?;
+            Ok(Expr::TupleLit(elems))
+        } else {
+            self.expect(&TokenKind::RParen, "')'")?;
+            let keep_group = (matches!(
+                first,
+                Expr::Member { .. } | Expr::TupleIndex { .. } | Expr::Lambda { .. }
+            ) && self.check(&TokenKind::LParen))
+                || (matches!(
+                    first,
+                    Expr::Path { .. } | Expr::Member { .. } | Expr::Ident(_) | Expr::IfExpr { .. }
+                ) && self.check(&TokenKind::Dot));
+            if keep_group {
+                Ok(Expr::Group(Box::new(first)))
+            } else {
+                Ok(first)
+            }
         }
     }
 
@@ -4819,14 +4731,14 @@ impl<'a> Parser<'a> {
     }
 
     fn collect_qself_expr_segments(&mut self, first: String) -> Vec<PathExprSegment> {
-        let first_args = self.try_parse_expr_generic_args();
+        let first_args = self.try_parse_expr_generic_args().unwrap_or_default();
         let mut segments = vec![PathExprSegment {
             name: first,
             type_args: first_args,
         }];
         while self.eat(&TokenKind::ColonColon) {
             if let Ok(seg) = self.expect_member_ident() {
-                let type_args = self.try_parse_expr_generic_args();
+                let type_args = self.try_parse_expr_generic_args().unwrap_or_default();
                 segments.push(PathExprSegment {
                     name: seg,
                     type_args,
@@ -5252,6 +5164,47 @@ fn is_primitive_or_scalar_name(name: &str) -> bool {
     )
 }
 
+fn assign_op(kind: &TokenKind) -> Option<AssignOp> {
+    match kind {
+        TokenKind::Eq => Some(AssignOp::Assign),
+        TokenKind::PlusEq => Some(AssignOp::AddAssign),
+        TokenKind::MinusEq => Some(AssignOp::SubAssign),
+        TokenKind::StarEq => Some(AssignOp::MulAssign),
+        TokenKind::SlashEq => Some(AssignOp::DivAssign),
+        TokenKind::PercentEq => Some(AssignOp::RemAssign),
+        TokenKind::AmpEq => Some(AssignOp::BitAndAssign),
+        TokenKind::PipeEq => Some(AssignOp::BitOrAssign),
+        TokenKind::CaretEq => Some(AssignOp::BitXorAssign),
+        TokenKind::ShlEq => Some(AssignOp::ShlAssign),
+        TokenKind::ShrEq => Some(AssignOp::ShrAssign),
+        _ => None,
+    }
+}
+
+fn binary_op_prec(kind: &TokenKind) -> Option<(u8, BinaryOp)> {
+    match kind {
+        TokenKind::PipePipe => Some((5, BinaryOp::Or)),
+        TokenKind::AmpAmp => Some((6, BinaryOp::And)),
+        TokenKind::Pipe => Some((7, BinaryOp::BitOr)),
+        TokenKind::Caret => Some((8, BinaryOp::BitXor)),
+        TokenKind::Amp => Some((9, BinaryOp::BitAnd)),
+        TokenKind::EqEq => Some((10, BinaryOp::Eq)),
+        TokenKind::BangEq => Some((10, BinaryOp::Ne)),
+        TokenKind::Lt => Some((11, BinaryOp::Lt)),
+        TokenKind::Le => Some((11, BinaryOp::Le)),
+        TokenKind::Gt => Some((11, BinaryOp::Gt)),
+        TokenKind::Ge => Some((11, BinaryOp::Ge)),
+        TokenKind::Shl => Some((12, BinaryOp::Shl)),
+        TokenKind::Shr => Some((12, BinaryOp::Shr)),
+        TokenKind::Plus => Some((13, BinaryOp::Add)),
+        TokenKind::Minus => Some((13, BinaryOp::Sub)),
+        TokenKind::Star => Some((14, BinaryOp::Mul)),
+        TokenKind::Slash => Some((14, BinaryOp::Div)),
+        TokenKind::Percent => Some((14, BinaryOp::Rem)),
+        _ => None,
+    }
+}
+
 fn is_binary_or_postfix_continuation(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -5272,6 +5225,7 @@ fn is_binary_or_postfix_continuation(kind: &TokenKind) -> bool {
             | TokenKind::ColonColon
             | TokenKind::LParen
             | TokenKind::LBracket
+            | TokenKind::Bang
             | TokenKind::Question
             | TokenKind::QuestionQuestion
             | TokenKind::Kw(Keyword::As | Keyword::With | Keyword::Is)

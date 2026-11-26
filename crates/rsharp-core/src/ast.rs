@@ -347,7 +347,7 @@ pub struct StaticDecl {
     pub is_mut: bool,
     pub ty: Type,
     pub name: String,
-    /// `None` only inside `extern` blocks.
+    /// `None` for `extern` or proc-macro static declarations (e.g. `#[linkme::distributed_slice]`).
     pub value: Option<Expr>,
 }
 

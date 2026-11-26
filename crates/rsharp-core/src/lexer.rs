@@ -129,7 +129,7 @@ impl<'a> Lexer<'a> {
                     start,
                     "Unterminated attribute delimiter group",
                 ) && self.peek_next_non_ws() == Some(']')
-                    && tokenize(&raw).is_err()
+                    && attr_payload_needs_raw_rust(&raw)
                 {
                     tokens.push(Token::new(
                         TokenKind::RawMacroBody {
@@ -1192,6 +1192,26 @@ fn clean_block_doc(raw: &str) -> Vec<String> {
     }
 }
 
+fn attr_payload_needs_raw_rust(raw: &str) -> bool {
+    let Ok(tokens) = tokenize(raw) else {
+        return true;
+    };
+    tokens.windows(2).any(|w| {
+        matches!(
+            &w[0].kind,
+            TokenKind::Ident { name, .. }
+                if matches!(name.as_str(), "r" | "b" | "c" | "br" | "cr")
+        ) && w[0].span.end == w[1].span.start
+            && matches!(
+                w[1].kind,
+                TokenKind::Hash
+                    | TokenKind::StringLit(_)
+                    | TokenKind::RawStringLit(_)
+                    | TokenKind::CharLit(_)
+            )
+    })
+}
+
 fn should_lex_raw_macro_body(tokens: &[Token]) -> bool {
     let n = tokens.len();
     if n >= 2
@@ -1206,7 +1226,9 @@ fn should_lex_raw_macro_body(tokens: &[Token]) -> bool {
             || (n >= 3
                 && matches!(tokens[n - 3].kind, TokenKind::Dot | TokenKind::ColonColon)
                 && matches!(tokens[n - 2].kind, TokenKind::Kw(_))))
-        && !(n >= 3 && matches!(tokens[n - 3].kind, TokenKind::Kw(Keyword::Break)))
+        && !(n >= 3
+            && matches!(tokens[n - 3].kind, TokenKind::Kw(Keyword::Break))
+            && tokens[n - 2].span.end < tokens[n - 1].span.start)
     {
         return true;
     }

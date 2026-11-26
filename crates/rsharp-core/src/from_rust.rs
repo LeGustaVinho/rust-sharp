@@ -467,42 +467,55 @@ impl<'a> RustToRSharp<'a> {
     }
 
     fn bind_scope_pat_idents(&mut self, pat: &Pat) {
+        self.set_scope_pat_idents(pat, false);
+    }
+
+    fn shadow_pat_vars_inferred(&mut self, pat: &Pat) {
+        self.set_scope_pat_idents(pat, true);
+    }
+
+    fn set_scope_pat_idents(&mut self, pat: &Pat, overwrite: bool) {
         match pat {
             Pat::Ident(pi) => {
                 let idx = self.scopes.len() - 1;
-                self.scopes[idx]
-                    .entry(pi.ident.to_string())
-                    .or_insert_with(|| "_".to_string());
+                let name = pi.ident.to_string();
+                if overwrite {
+                    self.scopes[idx].insert(name, "_".to_string());
+                } else {
+                    self.scopes[idx]
+                        .entry(name)
+                        .or_insert_with(|| "_".to_string());
+                }
                 if let Some((_, sub)) = &pi.subpat {
-                    self.bind_scope_pat_idents(sub);
+                    self.set_scope_pat_idents(sub, overwrite);
                 }
             }
             Pat::Tuple(pt) => {
                 for e in &pt.elems {
-                    self.bind_scope_pat_idents(e);
+                    self.set_scope_pat_idents(e, overwrite);
                 }
             }
             Pat::TupleStruct(pts) => {
                 for e in &pts.elems {
-                    self.bind_scope_pat_idents(e);
+                    self.set_scope_pat_idents(e, overwrite);
                 }
             }
             Pat::Struct(ps) => {
                 for f in &ps.fields {
-                    self.bind_scope_pat_idents(&f.pat);
+                    self.set_scope_pat_idents(&f.pat, overwrite);
                 }
             }
             Pat::Slice(ps) => {
                 for e in &ps.elems {
-                    self.bind_scope_pat_idents(e);
+                    self.set_scope_pat_idents(e, overwrite);
                 }
             }
-            Pat::Reference(pr) => self.bind_scope_pat_idents(&pr.pat),
-            Pat::Paren(pp) => self.bind_scope_pat_idents(&pp.pat),
-            Pat::Type(pt) => self.bind_scope_pat_idents(&pt.pat),
+            Pat::Reference(pr) => self.set_scope_pat_idents(&pr.pat, overwrite),
+            Pat::Paren(pp) => self.set_scope_pat_idents(&pp.pat, overwrite),
+            Pat::Type(pt) => self.set_scope_pat_idents(&pt.pat, overwrite),
             Pat::Or(po) => {
                 for case in &po.cases {
-                    self.bind_scope_pat_idents(case);
+                    self.set_scope_pat_idents(case, overwrite);
                 }
             }
             _ => {}
@@ -720,12 +733,9 @@ impl<'a> RustToRSharp<'a> {
                     self.emit_attr(a, false);
                 }
                 let vis = fmt_vis(&u.vis);
-                let g = if u.leading_colon.is_some() {
-                    "global::"
-                } else {
-                    ""
-                };
-                self.line(&format!("{}using {}{};", vis, g, fmt_use_tree(&u.tree)));
+                let tree_s =
+                    fmt_use_tree_with_prefix(&u.tree, Vec::new(), false, u.leading_colon.is_some());
+                self.line(&format!("{}using {};", vis, tree_s));
             }
             Item::ExternCrate(ec) => {
                 for a in &ec.attrs {
@@ -1089,6 +1099,26 @@ impl<'a> RustToRSharp<'a> {
                                 let agens = self.fmt_generics(&tt.generics);
                                 let awh = self.fmt_where(&tt.generics);
                                 self.line(&format!("type {}{}{};", aname, agens, awh));
+                            } else if let syn::ImplItem::Verbatim(ts) = other
+                                && let Ok(ff) = syn::parse2::<syn::ForeignItemFn>(ts.clone())
+                            {
+                                let is_static = !ff
+                                    .sig
+                                    .inputs
+                                    .iter()
+                                    .any(|a| matches!(a, syn::FnArg::Receiver(_)));
+                                for a in &ff.attrs {
+                                    self.emit_attr(a, false);
+                                }
+                                let fvis = fmt_vis(&ff.vis);
+                                spacing = self.emit_fn_sig_and_body(
+                                    &fvis,
+                                    &ff.sig,
+                                    None,
+                                    &[],
+                                    is_static,
+                                    false,
+                                );
                             } else {
                                 self.line(&format!("rust {{ {} }}", other.to_token_stream()));
                             }
@@ -1247,6 +1277,14 @@ impl<'a> RustToRSharp<'a> {
                     let fvis = fmt_vis(&ft.vis);
                     let fname = escape_ident(&ft.ident.to_string());
                     self.line(&format!("{}type {};", fvis, fname));
+                } else if let Item::Verbatim(ts) = other
+                    && let Ok(ff) = syn::parse2::<syn::ForeignItemFn>(ts.clone())
+                {
+                    self.emit_foreign_fn(&ff, false);
+                } else if let Item::Verbatim(ts) = other
+                    && let Ok(fs) = syn::parse2::<syn::ForeignItemStatic>(ts.clone())
+                {
+                    self.emit_foreign_static(&fs, "");
                 } else {
                     self.line(&format!("rust {{ {} }}", other.to_token_stream()));
                 }
@@ -1568,8 +1606,9 @@ impl<'a> RustToRSharp<'a> {
                 (format!("{}({})", path_s, fs.join(", ")), self_typed)
             }
             (Pat::Ident(pi), _) => {
-                let ty_s = self.fmt_type(ty);
                 let pname = pi.ident.to_string();
+                let is_infer = matches!(ty, syn::Type::Infer(_));
+                let ty_s = self.fmt_type(ty);
                 if pi.by_ref.is_some() {
                     let mode = if pi.mutability.is_some() {
                         "write"
@@ -1583,6 +1622,10 @@ impl<'a> RustToRSharp<'a> {
                     );
                 }
                 let mk = if pi.mutability.is_some() { "mut " } else { "" };
+                if is_infer {
+                    self.bind_var(&pname, "_".to_string());
+                    return (format!("{}{}", mk, escape_ident(&pname)), true);
+                }
                 self.bind_var(&pname, ty_s.clone());
                 (format!("{}{} {}", mk, ty_s, escape_ident(&pname)), true)
             }
@@ -1611,6 +1654,9 @@ impl<'a> RustToRSharp<'a> {
             match stmt {
                 Stmt::Local(local) => self.emit_local(local, &block.stmts[idx + 1..]),
                 Stmt::Item(item) => spacing = self.emit_item(item),
+                Stmt::Expr(Expr::Verbatim(ts), Some(_)) if ts.is_empty() => {
+                    self.line(";");
+                }
                 Stmt::Expr(expr, semi) => {
                     if is_last
                         && tail == BlockTail::Value
@@ -1771,7 +1817,19 @@ impl<'a> RustToRSharp<'a> {
         };
 
         if matches!(inner_pat, Pat::Ident(pi) if pi.subpat.is_some())
-            || matches!(inner_pat, Pat::Macro(_))
+            || matches!(
+                inner_pat,
+                Pat::Macro(_)
+                    | Pat::Or(_)
+                    | Pat::Path(_)
+                    | Pat::Lit(_)
+                    | Pat::Range(_)
+                    | Pat::Const(_)
+            )
+            || matches!(
+                inner_pat,
+                Pat::Paren(pp) if !matches!(pp.pat.as_ref(), Pat::Ident(pi) if pi.subpat.is_none())
+            )
         {
             let pat_s = self.fmt_pat(inner_pat, None);
             let ty_s = explicit_ty
@@ -1783,12 +1841,13 @@ impl<'a> RustToRSharp<'a> {
                 .map(|i| format!(" = {}", self.fmt_expr(&i.expr)))
                 .unwrap_or_default();
             self.line(&format!("var {}{}{};", pat_s, ty_s, init_s));
+            self.shadow_pat_vars_inferred(inner_pat);
             return;
         }
 
         // Explicit outer type annotation on any destructuring `let`:
-        // preserve `pat : Type = expr;` so Rust unsize/slice coercions (e.g. `(&str, &[&str])`)
-        // apply identically to the RHS expression.
+        // preserve `pat : Type = expr;` (or `var pat : Type;` when uninitialized) so Rust
+        // unsize/slice coercions (e.g. `(&str, &[&str])`) apply identically to the RHS expression.
         if let Some(ty) = explicit_ty
             && matches!(
                 inner_pat,
@@ -1798,307 +1857,308 @@ impl<'a> RustToRSharp<'a> {
                     | Pat::TupleStruct(_)
                     | Pat::Reference(_)
             )
-            && let Some(init) = &local.init
         {
             let pat_s = self.fmt_pat(inner_pat, None);
             let ty_s = self.fmt_type(ty);
-            let rhs = self.fmt_expr(&init.expr);
-            self.line(&format!("{} : {} = {};", pat_s, ty_s, rhs));
+            if let Some(init) = &local.init {
+                let rhs = self.fmt_expr(&init.expr);
+                self.line(&format!("{} : {} = {};", pat_s, ty_s, rhs));
+            } else {
+                self.line(&format!("var {} : {};", pat_s, ty_s));
+            }
+            self.shadow_pat_vars_inferred(inner_pat);
             return;
         }
 
-        // Struct / Slice destructuring `let Point { x, y } = pt;` / `let [a, b] = arr;`
-        if let Pat::Slice(ps) = inner_pat {
-            let Some(init) = &local.init else {
-                self.record_err(RSharpError::from_rust("Destructuring without initializer"));
-                return;
-            };
-            if let HintLookup::Resolved(slice_s) = self.try_fmt_pat_with_hints(inner_pat) {
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("{} = {};", slice_s, rhs));
-                return;
-            }
-            let elem_ty = self
-                .infer_expr_type(&init.expr)
-                .and_then(|t| extract_collection_elem(&t));
-            if elem_ty.is_none() && !self.strict_unnameable {
+        // Uninitialized non-tuple destructuring `let [a];` / `let S { a };` / `let W(a);` / `let &a;`
+        if local.init.is_none()
+            && matches!(
+                inner_pat,
+                Pat::Slice(_) | Pat::Struct(_) | Pat::TupleStruct(_) | Pat::Reference(_)
+            )
+        {
+            if !self.strict_unnameable {
                 let pat_s = self.fmt_pat(inner_pat, None);
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("var {} = {};", pat_s, rhs));
-                return;
-            }
-            let elems: Vec<_> = ps
-                .elems
-                .iter()
-                .map(|p| self.fmt_pat(p, elem_ty.as_deref()))
-                .collect();
-            let rhs = self.fmt_expr(&init.expr);
-            self.line(&format!("[{}] = {};", elems.join(", "), rhs));
-            return;
-        }
-        if let Pat::Struct(ps) = inner_pat {
-            let Some(init) = &local.init else {
+                self.line(&format!("var {};", pat_s));
+                self.shadow_pat_vars_inferred(inner_pat);
+            } else {
                 self.record_err(RSharpError::from_rust("Destructuring without initializer"));
-                return;
-            };
-            if let HintLookup::Resolved(struct_s) = self.try_fmt_pat_with_hints(inner_pat) {
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("{} = {};", struct_s, rhs));
-                return;
             }
-            let struct_key = ps
-                .path
-                .segments
-                .last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default();
-            let known_fields = self.struct_fields.get(&struct_key).cloned();
-            let mut fs = Vec::new();
-            let mut any_typed = false;
-            for f in &ps.fields {
-                let mut apfx = String::new();
-                for a in &f.attrs {
-                    apfx.push_str(&self.fmt_attr_inline(a, None));
-                    apfx.push(' ');
-                }
-                let raw_fname = match &f.member {
-                    Member::Named(id) => id.to_string(),
-                    Member::Unnamed(idx) => idx.index.to_string(),
-                };
-                let fname = match &f.member {
-                    Member::Named(id) => escape_ident(&id.to_string()),
-                    Member::Unnamed(idx) => idx.index.to_string(),
-                };
-                let fty = known_fields
-                    .as_ref()
-                    .and_then(|m| m.get(&raw_fname))
-                    .map(|s| s.as_str());
-                if f.colon_token.is_some() {
-                    if fty.is_some() {
-                        any_typed = true;
-                    }
-                    let sub_s = self.fmt_pat(&f.pat, fty);
-                    fs.push(format!("{}{}: {}", apfx, fname, sub_s));
-                } else if let Some(ty_s) = fty {
-                    any_typed = true;
-                    if let Pat::Ident(pi) = f.pat.as_ref()
-                        && pi.by_ref.is_some()
-                    {
-                        let mode = if pi.mutability.is_some() {
-                            "write"
-                        } else {
-                            "read"
-                        };
-                        self.bind_var(&raw_fname, format!("{} {}", mode, ty_s));
-                        fs.push(format!("{}borrow {} {} {}", apfx, mode, ty_s, fname));
-                    } else {
-                        let (is_mut, _) = extract_param_pat(&f.pat);
-                        let mk = if is_mut { "mut " } else { "" };
-                        self.bind_var(&raw_fname, ty_s.to_string());
-                        fs.push(format!("{}{}{} {}", apfx, mk, ty_s, fname));
-                    }
-                } else if let Pat::Ident(pi) = f.pat.as_ref()
-                    && pi.mutability.is_some()
-                {
-                    fs.push(format!("{}mut {}", apfx, fname));
-                } else {
-                    fs.push(format!("{}{}", apfx, fname));
-                }
-            }
-            if !any_typed && !self.strict_unnameable {
-                let pat_s = self.fmt_pat(inner_pat, None);
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("var {} = {};", pat_s, rhs));
-                return;
-            }
-            if ps.rest.is_some() {
-                fs.push("..".to_string());
-            }
-            let rhs = self.fmt_expr(&init.expr);
-            let path_s = self.fmt_pat_qself_or_path(&ps.qself, &ps.path);
-            self.line(&format!("{} {{ {} }} = {};", path_s, fs.join(", "), rhs));
             return;
         }
 
-        // Tuple-struct destructuring `let W(v) = w;`
-        if let Pat::TupleStruct(pts) = inner_pat {
-            let Some(init) = &local.init else {
-                self.record_err(RSharpError::from_rust("Destructuring without initializer"));
-                return;
-            };
-            if let HintLookup::Resolved(ts_s) = self.try_fmt_pat_with_hints(inner_pat) {
+        // Struct / Slice / TupleStruct / Reference destructuring with initializer
+        if let Some(init) = &local.init {
+            if let Pat::Slice(ps) = inner_pat {
+                if let HintLookup::Resolved(slice_s) = self.try_fmt_pat_with_hints(inner_pat) {
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("{} = {};", slice_s, rhs));
+                    return;
+                }
+                let elem_ty = self
+                    .infer_expr_type(&init.expr)
+                    .and_then(|t| extract_collection_elem(&t));
+                if elem_ty.is_none() && !self.strict_unnameable {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("var {} = {};", pat_s, rhs));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                let elems: Vec<_> = ps
+                    .elems
+                    .iter()
+                    .map(|p| self.fmt_pat(p, elem_ty.as_deref()))
+                    .collect();
                 let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("{} = {};", ts_s, rhs));
+                self.line(&format!("[{}] = {};", elems.join(", "), rhs));
                 return;
             }
-            let struct_key = pts
-                .path
-                .segments
-                .last()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default();
-            let known_fields = self.struct_fields.get(&struct_key).cloned();
-            if known_fields.is_none() && !self.strict_unnameable {
-                let pat_s = self.fmt_pat(inner_pat, None);
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("var {} = {};", pat_s, rhs));
-                return;
-            }
-            let fs: Vec<String> = pts
-                .elems
-                .iter()
-                .enumerate()
-                .map(|(i, p)| {
+            if let Pat::Struct(ps) = inner_pat {
+                if let HintLookup::Resolved(struct_s) = self.try_fmt_pat_with_hints(inner_pat) {
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("{} = {};", struct_s, rhs));
+                    return;
+                }
+                let struct_key = ps
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+                let known_fields = self.struct_fields.get(&struct_key).cloned();
+                let mut fs = Vec::new();
+                let mut any_typed = false;
+                for f in &ps.fields {
+                    let mut apfx = String::new();
+                    for a in &f.attrs {
+                        apfx.push_str(&self.fmt_attr_inline(a, None));
+                        apfx.push(' ');
+                    }
+                    let raw_fname = match &f.member {
+                        Member::Named(id) => id.to_string(),
+                        Member::Unnamed(idx) => idx.index.to_string(),
+                    };
+                    let fname = match &f.member {
+                        Member::Named(id) => escape_ident(&id.to_string()),
+                        Member::Unnamed(idx) => idx.index.to_string(),
+                    };
                     let fty = known_fields
                         .as_ref()
-                        .and_then(|m| m.get(&i.to_string()))
+                        .and_then(|m| m.get(&raw_fname))
                         .map(|s| s.as_str());
-                    self.fmt_pat(p, fty)
-                })
-                .collect();
-            let rhs = self.fmt_expr(&init.expr);
-            let path_s = self.fmt_pat_qself_or_path(&pts.qself, &pts.path);
-            self.line(&format!("{}({}) = {};", path_s, fs.join(", "), rhs));
-            return;
-        }
-
-        // Reference-stripping local `let &v = r;` / `let &mut v = r;`
-        if let Pat::Reference(pr) = inner_pat {
-            let Some(init) = &local.init else {
-                self.record_err(RSharpError::from_rust("Destructuring without initializer"));
-                return;
-            };
-            if let HintLookup::Resolved(ref_s) = self.try_fmt_pat_with_hints(inner_pat) {
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("{} = {};", ref_s, rhs));
-                return;
-            }
-            let inner_ty = self.infer_expr_type(&init.expr).and_then(|t| {
-                t.strip_prefix("read ")
-                    .or_else(|| t.strip_prefix("write "))
-                    .map(|s| s.to_string())
-            });
-            if inner_ty.is_none() && !self.strict_unnameable {
-                let pat_s = self.fmt_pat(inner_pat, None);
-                let rhs = self.fmt_expr(&init.expr);
-                self.line(&format!("var {} = {};", pat_s, rhs));
-                return;
-            }
-            let inner_pat_s = self.fmt_pat(&pr.pat, inner_ty.as_deref());
-            let kw = if pr.mutability.is_some() {
-                "deref write "
-            } else {
-                "deref "
-            };
-            let rhs = self.fmt_expr(&init.expr);
-            self.line(&format!("{}{} = {};", kw, inner_pat_s, rhs));
-            return;
-        }
-
-        // Tuple destructuring `let (a, b): (i32, i32) = pair;`
-        if let Pat::Tuple(ptup) = inner_pat {
-            if explicit_ty.is_none() {
-                match &local.init {
-                    None => {
-                        let mut resolved = Vec::new();
-                        let mut all_ok = !ptup.elems.is_empty();
-                        for elem in &ptup.elems {
-                            if let Pat::Ident(pi) = elem
-                                && let HintLookup::Resolved(ty) =
-                                    self.lookup_hint_at_span(pi.ident.span())
-                            {
-                                resolved.push((pi.mutability.is_some(), pi.ident.to_string(), ty));
+                    if f.colon_token.is_some() {
+                        if fty.is_some() {
+                            any_typed = true;
+                        }
+                        let sub_s = self.fmt_pat(&f.pat, fty);
+                        fs.push(format!("{}{}: {}", apfx, fname, sub_s));
+                    } else if let Some(ty_s) = fty {
+                        any_typed = true;
+                        if let Pat::Ident(pi) = f.pat.as_ref()
+                            && pi.by_ref.is_some()
+                        {
+                            let mode = if pi.mutability.is_some() {
+                                "write"
                             } else {
-                                all_ok = false;
-                                break;
-                            }
+                                "read"
+                            };
+                            self.bind_var(&raw_fname, format!("{} {}", mode, ty_s));
+                            fs.push(format!("{}borrow {} {} {}", apfx, mode, ty_s, fname));
+                        } else {
+                            let (is_mut, _) = extract_param_pat(&f.pat);
+                            let mk = if is_mut { "mut " } else { "" };
+                            self.bind_var(&raw_fname, ty_s.to_string());
+                            fs.push(format!("{}{}{} {}", apfx, mk, ty_s, fname));
                         }
-                        if all_ok {
-                            for (is_mut, name, ty_s) in resolved {
-                                let is_shadow = self.declared_in_fn.contains(&name);
-                                let sh_kw = if is_shadow { "shadow " } else { "" };
-                                let mut_kw = if is_mut { "mut " } else { "" };
-                                self.bind_var(&name, ty_s.clone());
-                                self.line(&format!(
-                                    "{}{}{} {};",
-                                    sh_kw,
-                                    mut_kw,
-                                    ty_s,
-                                    escape_ident(&name)
-                                ));
-                            }
-                            return;
-                        }
-                        if !self.strict_unnameable {
-                            let pat_s = self.fmt_pat(inner_pat, None);
-                            self.line(&format!("var {};", pat_s));
-                            return;
-                        }
-                    }
-                    Some(init) => match self.try_fmt_pat_with_hints(inner_pat) {
-                        HintLookup::Resolved(tuple_s) => {
-                            let rhs = self.fmt_expr(&init.expr);
-                            self.line(&format!("{} = {};", tuple_s, rhs));
-                            return;
-                        }
-                        HintLookup::Unnameable if !self.strict_unnameable => {
-                            let pat_s = self.fmt_pat(inner_pat, None);
-                            let rhs = self.fmt_expr(&init.expr);
-                            self.line(&format!("var {} = {};", pat_s, rhs));
-                            return;
-                        }
-                        _ => {}
-                    },
-                }
-            }
-            let elem_tys: Vec<String> = match explicit_ty {
-                Some(Type::Tuple(tt)) => tt.elems.iter().map(|t| self.fmt_type(t)).collect(),
-                _ => {
-                    let Some(init) = &local.init else {
-                        self.record_err(RSharpError::unresolved_type(
-                            "tuple",
-                            "Tuple binding requires initializer or type annotation",
-                        ));
-                        return;
-                    };
-                    if let Expr::Tuple(et) = init.expr.as_ref() {
-                        let Some(elems) = et
-                            .elems
-                            .iter()
-                            .map(|e| self.infer_expr_type(e))
-                            .collect::<Option<Vec<_>>>()
-                        else {
-                            if !self.strict_unnameable {
-                                let pat_s = self.fmt_pat(inner_pat, None);
-                                let rhs = self.fmt_expr(&init.expr);
-                                self.line(&format!("var {} = {};", pat_s, rhs));
-                                return;
-                            }
-                            self.record_err(RSharpError::unresolved_type(
-                                "tuple",
-                                "Could not infer tuple element types",
-                            ));
-                            return;
-                        };
-                        elems
-                    } else if let Some(inferred) = self.infer_expr_type(&init.expr)
-                        && let Some(elems) = split_tuple_type_str(&inferred)
+                    } else if let Pat::Ident(pi) = f.pat.as_ref()
+                        && pi.mutability.is_some()
                     {
-                        elems
+                        fs.push(format!("{}mut {}", apfx, fname));
                     } else {
-                        if !self.strict_unnameable {
-                            let pat_s = self.fmt_pat(inner_pat, None);
-                            let rhs = self.fmt_expr(&init.expr);
-                            self.line(&format!("var {} = {};", pat_s, rhs));
-                            return;
-                        }
-                        self.record_err(RSharpError::unresolved_type(
-                            "tuple",
-                            "Add explicit type annotation for tuple destructuring",
-                        ));
-                        return;
+                        fs.push(format!("{}{}", apfx, fname));
                     }
                 }
+                if !any_typed && !self.strict_unnameable {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("var {} = {};", pat_s, rhs));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                if ps.rest.is_some() {
+                    fs.push("..".to_string());
+                }
+                let rhs = self.fmt_expr(&init.expr);
+                let path_s = self.fmt_pat_qself_or_path(&ps.qself, &ps.path);
+                self.line(&format!("{} {{ {} }} = {};", path_s, fs.join(", "), rhs));
+                return;
+            }
+            if let Pat::TupleStruct(pts) = inner_pat {
+                if let HintLookup::Resolved(ts_s) = self.try_fmt_pat_with_hints(inner_pat) {
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("{} = {};", ts_s, rhs));
+                    return;
+                }
+                let struct_key = pts
+                    .path
+                    .segments
+                    .last()
+                    .map(|s| s.ident.to_string())
+                    .unwrap_or_default();
+                let known_fields = self.struct_fields.get(&struct_key).cloned();
+                if known_fields.is_none() && !self.strict_unnameable {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("var {} = {};", pat_s, rhs));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                let fs: Vec<String> = pts
+                    .elems
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let fty = known_fields
+                            .as_ref()
+                            .and_then(|m| m.get(&i.to_string()))
+                            .map(|s| s.as_str());
+                        self.fmt_pat(p, fty)
+                    })
+                    .collect();
+                let rhs = self.fmt_expr(&init.expr);
+                let path_s = self.fmt_pat_qself_or_path(&pts.qself, &pts.path);
+                self.line(&format!("{}({}) = {};", path_s, fs.join(", "), rhs));
+                return;
+            }
+            if let Pat::Reference(pr) = inner_pat {
+                if let HintLookup::Resolved(ref_s) = self.try_fmt_pat_with_hints(inner_pat) {
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("{} = {};", ref_s, rhs));
+                    return;
+                }
+                let inner_ty = self.infer_expr_type(&init.expr).and_then(|t| {
+                    t.strip_prefix("read ")
+                        .or_else(|| t.strip_prefix("write "))
+                        .map(|s| s.to_string())
+                });
+                if (inner_ty.is_none() || !matches!(pr.pat.as_ref(), Pat::Ident(_)))
+                    && !self.strict_unnameable
+                {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("var {} = {};", pat_s, rhs));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                let inner_pat_s = self.fmt_pat(&pr.pat, inner_ty.as_deref());
+                let kw = if pr.mutability.is_some() {
+                    "deref write "
+                } else {
+                    "deref "
+                };
+                let rhs = self.fmt_expr(&init.expr);
+                self.line(&format!("{}{} = {};", kw, inner_pat_s, rhs));
+                return;
+            }
+        }
+
+        // Tuple destructuring without explicit outer type annotation `let (a, b) = pair;`
+        if let Pat::Tuple(ptup) = inner_pat {
+            let Some(init) = &local.init else {
+                let mut resolved = Vec::new();
+                let mut all_ok = !ptup.elems.is_empty();
+                for elem in &ptup.elems {
+                    if let Pat::Ident(pi) = elem
+                        && let HintLookup::Resolved(ty) = self.lookup_hint_at_span(pi.ident.span())
+                    {
+                        resolved.push((pi.mutability.is_some(), pi.ident.to_string(), ty));
+                    } else {
+                        all_ok = false;
+                        break;
+                    }
+                }
+                if all_ok {
+                    for (is_mut, name, ty_s) in resolved {
+                        let is_shadow = self.declared_in_fn.contains(&name);
+                        let sh_kw = if is_shadow { "shadow " } else { "" };
+                        let mut_kw = if is_mut { "mut " } else { "" };
+                        self.bind_var(&name, ty_s.clone());
+                        self.line(&format!(
+                            "{}{}{} {};",
+                            sh_kw,
+                            mut_kw,
+                            ty_s,
+                            escape_ident(&name)
+                        ));
+                    }
+                    return;
+                }
+                if !self.strict_unnameable {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    self.line(&format!("var {};", pat_s));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                self.record_err(RSharpError::unresolved_type(
+                    "tuple",
+                    "Tuple binding requires initializer or type annotation",
+                ));
+                return;
+            };
+            match self.try_fmt_pat_with_hints(inner_pat) {
+                HintLookup::Resolved(tuple_s) => {
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("{} = {};", tuple_s, rhs));
+                    return;
+                }
+                HintLookup::Unnameable if !self.strict_unnameable => {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("var {} = {};", pat_s, rhs));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                _ => {}
+            }
+            let elem_tys: Vec<String> = if let Expr::Tuple(et) = init.expr.as_ref() {
+                let Some(elems) = et
+                    .elems
+                    .iter()
+                    .map(|e| self.infer_expr_type(e))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    if !self.strict_unnameable {
+                        let pat_s = self.fmt_pat(inner_pat, None);
+                        let rhs = self.fmt_expr(&init.expr);
+                        self.line(&format!("var {} = {};", pat_s, rhs));
+                        self.shadow_pat_vars_inferred(inner_pat);
+                        return;
+                    }
+                    self.record_err(RSharpError::unresolved_type(
+                        "tuple",
+                        "Could not infer tuple element types",
+                    ));
+                    return;
+                };
+                elems
+            } else if let Some(inferred) = self.infer_expr_type(&init.expr)
+                && let Some(elems) = split_tuple_type_str(&inferred)
+            {
+                elems
+            } else {
+                if !self.strict_unnameable {
+                    let pat_s = self.fmt_pat(inner_pat, None);
+                    let rhs = self.fmt_expr(&init.expr);
+                    self.line(&format!("var {} = {};", pat_s, rhs));
+                    self.shadow_pat_vars_inferred(inner_pat);
+                    return;
+                }
+                self.record_err(RSharpError::unresolved_type(
+                    "tuple",
+                    "Add explicit type annotation for tuple destructuring",
+                ));
+                return;
             };
             let rest_pos = ptup.elems.iter().position(|p| matches!(p, Pat::Rest(_)));
             let mut parts = Vec::new();
@@ -2120,12 +2180,6 @@ impl<'a> RustToRSharp<'a> {
                 let ty_hint = elem_tys.get(ty_idx).map(|s| s.as_str());
                 parts.push(self.fmt_pat(pat, ty_hint));
             }
-            let Some(init) = &local.init else {
-                self.record_err(RSharpError::from_rust(
-                    "Tuple destructuring without initializer",
-                ));
-                return;
-            };
             let rhs = self.fmt_expr(&init.expr);
             let tuple_s = if parts.len() == 1 {
                 format!("({},)", parts[0])
@@ -3160,7 +3214,7 @@ impl<'a> RustToRSharp<'a> {
             }
             Expr::Paren(ep) => format!("({})", self.fmt_expr(&ep.expr)),
             Expr::Unary(eu) => {
-                let inner = self.fmt_expr(&eu.expr);
+                let inner = self.fmt_unary_operand(&eu.expr);
                 match eu.op {
                     UnOp::Deref(_) => format!("deref {}", inner),
                     UnOp::Not(_) => format!("!{}", inner),
@@ -3173,14 +3227,14 @@ impl<'a> RustToRSharp<'a> {
                 } else {
                     "read"
                 };
-                format!("{} {}", kw, self.fmt_expr(&er.expr))
+                format!("{} {}", kw, self.fmt_unary_operand(&er.expr))
             }
             Expr::RawAddr(er) => {
                 let kw = match er.mutability {
                     syn::PointerMutability::Mut(_) => "write ptr",
                     syn::PointerMutability::Const(_) => "read ptr",
                 };
-                format!("{} {}", kw, self.fmt_expr(&er.expr))
+                format!("{} {}", kw, self.fmt_unary_operand(&er.expr))
             }
             Expr::Const(ec) => {
                 if let Some(single) = single_tail_expr(&ec.block) {
@@ -3206,26 +3260,11 @@ impl<'a> RustToRSharp<'a> {
             Expr::Cast(ec) => {
                 format!("({} as {})", self.fmt_expr(&ec.expr), self.fmt_type(&ec.ty))
             }
-            Expr::Try(et) => format!("try {}", self.fmt_expr(&et.expr)),
-            Expr::Await(ea) => format!("await {}", self.fmt_expr(&ea.base)),
+            Expr::Try(_) | Expr::Await(_) | Expr::MethodCall(_) => self.fmt_postfix_try_chain(expr),
             Expr::Call(ec) => {
                 let callee = self.fmt_receiver_expr(&ec.func);
                 let args: Vec<_> = ec.args.iter().map(|a| self.fmt_expr(a)).collect();
                 format!("{}({})", callee, args.join(", "))
-            }
-            Expr::MethodCall(mc) => {
-                let recv = self.fmt_member_receiver(&mc.receiver);
-                let mname = escape_ident(&mc.method.to_string());
-                let targs = match &mc.turbofish {
-                    Some(tf) => {
-                        let ts: Vec<String> =
-                            tf.args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                        format!("<{}>", ts.join(", "))
-                    }
-                    None => String::new(),
-                };
-                let args: Vec<_> = mc.args.iter().map(|a| self.fmt_expr(a)).collect();
-                format!("{}.{}{}({})", recv, mname, targs, args.join(", "))
             }
             Expr::Field(ef) => {
                 let base = self.fmt_member_receiver(&ef.base);
@@ -3593,8 +3632,20 @@ impl<'a> RustToRSharp<'a> {
         format!("{}{}", attr_pfx, core)
     }
 
+    fn fmt_unary_operand(&mut self, expr: &Expr) -> String {
+        let s = self.fmt_expr(expr);
+        if matches!(expr, Expr::Range(_)) {
+            format!("({})", s)
+        } else {
+            s
+        }
+    }
+
     fn try_fmt_inline_if(&mut self, eif: &syn::ExprIf, allow_ternary: bool) -> Option<String> {
         let then_e = single_tail_expr(&eif.then_branch)?;
+        if expr_has_dangling_if(then_e) {
+            return None;
+        }
         let (_, else_box) = &eif.else_branch.as_ref()?;
         if let Expr::If(next_if) = else_box.as_ref() {
             let else_s = self.try_fmt_inline_if(next_if, false)?;
@@ -3979,40 +4030,68 @@ impl<'a> RustToRSharp<'a> {
         }
     }
 
-    fn fmt_member_receiver(&mut self, expr: &Expr) -> String {
-        if let Expr::Path(ep) = expr
-            && ep.qself.is_none()
-            && !ep.path.is_ident("self")
-            && (ep.path.segments.len() >= 2
-                || ep.path.segments.first().is_some_and(|seg| {
-                    seg.ident
-                        .to_string()
-                        .chars()
-                        .next()
-                        .is_some_and(char::is_uppercase)
-                }))
-        {
-            return format!("({})", self.fmt_expr(expr));
+    fn fmt_postfix_try_chain(&mut self, expr: &Expr) -> String {
+        enum ChainStep<'a> {
+            Try,
+            Await,
+            Method(&'a syn::ExprMethodCall, bool),
         }
-        self.fmt_receiver_expr(expr)
+        let mut steps = Vec::new();
+        let mut cur = expr;
+        loop {
+            match cur {
+                Expr::Try(et) if steps.is_empty() || et.attrs.is_empty() => {
+                    steps.push(ChainStep::Try);
+                    cur = &et.expr;
+                }
+                Expr::Await(ea) if steps.is_empty() || ea.attrs.is_empty() => {
+                    steps.push(ChainStep::Await);
+                    cur = &ea.base;
+                }
+                Expr::MethodCall(mc) if steps.is_empty() || mc.attrs.is_empty() => {
+                    let wrap = needs_member_receiver_parens(&mc.receiver);
+                    steps.push(ChainStep::Method(mc, wrap));
+                    cur = &mc.receiver;
+                }
+                _ => break,
+            }
+        }
+        let mut s = self.fmt_expr(cur);
+        for step in steps.into_iter().rev() {
+            match step {
+                ChainStep::Try => s = format!("try {}", s),
+                ChainStep::Await => s = format!("await {}", s),
+                ChainStep::Method(mc, wrap) => {
+                    let recv = if wrap { format!("({})", s) } else { s };
+                    let mname = escape_ident(&mc.method.to_string());
+                    let targs = match &mc.turbofish {
+                        Some(tf) => {
+                            let ts: Vec<String> =
+                                tf.args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                            format!("<{}>", ts.join(", "))
+                        }
+                        None => String::new(),
+                    };
+                    let args: Vec<_> = mc.args.iter().map(|a| self.fmt_expr(a)).collect();
+                    s = format!("{}.{}{}({})", recv, mname, targs, args.join(", "));
+                }
+            }
+        }
+        s
+    }
+
+    fn fmt_member_receiver(&mut self, expr: &Expr) -> String {
+        let s = self.fmt_expr(expr);
+        if needs_member_receiver_parens(expr) {
+            format!("({})", s)
+        } else {
+            s
+        }
     }
 
     fn fmt_receiver_expr(&mut self, expr: &Expr) -> String {
         let s = self.fmt_expr(expr);
-        if matches!(
-            expr,
-            Expr::Try(_)
-                | Expr::Await(_)
-                | Expr::Unary(_)
-                | Expr::Reference(_)
-                | Expr::RawAddr(_)
-                | Expr::Range(_)
-                | Expr::Assign(_)
-                | Expr::Closure(_)
-                | Expr::If(_)
-                | Expr::Return(_)
-                | Expr::Break(_)
-        ) {
+        if needs_receiver_parens(expr) {
             format!("({})", s)
         } else {
             s
@@ -4723,11 +4802,58 @@ fn collect_use_renamed_origs(tree: &syn::UseTree, renamed: &mut HashSet<String>)
     }
 }
 
-fn fmt_use_tree(tree: &syn::UseTree) -> String {
-    fmt_use_tree_with_prefix(tree, Vec::new(), false)
+fn needs_receiver_parens(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Try(_)
+            | Expr::Await(_)
+            | Expr::Unary(_)
+            | Expr::Reference(_)
+            | Expr::RawAddr(_)
+            | Expr::Range(_)
+            | Expr::Assign(_)
+            | Expr::Closure(_)
+            | Expr::If(_)
+            | Expr::Return(_)
+            | Expr::Break(_)
+    )
 }
 
-fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>, in_std: bool) -> String {
+fn needs_member_receiver_parens(expr: &Expr) -> bool {
+    if let Expr::Path(ep) = expr
+        && ep.qself.is_none()
+        && !ep.path.is_ident("self")
+        && (ep.path.segments.len() >= 2
+            || ep.path.segments.first().is_some_and(|seg| {
+                seg.ident
+                    .to_string()
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_uppercase)
+            }))
+    {
+        return true;
+    }
+    needs_receiver_parens(expr)
+}
+
+fn expr_has_dangling_if(e: &Expr) -> bool {
+    match e {
+        Expr::If(eif) => match &eif.else_branch {
+            None => true,
+            Some((_, eb)) => expr_has_dangling_if(eb),
+        },
+        _ => false,
+    }
+}
+
+fn fmt_use_tree_with_prefix(
+    tree: &syn::UseTree,
+    mut prefix: Vec<String>,
+    in_std: bool,
+    global: bool,
+) -> String {
+    let g = if global { "global::" } else { "" };
     match tree {
         syn::UseTree::Path(p) => {
             let raw = p.ident.to_string();
@@ -4740,7 +4866,7 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>, in_std
                 escape_ident(&raw)
             };
             prefix.push(seg);
-            fmt_use_tree_with_prefix(&p.tree, prefix, std_here)
+            fmt_use_tree_with_prefix(&p.tree, prefix, std_here, global)
         }
         syn::UseTree::Name(n) => {
             let seg = if n.ident == "self" {
@@ -4751,7 +4877,7 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>, in_std
                 escape_ident(&n.ident.to_string())
             };
             prefix.push(seg);
-            prefix.join(".")
+            format!("{}{}", g, prefix.join("."))
         }
         syn::UseTree::Rename(r) => {
             let seg = if r.ident == "self" {
@@ -4763,26 +4889,27 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>, in_std
             };
             prefix.push(seg);
             format!(
-                "{} = {}",
+                "{} = {}{}",
                 escape_ident(&r.rename.to_string()),
+                g,
                 prefix.join(".")
             )
         }
         syn::UseTree::Glob(_) => {
             prefix.push("*".to_string());
-            prefix.join(".")
+            format!("{}{}", g, prefix.join("."))
         }
-        syn::UseTree::Group(g) => {
-            let subs: Vec<String> = g
+        syn::UseTree::Group(grp) => {
+            let subs: Vec<String> = grp
                 .items
                 .iter()
-                .map(|sub| fmt_use_tree_with_prefix(sub, Vec::new(), in_std))
+                .map(|sub| fmt_use_tree_with_prefix(sub, Vec::new(), in_std, false))
                 .collect();
             if prefix.is_empty() {
-                format!("{{{}}}", subs.join(", "))
+                format!("{}{{{}}}", g, subs.join(", "))
             } else {
                 prefix.push(format!("{{{}}}", subs.join(", ")));
-                prefix.join(".")
+                format!("{}{}", g, prefix.join("."))
             }
         }
     }

@@ -2411,8 +2411,7 @@ impl RustCodegen {
                     self.fmt_expr(rhs)
                 )
             }
-            Expr::Try(inner) => format!("({})?", self.fmt_expr(inner)),
-            Expr::Await(inner) => format!("({}).await", self.fmt_expr(inner)),
+            Expr::Try(_) | Expr::Await(_) => self.fmt_chain_expr(expr),
             Expr::Read(inner) | Expr::ReadSlice(inner) => {
                 format!("&{}", self.fmt_unary_operand(inner))
             }
@@ -2457,15 +2456,7 @@ impl RustCodegen {
                     let a: Vec<_> = args.iter().map(|e| self.fmt_expr(e)).collect();
                     return format!("panic!({})", a.join(", "));
                 }
-                let c = self.fmt_expr(callee);
-                let targs = if type_args.is_empty() {
-                    String::new()
-                } else {
-                    let ta: Vec<_> = type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("::<{}>", ta.join(", "))
-                };
-                let a: Vec<_> = args.iter().map(|e| self.fmt_list_elem_expr(e)).collect();
-                format!("{}{}({})", c, targs, a.join(", "))
+                self.fmt_chain_expr(expr)
             }
             Expr::Group(inner) => format!("({})", self.fmt_expr(inner)),
             Expr::Member {
@@ -2481,30 +2472,7 @@ impl RustCodegen {
                 {
                     return format!("{}.{}", fmt_rust_ident(var_name), idx);
                 }
-                let is_type_path_seg = !type_args.is_empty()
-                    && field.chars().next().is_some_and(|c| c.is_uppercase())
-                    && !self.is_local_var_root(object);
-                let sep = if self.is_path_expr(object) || is_type_path_seg {
-                    "::"
-                } else {
-                    "."
-                };
-                let obj = self.fmt_postfix_object(object);
-                let mapped_field = if sep == "::"
-                    && is_std_collections_root(object)
-                    && (field != "string" || is_string_module_expr(object))
-                {
-                    fmt_rust_ident(&map_std_type_alias(field))
-                } else {
-                    fmt_rust_ident(field)
-                };
-                let targs = if type_args.is_empty() {
-                    String::new()
-                } else {
-                    let ta: Vec<_> = type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
-                    format!("::<{}>", ta.join(", "))
-                };
-                format!("{}{}{}{}", obj, sep, mapped_field, targs)
+                self.fmt_chain_expr(expr)
             }
             Expr::TupleIndex { object, index } => {
                 format!("{}.{}", self.fmt_postfix_object(object), index)
@@ -2888,17 +2856,112 @@ impl RustCodegen {
         }
     }
 
+    fn fmt_chain_expr(&self, expr: &Expr) -> String {
+        enum ChainStep<'a> {
+            Try,
+            Await,
+            Call(&'a [GenericArg], &'a [Expr]),
+            Member(&'a Expr, &'a str, &'a [GenericArg]),
+        }
+        let mut steps = Vec::new();
+        let mut cur = expr;
+        loop {
+            match cur {
+                Expr::Try(inner) => {
+                    steps.push(ChainStep::Try);
+                    cur = inner;
+                }
+                Expr::Await(inner) => {
+                    steps.push(ChainStep::Await);
+                    cur = inner;
+                }
+                Expr::Call {
+                    callee,
+                    type_args,
+                    args,
+                } if !matches!(
+                    callee.as_ref(),
+                    Expr::Ident(name) if name == "panic" && type_args.is_empty()
+                ) =>
+                {
+                    steps.push(ChainStep::Call(type_args, args));
+                    cur = callee;
+                }
+                Expr::Member {
+                    object,
+                    field,
+                    type_args,
+                } if !(type_args.is_empty()
+                    && matches!(
+                        object.as_ref(),
+                        Expr::Ident(var_name)
+                            if self
+                                .lookup_var(var_name)
+                                .and_then(|i| i.tuple_fields.as_ref())
+                                .is_some_and(|m| m.contains_key(field))
+                    )) =>
+                {
+                    steps.push(ChainStep::Member(object, field, type_args));
+                    cur = object;
+                }
+                _ => break,
+            }
+        }
+        let mut s = self.fmt_expr(cur);
+        for step in steps.into_iter().rev() {
+            match step {
+                ChainStep::Try => s = format!("({})?", s),
+                ChainStep::Await => s = format!("({}).await", s),
+                ChainStep::Call(type_args, args) => {
+                    let targs = if type_args.is_empty() {
+                        String::new()
+                    } else {
+                        let ta: Vec<_> =
+                            type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                        format!("::<{}>", ta.join(", "))
+                    };
+                    let a: Vec<_> = args.iter().map(|e| self.fmt_list_elem_expr(e)).collect();
+                    s = format!("{}{}({})", s, targs, a.join(", "));
+                }
+                ChainStep::Member(object, field, type_args) => {
+                    let is_type_path_seg = !type_args.is_empty()
+                        && field.chars().next().is_some_and(|c| c.is_uppercase())
+                        && !self.is_local_var_root(object);
+                    let sep = if self.is_path_expr(object) || is_type_path_seg {
+                        "::"
+                    } else {
+                        "."
+                    };
+                    let obj = if needs_postfix_object_parens(object) {
+                        format!("({})", s)
+                    } else {
+                        s
+                    };
+                    let mapped_field = if sep == "::"
+                        && is_std_collections_root(object)
+                        && (field != "string" || is_string_module_expr(object))
+                    {
+                        fmt_rust_ident(&map_std_type_alias(field))
+                    } else {
+                        fmt_rust_ident(field)
+                    };
+                    let targs = if type_args.is_empty() {
+                        String::new()
+                    } else {
+                        let ta: Vec<_> =
+                            type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
+                        format!("::<{}>", ta.join(", "))
+                    };
+                    s = format!("{}{}{}{}", obj, sep, mapped_field, targs);
+                }
+            }
+        }
+        s
+    }
+
     fn fmt_postfix_object(&self, object: &Expr) -> String {
         let s = self.fmt_expr(object);
-        if matches!(
-            object,
-            Expr::Range { .. }
-                | Expr::Unary { .. }
-                | Expr::Deref(_)
-                | Expr::Read(_)
-                | Expr::Write(_)
-                | Expr::IfBlock(_)
-        ) {
+        if needs_postfix_object_parens(object) {
             format!("({})", s)
         } else {
             s
@@ -3296,7 +3359,8 @@ fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<(String, Option<Type>)>
     match pat {
         Pattern::Binding { ty, name, .. } => {
             if name != "_" {
-                out.push((name.clone(), ty.clone()));
+                let resolved = ty.as_ref().filter(|t| !matches!(t, Type::Infer)).cloned();
+                out.push((name.clone(), resolved));
             }
         }
         Pattern::BorrowRef { mode, ty, name } => {
@@ -3658,6 +3722,18 @@ fn register_shadowed_using_aliases(
             }
         }
     }
+}
+
+fn needs_postfix_object_parens(object: &Expr) -> bool {
+    matches!(
+        object,
+        Expr::Range { .. }
+            | Expr::Unary { .. }
+            | Expr::Deref(_)
+            | Expr::Read(_)
+            | Expr::Write(_)
+            | Expr::IfBlock(_)
+    )
 }
 
 fn is_std_collections_root(expr: &Expr) -> bool {

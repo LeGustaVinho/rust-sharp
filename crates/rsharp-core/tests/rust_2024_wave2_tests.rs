@@ -1205,9 +1205,8 @@ fn body_edges(
 
     // Trigger all error / unresolved-type branches with rustc inference disabled
     for bad in [
-        "fn f() { let [a, b]: [i32; 2]; }",
         "fn f() { let Point { x }; }",
-        "fn f() { let (a, b): (i32, i32); }",
+        "fn f() { let (a, b); }",
         "fn f() { let r = &unknown_v; }",
         "fn f() { let r = &raw const unknown_v; }",
         "fn f() { let d = *unknown_v; }",
