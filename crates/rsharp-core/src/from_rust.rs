@@ -214,9 +214,16 @@ impl RustToRSharp {
         normalize_unstable_stdlib_type(&mut ty);
         if contains_nested_impl_trait(&ty)
             || contains_nested_bare_fn(&ty)
+            || matches!(
+                &ty,
+                Type::BareFn(bf)
+                    if (bf.unsafety.is_some() && bf.abi.is_none())
+                        || bare_fn_has_elided_return_ref(bf)
+            )
             || has_unqualified_qself_trait(&ty)
             || impl_trait_returns_elided_ref(&ty)
             || contains_unimported_dyn_trait(&ty, &self.in_scope_traits, &self.renamed_use_origs)
+            || contains_unimported_impl_future(&ty, &self.in_scope_traits)
             || contains_ref_to_static_dyn(&ty)
             || (!verified && (!all_unverified_paths_in_scope(&ty) || impl_trait_contains_dyn(&ty)))
         {
@@ -391,6 +398,49 @@ impl RustToRSharp {
         let idx = self.scopes.len() - 1;
         self.scopes[idx].insert(name.to_string(), ty);
         self.declared_in_fn.insert(name.to_string());
+    }
+
+    fn bind_scope_pat_idents(&mut self, pat: &Pat) {
+        match pat {
+            Pat::Ident(pi) => {
+                let idx = self.scopes.len() - 1;
+                self.scopes[idx]
+                    .entry(pi.ident.to_string())
+                    .or_insert_with(|| "_".to_string());
+                if let Some((_, sub)) = &pi.subpat {
+                    self.bind_scope_pat_idents(sub);
+                }
+            }
+            Pat::Tuple(pt) => {
+                for e in &pt.elems {
+                    self.bind_scope_pat_idents(e);
+                }
+            }
+            Pat::TupleStruct(pts) => {
+                for e in &pts.elems {
+                    self.bind_scope_pat_idents(e);
+                }
+            }
+            Pat::Struct(ps) => {
+                for f in &ps.fields {
+                    self.bind_scope_pat_idents(&f.pat);
+                }
+            }
+            Pat::Slice(ps) => {
+                for e in &ps.elems {
+                    self.bind_scope_pat_idents(e);
+                }
+            }
+            Pat::Reference(pr) => self.bind_scope_pat_idents(&pr.pat),
+            Pat::Paren(pp) => self.bind_scope_pat_idents(&pp.pat),
+            Pat::Type(pt) => self.bind_scope_pat_idents(&pt.pat),
+            Pat::Or(po) => {
+                for case in &po.cases {
+                    self.bind_scope_pat_idents(case);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn lookup_var(&self, name: &str) -> Option<&str> {
@@ -1476,6 +1526,11 @@ impl RustToRSharp {
     }
 
     fn emit_local(&mut self, local: &Local, following_stmts: &[Stmt]) {
+        self.emit_local_inner(local, following_stmts);
+        self.bind_scope_pat_idents(&local.pat);
+    }
+
+    fn emit_local_inner(&mut self, local: &Local, following_stmts: &[Stmt]) {
         for a in &local.attrs {
             self.emit_attr(a, false);
         }
@@ -1485,7 +1540,15 @@ impl RustToRSharp {
             && let Some((_, diverge)) = &init.diverge
         {
             let expr_s = self.fmt_expr(&init.expr);
-            let pat_s = self.fmt_pat(&local.pat, None);
+            let pat_s = if let Pat::Type(pt) = &local.pat {
+                format!(
+                    "{} : {}",
+                    self.fmt_pat(&pt.pat, None),
+                    self.fmt_type(&pt.ty)
+                )
+            } else {
+                self.fmt_pat(&local.pat, None)
+            };
             self.line(&format!("require ({} is {}) else {{", expr_s, pat_s));
             self.indent += 1;
             self.emit_expr_as_block_body(diverge, BlockTail::None);
@@ -2143,6 +2206,8 @@ impl RustToRSharp {
                 self.emit_attr(a, false);
             }
             let pat = self.fmt_pat(&arm.pat, None);
+            self.push_scope();
+            self.bind_scope_pat_idents(&arm.pat);
             let guard = match &arm.guard {
                 Some((_, ge)) => format!(" when {}", self.fmt_condition(ge)),
                 None => String::new(),
@@ -2157,6 +2222,7 @@ impl RustToRSharp {
                 let s = self.fmt_expr(&arm.body);
                 self.line(&format!("{}{} => {},", pat, guard, s));
             }
+            self.pop_scope();
         }
         self.indent -= 1;
         self.line("}");
@@ -2344,8 +2410,19 @@ impl RustToRSharp {
     fn fmt_pat_qself_or_path(&self, qself: &Option<syn::QSelf>, path: &Path) -> String {
         match qself {
             Some(qs) => self.fmt_qself_path(qs, path),
-            None => self.fmt_path(path),
+            None => self.fmt_pat_path(path),
         }
+    }
+
+    fn fmt_pat_path(&self, path: &Path) -> String {
+        // Pattern paths (variants/structs like `String(s)`) must not map `String` -> `string`.
+        if path.leading_colon.is_none()
+            && path.segments.len() == 1
+            && path.segments[0].arguments.is_empty()
+        {
+            return escape_ident(&path.segments[0].ident.to_string());
+        }
+        self.fmt_path(path)
     }
 
     fn fmt_qself_path(&self, qself: &syn::QSelf, path: &Path) -> String {
@@ -3086,11 +3163,14 @@ impl RustToRSharp {
                         pfx.push(' ');
                     }
                     let pat = self.fmt_pat(&arm.pat, None);
+                    self.push_scope();
+                    self.bind_scope_pat_idents(&arm.pat);
                     let g = match &arm.guard {
                         Some((_, ge)) => format!(" when {}", self.fmt_condition(ge)),
                         None => String::new(),
                     };
                     let body = self.fmt_expr(&arm.body);
+                    self.pop_scope();
                     arms.push(format!("{}{}{} => {}", pfx, pat, g, body));
                 }
                 format!("match ({}) {{ {} }}", scr, arms.join(", "))
@@ -3215,19 +3295,31 @@ impl RustToRSharp {
             }
             Expr::Unsafe(eu) => {
                 let mut sub = self.child();
-                let tail = if matches!(
-                    eu.block.stmts.last(),
-                    Some(Stmt::Expr(_, None))
-                        | Some(Stmt::Macro(syn::StmtMacro {
-                            semi_token: None,
-                            ..
-                        }))
-                ) {
-                    BlockTail::Return
+                if let Some((Stmt::Expr(tail_expr, None), init)) = eu.block.stmts.split_last()
+                    && matches!(tail_expr, Expr::If(_) | Expr::Match(_) | Expr::Block(_))
+                {
+                    let prefix_blk = syn::Block {
+                        brace_token: eu.block.brace_token,
+                        stmts: init.to_vec(),
+                    };
+                    sub.emit_block_stmts(&prefix_blk, BlockTail::None);
+                    let tail_s = sub.fmt_expr(tail_expr);
+                    sub.line(&format!("return {};", tail_s));
                 } else {
-                    BlockTail::None
-                };
-                sub.emit_block_stmts(&eu.block, tail);
+                    let tail = if matches!(
+                        eu.block.stmts.last(),
+                        Some(Stmt::Expr(_, None))
+                            | Some(Stmt::Macro(syn::StmtMacro {
+                                semi_token: None,
+                                ..
+                            }))
+                    ) {
+                        BlockTail::Return
+                    } else {
+                        BlockTail::None
+                    };
+                    sub.emit_block_stmts(&eu.block, tail);
+                }
                 format!("unsafe {{\n{}}}", sub.out)
             }
             Expr::Macro(em) => fmt_syn_macro(&em.mac),
@@ -3321,10 +3413,15 @@ impl RustToRSharp {
             Expr::Unary(eu) => match eu.op {
                 UnOp::Deref(_) => {
                     let inner = self.infer_expr_type(&eu.expr)?;
-                    inner
+                    let rest = inner
                         .strip_prefix("read ")
-                        .or_else(|| inner.strip_prefix("write "))
-                        .map(|s| s.to_string())
+                        .or_else(|| inner.strip_prefix("write "))?;
+                    Some(
+                        rest.strip_prefix("ptr<")
+                            .and_then(|s| s.strip_suffix('>'))
+                            .unwrap_or(rest)
+                            .to_string(),
+                    )
                 }
                 _ => self.infer_expr_type(&eu.expr),
             },
@@ -3368,11 +3465,13 @@ impl RustToRSharp {
             }
             Expr::Repeat(er) => {
                 let elem_ty = self.infer_expr_type(&er.expr)?;
-                Some(format!("{}[{}]", elem_ty, er.len.to_token_stream()))
+                Some(format!("{}[{}]", elem_ty, self.fmt_const_expr(&er.len)))
             }
             Expr::Path(ep) => {
                 if let Some(id) = ep.path.get_ident() {
-                    self.lookup_var(&id.to_string()).map(|s| s.to_string())
+                    self.lookup_var(&id.to_string())
+                        .filter(|s| *s != "_")
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
@@ -3868,6 +3967,39 @@ fn contains_nested_bare_fn(ty: &Type) -> bool {
     any_child_type(ty, &mut |t| matches!(t, Type::BareFn(_)))
 }
 
+fn bare_fn_has_elided_return_ref(bf: &syn::TypeBareFn) -> bool {
+    if bf.lifetimes.is_some() {
+        return false;
+    }
+    let syn::ReturnType::Type(_, ret) = &bf.output else {
+        return false;
+    };
+    any_type_node(
+        ret,
+        &mut |t| matches!(t, Type::Reference(r) if r.lifetime.is_none()),
+    )
+}
+
+fn contains_unimported_impl_future(ty: &Type, in_scope_traits: &HashSet<String>) -> bool {
+    let Type::ImplTrait(it) = ty else {
+        return false;
+    };
+    it.bounds.iter().any(|b| {
+        let TypeParamBound::Trait(tb) = b else {
+            return false;
+        };
+        tb.path.leading_colon.is_none()
+            && tb.path.segments.len() == 1
+            && tb.path.segments.first().is_some_and(|seg| {
+                let name = seg.ident.to_string();
+                matches!(
+                    name.as_str(),
+                    "Future" | "IntoFuture" | "AsyncFn" | "AsyncFnMut" | "AsyncFnOnce"
+                ) && !in_scope_traits.contains(&name)
+            })
+    })
+}
+
 fn record_loop_jump_macro(im: &syn::ItemMacro, out: &mut HashSet<String>) {
     if let Some(id) = &im.ident
         && im.mac.path.is_ident("macro_rules")
@@ -4029,15 +4161,10 @@ fn is_rust_prelude_or_primitive_type(name: &str) -> bool {
             | "Fn"
             | "FnMut"
             | "FnOnce"
-            | "AsyncFn"
-            | "AsyncFnMut"
-            | "AsyncFnOnce"
             | "Iterator"
             | "IntoIterator"
             | "ExactSizeIterator"
             | "DoubleEndedIterator"
-            | "Future"
-            | "IntoFuture"
     )
 }
 
@@ -4835,6 +4962,9 @@ fn fmt_syn_macro(mac: &syn::Macro) -> String {
 }
 
 fn pretty_item(item: &Item) -> String {
+    if let Item::Verbatim(ts) = item {
+        return ts.to_string();
+    }
     let file = syn::File {
         shebang: None,
         attrs: Vec::new(),

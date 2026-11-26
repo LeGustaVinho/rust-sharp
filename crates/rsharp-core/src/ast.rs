@@ -309,6 +309,7 @@ pub enum ImplItem {
         attrs: Vec<Attribute>,
         call: MacroCall,
     },
+    RawRust(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -572,6 +573,7 @@ pub enum StmtKind {
     Require {
         expr: Expr,
         pat: Pattern,
+        ty: Option<Type>,
         else_block: Block,
     },
     While {

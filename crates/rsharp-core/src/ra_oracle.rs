@@ -112,6 +112,7 @@ pub struct RustAnalyzerOracle {
     next_id: i64,
     optional_deps: HashSet<String>,
     cfg_gated_mods: HashSet<String>,
+    cfg_test_reexports: HashSet<String>,
     is_no_std: bool,
 }
 
@@ -145,6 +146,7 @@ impl RustAnalyzerOracle {
             next_id: 1,
             optional_deps: HashSet::new(),
             cfg_gated_mods: HashSet::new(),
+            cfg_test_reexports: HashSet::new(),
             is_no_std: false,
         };
         oracle.initialize(workspace_root)?;
@@ -164,6 +166,7 @@ impl RustAnalyzerOracle {
             next_id: 1,
             optional_deps: HashSet::new(),
             cfg_gated_mods: HashSet::new(),
+            cfg_test_reexports: HashSet::new(),
             is_no_std: false,
         };
         oracle.initialize(workspace_root)?;
@@ -176,6 +179,7 @@ impl RustAnalyzerOracle {
                 workspace_root,
                 &mut self.optional_deps,
                 &mut self.cfg_gated_mods,
+                &mut self.cfg_test_reexports,
                 &mut self.is_no_std,
             );
         }
@@ -334,10 +338,18 @@ impl RustAnalyzerOracle {
         )?;
 
         let mut hints = parse_inlay_hint_response(&resp);
-        if !self.optional_deps.is_empty() || !self.cfg_gated_mods.is_empty() || self.is_no_std {
+        if !self.optional_deps.is_empty()
+            || !self.cfg_gated_mods.is_empty()
+            || !self.cfg_test_reexports.is_empty()
+            || self.is_no_std
+        {
             for (ty, verified) in hints.by_end.values_mut() {
-                if hint_uses_cfg_gated_item(ty, &self.optional_deps, &self.cfg_gated_mods)
-                    || (self.is_no_std && !*verified && hint_uses_unqualified_alloc_type(ty))
+                if hint_uses_cfg_gated_item(
+                    ty,
+                    &self.optional_deps,
+                    &self.cfg_gated_mods,
+                    &self.cfg_test_reexports,
+                ) || (self.is_no_std && !*verified && hint_uses_unqualified_alloc_type(ty))
                 {
                     *ty = "{unknown}".to_string();
                     *verified = false;
@@ -615,6 +627,7 @@ fn collect_workspace_cfg_gated_names(
     root: &Path,
     optional_deps: &mut HashSet<String>,
     cfg_gated_mods: &mut HashSet<String>,
+    cfg_test_reexports: &mut HashSet<String>,
     is_no_std: &mut bool,
 ) {
     for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
@@ -626,7 +639,13 @@ fn collect_workspace_cfg_gated_names(
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
             }
-            collect_workspace_cfg_gated_names(&path, optional_deps, cfg_gated_mods, is_no_std);
+            collect_workspace_cfg_gated_names(
+                &path,
+                optional_deps,
+                cfg_gated_mods,
+                cfg_test_reexports,
+                is_no_std,
+            );
         } else if name == "Cargo.toml"
             && let Ok(content) = std::fs::read_to_string(&path)
         {
@@ -649,6 +668,7 @@ fn collect_workspace_cfg_gated_names(
                 *is_no_std = true;
             }
             let mut saw_cfg = false;
+            let mut saw_cfg_test = false;
             for line in content.lines() {
                 let t = line.trim();
                 if t.is_empty() || t.starts_with("//") {
@@ -656,20 +676,35 @@ fn collect_workspace_cfg_gated_names(
                 }
                 if t.starts_with("#[cfg(") {
                     saw_cfg = true;
+                    if t == "#[cfg(test)]" {
+                        saw_cfg_test = true;
+                    }
                     continue;
                 }
                 if t.starts_with("#[") {
                     continue;
                 }
-                if saw_cfg
-                    && let Some(rest) = t.strip_suffix(';')
-                    && let Some(mod_name) = extract_mod_decl_name(rest)
-                {
-                    cfg_gated_mods.insert(mod_name.to_string());
+                if saw_cfg && let Some(rest) = t.strip_suffix(';') {
+                    if let Some(mod_name) = extract_mod_decl_name(rest) {
+                        cfg_gated_mods.insert(mod_name.to_string());
+                    } else if saw_cfg_test && let Some(leaf) = extract_pub_use_leaf_name(rest) {
+                        cfg_test_reexports.insert(leaf.to_string());
+                    }
                 }
                 saw_cfg = false;
+                saw_cfg_test = false;
             }
         }
+    }
+}
+
+fn extract_pub_use_leaf_name(decl: &str) -> Option<&str> {
+    let rest = decl.strip_prefix("pub use ")?.trim();
+    let leaf = rest.rsplit_once("::").map_or(rest, |(_, l)| l).trim();
+    if !leaf.is_empty() && leaf.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Some(leaf)
+    } else {
+        None
     }
 }
 
@@ -693,6 +728,7 @@ fn hint_uses_cfg_gated_item(
     ty: &str,
     optional_deps: &HashSet<String>,
     cfg_gated_mods: &HashSet<String>,
+    cfg_test_reexports: &HashSet<String>,
 ) -> bool {
     for dep in optional_deps {
         let needle = format!("{}::", dep);
@@ -708,6 +744,17 @@ fn hint_uses_cfg_gated_item(
     }
     for m in cfg_gated_mods {
         if ty.contains(&format!("::{}::", m)) {
+            return true;
+        }
+    }
+    for reexp in cfg_test_reexports {
+        let needle = format!("::{}", reexp);
+        if let Some(pos) = ty.find(&needle)
+            && ty[pos + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+        {
             return true;
         }
     }

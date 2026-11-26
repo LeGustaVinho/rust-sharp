@@ -1201,8 +1201,11 @@ fn should_lex_raw_macro_body(tokens: &[Token]) -> bool {
         return true;
     }
     if n >= 2
-        && matches!(tokens[n - 2].kind, TokenKind::Ident { .. })
         && matches!(tokens[n - 1].kind, TokenKind::Bang)
+        && (matches!(tokens[n - 2].kind, TokenKind::Ident { .. })
+            || (n >= 3
+                && matches!(tokens[n - 3].kind, TokenKind::Dot | TokenKind::ColonColon)
+                && matches!(tokens[n - 2].kind, TokenKind::Kw(_))))
         && !(n >= 3 && matches!(tokens[n - 3].kind, TokenKind::Kw(Keyword::Break)))
     {
         return true;

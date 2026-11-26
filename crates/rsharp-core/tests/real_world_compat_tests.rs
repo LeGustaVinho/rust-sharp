@@ -2228,3 +2228,332 @@ fn loop_jump_call_and_method_args(mut n: i32) {
     oracle.close();
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn github_20_repos_regressions_and_full_branch_coverage() {
+    // 1. Lexer: `.` / `::` followed by keyword macro (`std.write!`, `std::write!`)
+    //    and `.` followed by non-keyword before `!` (`a.0!()`).
+    let lex_ok = lexer::tokenize("std.write!(buf, \"hi\"); std::write!(buf, \"ok\");")
+        .expect("keyword macro after dot/coloncolon should lex");
+    assert!(!lex_ok.is_empty());
+    let lex_non_kw = lexer::tokenize("a.0!()").expect("non-keyword after dot before bang");
+    assert!(!lex_non_kw.is_empty());
+
+    // 2. Empty file under `PreludeMode::None` omits crate-level `#![allow(...)]`.
+    let empty_rust = transpile_to_rust(
+        "",
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("empty file transpile");
+    assert!(empty_rust.is_empty(), "got: {empty_rust:?}");
+
+    // 3. Parser + Codegen regressions from the 20-repo campaign:
+    //    - `EventStream![] events()` non-brace macro in return-type position
+    //    - `impl Foo { rust { type Bar; } }` (`ImplItem::RawRust`)
+    //    - `public unsafe impl EntityCommand insert_by_id<T>()`
+    //    - `(Self.drop_ptr<T> as _)` generic turbofish before `as`
+    //    - `(C.QueryData as QueryData).Item<life _, life _> param` typed qself pattern
+    //    - `require (opt is Some(v) : Option<int>) else { return; }`
+    //    - `match (...) { ... }.unwrap()`, `[0]`, `(1)`, `?`, and next-line tuple destructuring
+    //    - `unsafe { ... }` postfix `.`, `(1)`, `[0]` on same line vs next-line `[Allow(...)]` / `(a, b)`
+    //    - brace macro call followed by next-line `[Allow(...)]` / `(a, b)` and in `match` arms
+    //    - `read (0..10)` parenthesizing range under unary borrow (`&(0..10)`)
+    //    - attributed `impl Trait` VarDecl and attributed destructuring pattern checks
+    //    - `type_contains_impl_trait` across Read/Write/Slice/ReadPtr/WritePtr/Optional/Grouped/Array/Tuple
+    //    - generic `impl<T>` / `fn<T>` skipping nested `__rsharp_impl_check` (`E0401`)
+    //    - closure parameter with `@` subpattern (`Pattern::BindAt`)
+    let rsh_20 = r#"
+struct Foo;
+impl Foo {
+    rust { type VerbatimItem; }
+    EventStream![] events() { return make_stream(); }
+    public unsafe impl EntityCommand insert_by_id<T>(T x) { return x; }
+}
+
+EventStream![] top_events() { return make_stream(); }
+
+impl<T> GenericBox<T> {
+    void generic_impl_check(T x) {
+        impl Copy a = x;
+        _ = a;
+    }
+}
+
+void test_parser_and_codegen_20(Option<int> opt, bool flag, int x, (int, int) pair) {
+    require (opt is Some(v) : Option<int>) else { return; }
+    _ = v;
+
+    match (flag) { true => Some(1), false => None }.unwrap();
+    match (flag) { true => [1, 2], false => [3, 4] }[0];
+    match (flag) { true => f, false => g }(1);
+    match (flag) { true => true, false => false } ? 1 : 2;
+    match (flag) { true => {}, false => {} }
+    (int ma, int mb) = (1, 2);
+
+    unsafe { return arr; }[0];
+    unsafe { return f; }(1);
+    unsafe { foo(); }
+    [Allow(unused)]
+    int after_unsafe = 1;
+
+    my_mac! { 1 }
+    [Allow(unused)]
+    int after_mac_attr = 2;
+
+    my_mac! { 2 }
+    (int da, int db) = (3, 4);
+
+    _ = match (x) {
+        1 => unsafe { return 1; }
+        [Allow(unused)]
+        2 => match (flag) { true => 1, false => 2 }
+        [Allow(unused)]
+        3 => my_mac! { 3 }
+        [Allow(unused)]
+        4 => 4,
+        _ => 0,
+    };
+
+    _ = match (pair) {
+        (0, 0) => unsafe { return 1; }
+        (1, 1) => match (flag) { true => 1, false => 2 }
+        (2, 2) => my_mac! { 2 }
+        (3, 3) => 3,
+        _ => 0,
+    };
+
+    _ = (Self.drop_ptr<int> as _);
+    _ = read (0..10);
+    _ = write (0..10);
+    _ = ((1 as int all) => all);
+    _ = (((C.QueryData as QueryData).Item<life _, life _> qc) => qc);
+
+    [Allow(unused)]
+    impl Copy attr_impl = 1;
+    [Allow(unused)]
+    (int pa, int pb) = (1, 2);
+
+    (impl Copy t0, int k0) = (1, 0);
+    (read impl Copy t1, write impl Copy t2) = (read 1, write 2);
+    (read slice<impl Copy> t3, read ptr<impl Copy> t4) = (s, p1);
+    (write ptr<impl Copy> t5, read (impl Copy)? t6) = (p2, o1);
+    (read (impl Copy) t7, read (impl Copy)[1] t8) = (g1, a1);
+    (read (impl Copy, int) t9, read (int, int) t10) = (tp1, read (1, 2));
+    _ = (ma, mb, after_unsafe, after_mac_attr, da, db, attr_impl, pa, pb, t0, k0, t1, t2, t3, t4, t5, t6, t7, t8, t9, t10);
+}
+"#;
+    let rust_20 = transpile_to_rust(
+        rsh_20,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("20-repo R# regressions should parse and transpile");
+    assert!(
+        rust_20.contains("#![allow(unused_parens, unused_braces, unreachable_code)]"),
+        "got:\n{rust_20}"
+    );
+    assert!(rust_20.contains("type VerbatimItem;"), "got:\n{rust_20}");
+    assert!(
+        rust_20.contains("fn events() -> EventStream![]"),
+        "got:\n{rust_20}"
+    );
+    assert!(
+        rust_20.contains("pub unsafe fn insert_by_id<T>(x: T) -> impl EntityCommand"),
+        "got:\n{rust_20}"
+    );
+    assert!(
+        rust_20.contains("let Some(v): Option<i32> = opt else {"),
+        "got:\n{rust_20}"
+    );
+    assert!(rust_20.contains("&(0..10)"), "got:\n{rust_20}");
+    assert!(rust_20.contains("&mut (0..10)"), "got:\n{rust_20}");
+    assert!(
+        !rust_20.contains("let _: &&impl Copy"),
+        "should skip impl-trait pattern checks:\n{rust_20}"
+    );
+    assert!(
+        !rust_20
+            .split("fn generic_impl_check")
+            .nth(1)
+            .unwrap()
+            .split("fn test_parser_and_codegen_20")
+            .next()
+            .unwrap()
+            .contains("__rsharp_impl_check"),
+        "generic impl should skip __rsharp_impl_check:\n{rust_20}"
+    );
+    assert!(
+        parser::parse_file("void f() { require (opt is Some(v) : ) else { return; } }").is_err()
+    );
+
+    // 4. from_rust regressions:
+    //    - `Item::Verbatim` via `type Unassigned;` (typst)
+    //    - `let Some(v): Option<i32> = opt else { return; };` (`Pat::Type` in diverge)
+    //    - `Expr::Unsafe` with trailing `if`/`match`/`block` in value position (rtk)
+    //    - `UnOp::Deref` on `*const bool` and `*mut i32` (deno)
+    //    - `Expr::Repeat` const-expr length (`[0u8; 1 + 2]`)
+    //    - `String(s)` single-segment pattern path NOT mapped to `string(s)` (rtk)
+    //    - `Pat::Or` in match arm & `bind_scope_pat_idents` shadowing a module path (starship/claw-code)
+    //    - RA hint filters: bare `unsafe fn()`, `unsafe extern "C" fn()`, `fn(&str) -> &str`,
+    //      `for<'a> fn(&'a str) -> &'a str`, `fn(i32)`, `fn(i32) -> i32`,
+    //      `impl Future<Output = i32>` unimported vs imported, and `impl Clone + 'static`.
+    let rust_src_20 = r#"
+type VerbatimTop;
+enum Val { String(i32), Other(i32) }
+
+fn from_rust_20_cases(opt: Option<i32>, flag: bool, p_const: *const bool, p_mut: *mut i32, v: Val) {
+    let Some(req_val): Option<i32> = opt else { return; };
+    let u_if: i32 = unsafe {
+        let tmp = 1i32;
+        if flag { tmp } else { 0 }
+    };
+    unsafe {
+        let b_val = *p_const;
+        let m_val = *p_mut;
+        let _ = (b_val, m_val);
+    }
+    let bx: Box<i32> = Box::new(1);
+    let d_bx = *bx;
+    let _ = d_bx;
+    let arr = [0u8; 1 + 2];
+    match v {
+        Val::String(s) | Val::Other(s) => {
+            let _ = s;
+        }
+    }
+    use Val::String;
+    if let String(inner) = v {
+        let _ = inner;
+    }
+    let h0 = unknown_fn();
+    let h1 = unknown_fn();
+    let h2 = unknown_fn();
+    let h3 = unknown_fn();
+    let h4 = unknown_fn();
+    let h5 = unknown_fn();
+    let h6 = unknown_fn();
+    let h7 = unknown_fn();
+    let _ = (req_val, u_if, arr, h0, h1, h2, h3, h4, h5, h6, h7);
+}
+"#;
+    let hint_specs_20: &[(&str, &str)] = &[
+        ("h0", "unsafe fn()"),
+        ("h1", "unsafe extern \"C\" fn()"),
+        ("h2", "fn(&str) -> &str"),
+        ("h3", "for<'a> fn(&'a str) -> &'a str"),
+        ("h4", "fn(i32)"),
+        ("h5", "fn(i32) -> i32"),
+        ("h6", "impl Future<Output = i32>"),
+        ("h7", "impl Clone + 'static"),
+    ];
+    let mut hints_20 = TypeHintMap::default();
+    for (idx, line) in rust_src_20.lines().enumerate() {
+        let l1 = (idx + 1) as u32;
+        for (var, ty) in hint_specs_20 {
+            let pat = format!("let {var} =");
+            if let Some(pos) = line.find(&pat) {
+                hints_20.insert_with_verified(
+                    l1,
+                    (pos + 4 + var.len()) as u32,
+                    (*ty).to_string(),
+                    true,
+                );
+            }
+        }
+    }
+    let (rsh_fr20, rust_fr20) = roundtrip_and_check(rust_src_20, &hints_20, false);
+    assert!(rsh_fr20.contains("VerbatimTop"), "got:\n{rsh_fr20}");
+    assert!(
+        rsh_fr20.contains("require (opt is Some(req_val) : int?) else {"),
+        "got:\n{rsh_fr20}"
+    );
+    assert!(rsh_fr20.contains("bool b_val ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("int m_val ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("String(inner)"), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("rust { let h0 ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("rust { let h2 ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("rust { let h6 ="), "got:\n{rsh_fr20}");
+    assert!(rust_fr20.contains("if flag"), "got:\n{rust_fr20}");
+
+    // Also test `impl Future<Output = i32>` when `Future` IS explicitly imported.
+    let imported_future_src = r#"
+use std::future::Future;
+fn with_future() {
+    let f = unknown_fn();
+    let _ = f;
+}
+"#;
+    let mut fut_hints = TypeHintMap::default();
+    fut_hints.insert_with_verified(4, 9, "impl Future<Output = i32>".to_string(), true);
+    let (fut_rsh, _) = roundtrip_and_check(imported_future_src, &fut_hints, false);
+    assert!(
+        fut_rsh.contains("impl Future<Output = int> f ="),
+        "got:\n{fut_rsh}"
+    );
+
+    // 5. ra_oracle: `#[cfg(test)] pub use ...::<Name>;` re-export filtering.
+    let ws = std::env::temp_dir().join(format!("rsharp_ra_cfg_test_reexp_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[package]\nname = \"reexp_demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("src").join("lib.rs"),
+        concat!(
+            "#[cfg(test)]\n",
+            "pub use crate::sub::TestBinding;\n",
+            "#[cfg(test)]\n",
+            "pub use BareBinding;\n",
+            "#[cfg(test)]\n",
+            "pub use crate::sub::*;\n",
+            "#[cfg(test)]\n",
+            "const NOT_A_PUB_USE: i32 = 1;\n",
+        ),
+    )
+    .unwrap();
+
+    let mut stream = Vec::new();
+    stream.extend_from_slice(&frame_lsp(
+        &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+    ));
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "method": "experimental/serverStatus",
+        "params": { "quiescent": true }
+    })));
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": [
+            {"kind": 1, "position": {"line": 0, "character": 1}, "label": ": super::TestBinding"},
+            {"kind": 1, "position": {"line": 0, "character": 2}, "label": ": Option<super::TestBinding>"},
+            {"kind": 1, "position": {"line": 0, "character": 3}, "label": ": super::TestBindingExtra"},
+            {"kind": 1, "position": {"line": 0, "character": 4}, "label": ": i32"}
+        ]
+    })));
+    stream.extend_from_slice(&frame_lsp(
+        &json!({"jsonrpc": "2.0", "id": 3, "result": null}),
+    ));
+
+    let mut oracle = RustAnalyzerOracle::from_io(
+        Box::new(Cursor::new(stream)),
+        Box::new(Vec::<u8>::new()),
+        &ws,
+    )
+    .expect("from_io with cfg(test) pub use workspace");
+    let reexp_hints = oracle
+        .type_hints_for_file(&ws.join("src").join("lib.rs"), "fn f() {}")
+        .expect("hints should filter cfg(test) pub use re-exports");
+    assert_eq!(reexp_hints.get(1, 1), Some("{unknown}"));
+    assert_eq!(reexp_hints.get(1, 2), Some("{unknown}"));
+    assert_eq!(reexp_hints.get(1, 3), Some("super::TestBindingExtra"));
+    assert_eq!(reexp_hints.get(1, 4), Some("i32"));
+    oracle.close();
+    let _ = std::fs::remove_dir_all(&ws);
+}

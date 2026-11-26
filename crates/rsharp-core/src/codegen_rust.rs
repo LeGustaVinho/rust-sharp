@@ -54,6 +54,7 @@ struct RustCodegen {
     scopes: Vec<HashMap<String, VarInfo>>,
     current_self_type: Option<String>,
     in_const_fn: bool,
+    generic_depth: usize,
     first_err: Rc<RefCell<Option<RSharpError>>>,
 }
 
@@ -112,6 +113,7 @@ impl RustCodegen {
             scopes: vec![HashMap::new()],
             current_self_type: None,
             in_const_fn: false,
+            generic_depth: 0,
             first_err: Rc::new(RefCell::new(None)),
         }
     }
@@ -245,11 +247,7 @@ impl RustCodegen {
                 self.out.push('\n');
             }
             PreludeMode::None => {
-                if file
-                    .inner_attrs
-                    .iter()
-                    .any(|a| matches!(a.name.as_str(), "Deny" | "deny"))
-                {
+                if !file.items.is_empty() {
                     self.line("#![allow(unused_parens, unused_braces, unreachable_code)]");
                 }
             }
@@ -745,6 +743,9 @@ impl RustCodegen {
         };
         let prev_self = self.current_self_type.clone();
         self.current_self_type = type_to_struct_name(&im.target_ty);
+        if !im.generics.is_empty() {
+            self.generic_depth += 1;
+        }
         self.line(&header);
         self.indent += 1;
         self.emit_inner_docs_and_attrs(&im.inner_docs, &im.inner_attrs);
@@ -797,9 +798,15 @@ impl RustCodegen {
                         self.line(&format!("{};", s));
                     }
                 }
+                ImplItem::RawRust(raw) => {
+                    self.line(raw);
+                }
             }
         }
         self.indent -= 1;
+        if !im.generics.is_empty() {
+            self.generic_depth -= 1;
+        }
         self.current_self_type = prev_self;
         self.line("}");
     }
@@ -861,9 +868,15 @@ impl RustCodegen {
             self.line(&format!("{} {{", sig));
             let prev_const = self.in_const_fn;
             self.in_const_fn = f.is_const;
+            if !f.generics.is_empty() {
+                self.generic_depth += 1;
+            }
             self.indent += 1;
             self.emit_block_stmts(body);
             self.indent -= 1;
+            if !f.generics.is_empty() {
+                self.generic_depth -= 1;
+            }
             self.in_const_fn = prev_const;
             self.line("}");
         } else {
@@ -1045,6 +1058,9 @@ impl RustCodegen {
                 if let Type::ImplTrait(bounds) = ty {
                     self.line(&format!("let {}{}{};", m, rname, init_s));
                     if let Some(chk) = self.fmt_impl_trait_check(&rname, bounds) {
+                        for a in &stmt.attrs {
+                            self.line(&format_attr(a));
+                        }
                         self.line(&chk);
                     }
                 } else {
@@ -1063,7 +1079,7 @@ impl RustCodegen {
                     self.register_pattern_vars(pat);
                 } else {
                     self.line(&format!("let {} = {};", pat_s, rhs));
-                    self.emit_pattern_type_checks(pat);
+                    self.emit_pattern_type_checks_with_attrs(pat, &stmt.attrs);
                 }
             }
             StmtKind::DestructureAssign { pat, value } => {
@@ -1106,16 +1122,21 @@ impl RustCodegen {
             StmtKind::Require {
                 expr,
                 pat,
+                ty,
                 else_block,
             } => {
                 let pat_s = self.fmt_pattern(pat);
+                let ty_s = ty
+                    .as_ref()
+                    .map(|t| format!(": {}", self.fmt_type(t)))
+                    .unwrap_or_default();
                 let raw_expr = self.fmt_expr(expr);
                 let expr_s = if expr_needs_require_parens(expr) {
                     format!("({})", raw_expr)
                 } else {
                     raw_expr
                 };
-                self.line(&format!("let {} = {} else {{", pat_s, expr_s));
+                self.line(&format!("let {}{} = {} else {{", pat_s, ty_s, expr_s));
                 self.indent += 1;
                 self.emit_block_stmts(else_block);
                 self.indent -= 1;
@@ -1486,7 +1507,7 @@ impl RustCodegen {
     }
 
     fn fmt_impl_trait_check(&self, rname: &str, bounds: &[TypeBound]) -> Option<String> {
-        if self.in_const_fn {
+        if self.in_const_fn || self.generic_depth > 0 {
             return None;
         }
         let check_bounds: Vec<String> = bounds
@@ -1520,7 +1541,7 @@ impl RustCodegen {
                 if let Some(chk) = self.fmt_impl_trait_check(&rname, bounds) {
                     checks.push(chk);
                 }
-            } else {
+            } else if !type_contains_impl_trait(&ty) {
                 let ty_s = self.fmt_type(&ty);
                 checks.push(format!("let _: &{} = &{};", ty_s, rname));
             }
@@ -1529,9 +1550,16 @@ impl RustCodegen {
     }
 
     fn emit_pattern_type_checks(&mut self, pat: &Pattern) {
+        self.emit_pattern_type_checks_with_attrs(pat, &[]);
+    }
+
+    fn emit_pattern_type_checks_with_attrs(&mut self, pat: &Pattern, attrs: &[Attribute]) {
         let checks = self.collect_pattern_type_checks(pat);
         self.register_pattern_vars(pat);
         for c in checks {
+            for a in attrs {
+                self.line(&format_attr(a));
+            }
             self.line(&c);
         }
     }
@@ -2205,7 +2233,7 @@ impl RustCodegen {
                 }
             }
             Expr::Unary { op, expr } => {
-                let inner = self.fmt_expr(expr);
+                let inner = self.fmt_unary_operand(expr);
                 match op {
                     UnaryOp::Neg => format!("-{}", inner),
                     UnaryOp::Not | UnaryOp::BitNot => format!("!{}", inner),
@@ -2294,14 +2322,16 @@ impl RustCodegen {
             }
             Expr::Try(inner) => format!("({})?", self.fmt_expr(inner)),
             Expr::Await(inner) => format!("({}).await", self.fmt_expr(inner)),
-            Expr::Read(inner) | Expr::ReadSlice(inner) => format!("&{}", self.fmt_expr(inner)),
-            Expr::Write(inner) | Expr::WriteSlice(inner) => {
-                format!("&mut {}", self.fmt_expr(inner))
+            Expr::Read(inner) | Expr::ReadSlice(inner) => {
+                format!("&{}", self.fmt_unary_operand(inner))
             }
-            Expr::RawReadPtr(inner) => format!("&raw const {}", self.fmt_expr(inner)),
-            Expr::RawWritePtr(inner) => format!("&raw mut {}", self.fmt_expr(inner)),
+            Expr::Write(inner) | Expr::WriteSlice(inner) => {
+                format!("&mut {}", self.fmt_unary_operand(inner))
+            }
+            Expr::RawReadPtr(inner) => format!("&raw const {}", self.fmt_unary_operand(inner)),
+            Expr::RawWritePtr(inner) => format!("&raw mut {}", self.fmt_unary_operand(inner)),
             Expr::Take(inner) => self.fmt_expr(inner),
-            Expr::Deref(inner) => format!("*{}", self.fmt_expr(inner)),
+            Expr::Deref(inner) => format!("*{}", self.fmt_unary_operand(inner)),
             Expr::Range {
                 start,
                 end,
@@ -2704,6 +2734,7 @@ impl RustCodegen {
             scopes: self.scopes.clone(),
             current_self_type: self.current_self_type.clone(),
             in_const_fn: self.in_const_fn,
+            generic_depth: self.generic_depth,
             first_err: Rc::clone(&self.first_err),
         }
     }
@@ -2737,6 +2768,15 @@ impl RustCodegen {
             format!("({})", vs)
         } else {
             vs
+        }
+    }
+
+    fn fmt_unary_operand(&self, expr: &Expr) -> String {
+        let s = self.fmt_expr(expr);
+        if matches!(expr, Expr::Range { .. }) {
+            format!("({})", s)
+        } else {
+            s
         }
     }
 
@@ -3509,6 +3549,22 @@ fn is_std_collections_root(expr: &Expr) -> bool {
             .first()
             .is_some_and(|s| matches!(s.name.as_str(), "std" | "core" | "alloc")),
         Expr::Member { object, .. } => is_std_collections_root(object),
+        _ => false,
+    }
+}
+
+fn type_contains_impl_trait(ty: &Type) -> bool {
+    match ty {
+        Type::ImplTrait(_) => true,
+        Type::Read { inner, .. }
+        | Type::Write { inner, .. }
+        | Type::Slice(inner)
+        | Type::ReadPtr(inner)
+        | Type::WritePtr(inner)
+        | Type::Optional(inner)
+        | Type::Grouped(inner)
+        | Type::Array { elem: inner, .. } => type_contains_impl_trait(inner),
+        Type::Tuple(elems) => elems.iter().any(|e| type_contains_impl_trait(&e.ty)),
         _ => false,
     }
 }
