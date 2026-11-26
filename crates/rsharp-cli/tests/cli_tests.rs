@@ -14,6 +14,53 @@ fn temp_file(name: &str) -> PathBuf {
 }
 
 #[test]
+fn project_discovery_follows_linked_directories_and_keeps_path_order() {
+    let base = temp_file("linked_project");
+    let project = base.join("project");
+    let src = project.join("src");
+    let external = base.join("external");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"linked\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("lib.rs"), "").unwrap();
+    std::fs::write(src.join("a.rs"), "invalid {{{").unwrap();
+    std::fs::write(external.join("linked.rs"), "invalid {{{").unwrap();
+    let link = src.join("a");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&external, &link).unwrap();
+    #[cfg(windows)]
+    assert!(
+        Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/j"])
+            .arg(&link)
+            .arg(&external)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    let files = rsharp_core::discover_cargo_rs_files(&project).unwrap();
+    assert!(files.contains(&external.join("linked.rs").canonicalize().unwrap()));
+    let out = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        project.to_str().unwrap(),
+        "--no-ra",
+        "--all-rs-files",
+    ]));
+    assert_eq!(out.exit_code, 1);
+    let nested = out.stderr.find("linked.rs:").unwrap();
+    let sibling = out.stderr.find("a.rs:").unwrap();
+    assert!(nested < sibling, "{}", out.stderr);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn standalone_inference_reports_a_missing_compiler() {
     let file = temp_file("missing_rustc.rs");
     for src in [

@@ -756,10 +756,17 @@ pub fn parse_cargo_metadata_rs_files(
     }
 }
 
+fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
+    match entry.file_type() {
+        Ok(ty) if !ty.is_symlink() => ty.is_dir(),
+        _ => path.is_dir(),
+    }
+}
+
 fn collect_crate_rs_tree(dir: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && !name.starts_with('.')
                 && !matches!(name, "target" | "node_modules")
@@ -785,7 +792,7 @@ fn collect_workspace_cfg_gated_names(
         let os_name = entry.file_name();
         let name = os_name.to_string_lossy();
         let name = name.as_ref();
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             if name.starts_with('.') || name == "target" || name == "node_modules" {
                 continue;
             }

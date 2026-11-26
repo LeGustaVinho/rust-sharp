@@ -255,6 +255,7 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
     } else {
         let mut files = Vec::new();
         collect_project_rs_files(&project_dir, &mut files);
+        files.sort_unstable();
         files
     };
     if rs_files.is_empty() {
@@ -423,15 +424,13 @@ fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         "third_party",
     ];
     let in_src = dir.file_name().and_then(|n| n.to_str()) == Some("src");
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = entry.path();
+        let is_dir = match entry.file_type() {
+            Ok(ty) if !ty.is_symlink() => ty.is_dir(),
+            _ => p.is_dir(),
+        };
+        if is_dir {
             if let Some(name) = p.file_name().and_then(|n| n.to_str())
                 && !name.starts_with('.')
                 && !SKIP.contains(&name)
