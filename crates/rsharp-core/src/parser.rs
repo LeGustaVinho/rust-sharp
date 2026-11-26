@@ -33,6 +33,8 @@ struct Parser<'a> {
     pos: usize,
     /// Set when a `>>` (`Shr`) token was split to close a nested generic `<...<...>>`.
     pending_gt: bool,
+    /// True at the top level of a `match` arm `when <guard>` so `(expr) =>` is not stolen as a lambda.
+    in_match_guard: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -42,6 +44,7 @@ impl<'a> Parser<'a> {
             tokens,
             pos: 0,
             pending_gt: false,
+            in_match_guard: false,
         }
     }
 
@@ -154,6 +157,10 @@ impl<'a> Parser<'a> {
 
     fn check_contextual(&self, word: &str) -> bool {
         matches!(self.peek_kind(), TokenKind::Ident { name, verbatim: false } if name == word)
+    }
+
+    fn is_contextual_at(&self, offset: usize, word: &str) -> bool {
+        matches!(&self.peek_at(offset).kind, TokenKind::Ident { name, verbatim: false } if name == word)
     }
 
     fn eat_contextual(&mut self, word: &str) -> bool {
@@ -615,17 +622,67 @@ impl<'a> Parser<'a> {
                 kind: ItemKind::Union(u),
             });
         }
-        if self.check_kw(Keyword::Trait) {
-            let t = self.parse_trait(false)?;
+        if self.eat_kw(Keyword::Type) {
+            let name = self.expect_ident()?;
+            self.expect(&TokenKind::Semicolon, "';' after type declaration")?;
             return Ok(Item {
                 docs,
                 attrs,
                 vis,
-                kind: ItemKind::Trait(t),
+                kind: ItemKind::ForeignType(name),
             });
         }
+        if self.check_kw(Keyword::Trait) {
+            let kind = self.parse_trait_or_alias(false, false)?;
+            return Ok(Item {
+                docs,
+                attrs,
+                vis,
+                kind,
+            });
+        }
+        if self.is_contextual_at(0, "auto")
+            && matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait))
+        {
+            self.bump();
+            let kind = self.parse_trait_or_alias(false, true)?;
+            return Ok(Item {
+                docs,
+                attrs,
+                vis,
+                kind,
+            });
+        }
+        if self.is_contextual_at(0, "default") {
+            if matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Impl))
+                && self.is_impl_block_at(1)
+            {
+                self.bump();
+                let i = self.parse_impl(false, true)?;
+                return Ok(Item {
+                    docs,
+                    attrs,
+                    vis,
+                    kind: ItemKind::Impl(i),
+                });
+            }
+            if matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Unsafe))
+                && matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::Impl))
+                && self.is_impl_block_at(2)
+            {
+                self.bump();
+                self.bump();
+                let i = self.parse_impl(true, true)?;
+                return Ok(Item {
+                    docs,
+                    attrs,
+                    vis,
+                    kind: ItemKind::Impl(i),
+                });
+            }
+        }
         if self.check_kw(Keyword::Impl) && self.is_impl_block_at(0) {
-            let i = self.parse_impl(false)?;
+            let i = self.parse_impl(false, false)?;
             return Ok(Item {
                 docs,
                 attrs,
@@ -654,19 +711,32 @@ impl<'a> Parser<'a> {
         if self.check_kw(Keyword::Unsafe) {
             if matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait)) {
                 self.bump();
-                let t = self.parse_trait(true)?;
+                let kind = self.parse_trait_or_alias(true, false)?;
                 return Ok(Item {
                     docs,
                     attrs,
                     vis,
-                    kind: ItemKind::Trait(t),
+                    kind,
+                });
+            }
+            if self.is_contextual_at(1, "auto")
+                && matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::Trait))
+            {
+                self.bump();
+                self.bump();
+                let kind = self.parse_trait_or_alias(true, true)?;
+                return Ok(Item {
+                    docs,
+                    attrs,
+                    vis,
+                    kind,
                 });
             }
             if matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Impl))
                 && self.is_impl_block_at(1)
             {
                 self.bump();
-                let i = self.parse_impl(true)?;
+                let i = self.parse_impl(true, false)?;
                 return Ok(Item {
                     docs,
                     attrs,
@@ -742,7 +812,7 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.bump(); // 'impl'
-        let is_block = if self.check(&TokenKind::Lt) {
+        let is_block = if self.check(&TokenKind::Lt) || self.check(&TokenKind::Bang) {
             true
         } else if self.parse_type().is_ok() {
             self.check_kw(Keyword::For)
@@ -1448,10 +1518,27 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_trait(&mut self, is_unsafe: bool) -> Result<TraitDecl> {
+    fn parse_trait_or_alias(&mut self, is_unsafe: bool, is_auto: bool) -> Result<ItemKind> {
         self.bump(); // 'trait'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
+        if !is_unsafe && !is_auto && self.eat(&TokenKind::Eq) {
+            let mut bounds = vec![self.parse_type_bound()?];
+            while self.eat(&TokenKind::Plus) || self.eat(&TokenKind::Comma) {
+                if self.check(&TokenKind::Semicolon) || self.check_kw(Keyword::Where) {
+                    break;
+                }
+                bounds.push(self.parse_type_bound()?);
+            }
+            let where_clause = self.parse_where_clause()?;
+            self.expect(&TokenKind::Semicolon, "';' after trait alias")?;
+            return Ok(ItemKind::TraitAlias(TraitAliasDecl {
+                name,
+                generics,
+                bounds,
+                where_clause,
+            }));
+        }
         let mut supertraits = Vec::new();
         if self.eat(&TokenKind::Colon) {
             supertraits.push(self.parse_type_bound()?);
@@ -1534,8 +1621,9 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
-        Ok(TraitDecl {
+        Ok(ItemKind::Trait(TraitDecl {
             is_unsafe,
+            is_auto,
             name,
             generics,
             supertraits,
@@ -1543,12 +1631,13 @@ impl<'a> Parser<'a> {
             inner_docs,
             inner_attrs,
             items,
-        })
+        }))
     }
 
-    fn parse_impl(&mut self, is_unsafe: bool) -> Result<ImplDecl> {
+    fn parse_impl(&mut self, is_unsafe: bool, is_default: bool) -> Result<ImplDecl> {
         self.bump(); // 'impl'
         let generics = self.parse_generic_params()?;
+        let is_negative = self.eat(&TokenKind::Bang);
         let first_ty = self.parse_type()?;
         let (trait_path, target_ty) = if self.eat_kw(Keyword::For) {
             let tp = match first_ty {
@@ -1573,8 +1662,11 @@ impl<'a> Parser<'a> {
                 let aname = self.expect_ident()?;
                 let agens = self.parse_generic_params()?;
                 let mut awhere = self.parse_where_clause()?;
-                self.expect(&TokenKind::Eq, "'='")?;
-                let ty = self.parse_type()?;
+                let ty = if self.eat(&TokenKind::Eq) {
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
                 if awhere.is_none() {
                     awhere = self.parse_where_clause()?;
                 }
@@ -1614,7 +1706,9 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
         Ok(ImplDecl {
+            is_default,
             is_unsafe,
+            is_negative,
             generics,
             trait_path,
             target_ty,
@@ -2418,17 +2512,30 @@ impl<'a> Parser<'a> {
 
     fn parse_block(&mut self) -> Result<Block> {
         self.expect(&TokenKind::LBrace, "'{'")?;
-        let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
-        let mut stmts = Vec::new();
-        while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            stmts.push(self.parse_stmt()?);
-        }
-        self.expect(&TokenKind::RBrace, "'}'")?;
-        Ok(Block {
-            inner_docs,
-            inner_attrs,
-            stmts,
-        })
+        let prev_guard = self.in_match_guard;
+        self.in_match_guard = false;
+        let res = (|| {
+            let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
+            let mut stmts = Vec::new();
+            while !self.check(&TokenKind::RBrace) && !self.is_eof() {
+                stmts.push(self.parse_stmt()?);
+            }
+            self.expect(&TokenKind::RBrace, "'}'")?;
+            Ok(Block {
+                inner_docs,
+                inner_attrs,
+                stmts,
+            })
+        })();
+        self.in_match_guard = prev_guard;
+        res
+    }
+
+    fn block_stmt_continues_postfix(&self) -> bool {
+        let end_line = self.tokens[self.pos.saturating_sub(1)].span.line;
+        matches!(self.peek_kind(), TokenKind::Dot | TokenKind::Question)
+            || (matches!(self.peek_kind(), TokenKind::LBracket | TokenKind::LParen)
+                && self.peek().span.line == end_line)
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
@@ -2448,14 +2555,9 @@ impl<'a> Parser<'a> {
             break;
         }
 
-        if self.check_kw(Keyword::Var) {
-            return Err(self.err_here(
-                "Implicit typing with 'var' is forbidden in R#; specify an explicit type",
-            ));
-        }
         if self.check_kw(Keyword::Let) {
             return Err(self.err_here(
-                "Rust-style 'let' is not used in R#; declare variables with an explicit type (e.g. 'int x = 10;')",
+                "Rust-style 'let' is not used in R#; declare variables with an explicit type or 'var' (e.g. 'int x = 10;' or 'var x = 10;')",
             ));
         }
 
@@ -2467,10 +2569,16 @@ impl<'a> Parser<'a> {
         }
 
         if self.check(&TokenKind::LBrace) {
-            return Ok(Stmt {
-                attrs,
-                kind: StmtKind::Block(self.parse_block()?),
-            });
+            let save = self.checkpoint();
+            let block = self.parse_block()?;
+            if self.block_stmt_continues_postfix() {
+                self.restore(save);
+            } else {
+                return Ok(Stmt {
+                    attrs,
+                    kind: StmtKind::Block(block),
+                });
+            }
         }
 
         if let TokenKind::RustBlock(raw) = self.peek_kind().clone() {
@@ -2511,10 +2619,16 @@ impl<'a> Parser<'a> {
         }
 
         if self.check_kw(Keyword::If) {
-            return Ok(Stmt {
-                attrs,
-                kind: StmtKind::If(self.parse_if()?),
-            });
+            let save = self.checkpoint();
+            let if_stmt = self.parse_if()?;
+            if self.block_stmt_continues_postfix() {
+                self.restore(save);
+            } else {
+                return Ok(Stmt {
+                    attrs,
+                    kind: StmtKind::If(if_stmt),
+                });
+            }
         }
         if self.check_kw(Keyword::Require) {
             let mut st = self.parse_require()?;
@@ -2544,11 +2658,7 @@ impl<'a> Parser<'a> {
         if self.check_kw(Keyword::Match) {
             let save = self.checkpoint();
             let m = self.parse_match()?;
-            let end_line = self.tokens[self.pos.saturating_sub(1)].span.line;
-            let is_postfix = matches!(self.peek_kind(), TokenKind::Dot | TokenKind::Question)
-                || (matches!(self.peek_kind(), TokenKind::LBracket | TokenKind::LParen)
-                    && self.peek().span.line == end_line);
-            if is_postfix {
+            if self.block_stmt_continues_postfix() {
                 self.restore(save);
             } else {
                 return Ok(Stmt {
@@ -2561,11 +2671,7 @@ impl<'a> Parser<'a> {
             let save = self.checkpoint();
             self.bump();
             let block = self.parse_block()?;
-            let end_line = self.tokens[self.pos.saturating_sub(1)].span.line;
-            let is_postfix = matches!(self.peek_kind(), TokenKind::Dot | TokenKind::Question)
-                || (matches!(self.peek_kind(), TokenKind::LBracket | TokenKind::LParen)
-                    && self.peek().span.line == end_line);
-            if is_postfix {
+            if self.block_stmt_continues_postfix() {
                 self.restore(save);
             } else {
                 return Ok(Stmt {
@@ -2642,7 +2748,9 @@ impl<'a> Parser<'a> {
         }
 
         let expr = self.parse_expr()?;
-        if matches!(&expr, Expr::MacroCall(mc) if mc.delim == MacroDelim::Brace) {
+        if matches!(&expr, Expr::TryBlock(_))
+            || matches!(&expr, Expr::MacroCall(mc) if mc.delim == MacroDelim::Brace)
+        {
             self.eat(&TokenKind::Semicolon);
             return Ok(Stmt {
                 attrs,
@@ -2705,10 +2813,23 @@ impl<'a> Parser<'a> {
         }
         if self.check_kw(Keyword::Unsafe) {
             return matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait))
+                || (self.is_contextual_at(1, "auto")
+                    && matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::Trait)))
                 || (matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Impl))
                     && self.is_impl_block_at(1))
                 || self.is_extern_block_at(1)
                 || self.is_local_fn_decl();
+        }
+        if (self.is_contextual_at(0, "auto")
+            && matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait)))
+            || (self.is_contextual_at(0, "default")
+                && ((matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Impl))
+                    && self.is_impl_block_at(1))
+                    || (matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Unsafe))
+                        && matches!(self.peek_at(2).kind, TokenKind::Kw(Keyword::Impl))
+                        && self.is_impl_block_at(2))))
+        {
+            return true;
         }
         if self.check_kw(Keyword::Extern) {
             return matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Crate))
@@ -2765,6 +2886,33 @@ impl<'a> Parser<'a> {
     }
 
     fn try_parse_destructure_stmt(&mut self) -> Result<Option<Stmt>> {
+        if self.check_kw(Keyword::Var) {
+            let save = self.checkpoint();
+            self.bump(); // 'var'
+            if matches!(self.peek_kind(), TokenKind::Ident { .. })
+                && matches!(self.peek_at(1).kind, TokenKind::Eq | TokenKind::Semicolon)
+            {
+                self.restore(save);
+                return Ok(None);
+            }
+            let pat = self.parse_single_pattern()?;
+            let explicit_ty = if self.eat(&TokenKind::Colon) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            let init = if self.eat(&TokenKind::Eq) {
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            self.expect(&TokenKind::Semicolon, "';'")?;
+            return Ok(Some(Stmt::plain(StmtKind::Destructure {
+                pat,
+                explicit_ty,
+                init,
+            })));
+        }
         if !matches!(
             self.peek_kind(),
             TokenKind::LParen
@@ -2813,7 +2961,7 @@ impl<'a> Parser<'a> {
                         StmtKind::Destructure {
                             pat,
                             explicit_ty,
-                            init,
+                            init: Some(init),
                         }
                     } else {
                         StmtKind::DestructureAssign { pat, value: init }
@@ -2829,21 +2977,26 @@ impl<'a> Parser<'a> {
         let save = self.checkpoint();
         let is_shadow = self.eat_kw(Keyword::Shadow);
         let is_mut = self.eat_kw(Keyword::Mut);
-        let forced = is_shadow || is_mut;
+        let is_var = self.eat_kw(Keyword::Var);
+        let forced = is_shadow || is_mut || is_var;
 
-        let ty = match self.parse_type() {
-            Ok(t) => t,
-            Err(e) => {
-                if e.to_string()
-                    .contains("Array type requires explicit length")
-                {
-                    return Err(e);
+        let ty = if is_var {
+            Type::Infer
+        } else {
+            match self.parse_type() {
+                Ok(t) => t,
+                Err(e) => {
+                    if e.to_string()
+                        .contains("Array type requires explicit length")
+                    {
+                        return Err(e);
+                    }
+                    self.restore(save);
+                    if forced {
+                        return Err(e);
+                    }
+                    return Ok(None);
                 }
-                self.restore(save);
-                if forced {
-                    return Err(e);
-                }
-                return Ok(None);
             }
         };
 
@@ -3012,13 +3165,24 @@ impl<'a> Parser<'a> {
             let attrs = self.try_parse_contextual_attrs(true);
             let pat = self.parse_pattern()?;
             let guard = if self.eat_kw(Keyword::When) {
-                Some(self.parse_condition()?)
+                let prev_guard = self.in_match_guard;
+                self.in_match_guard = true;
+                let res = self.parse_condition();
+                self.in_match_guard = prev_guard;
+                Some(res?)
             } else {
                 None
             };
             self.expect(&TokenKind::FatArrow, "'=>' in match arm")?;
             let body = if self.check(&TokenKind::LBrace) {
-                MatchArmBody::Block(self.parse_block()?)
+                let save = self.checkpoint();
+                let block = self.parse_block()?;
+                if self.block_stmt_continues_postfix() {
+                    self.restore(save);
+                    MatchArmBody::Expr(self.parse_expr()?)
+                } else {
+                    MatchArmBody::Block(block)
+                }
             } else {
                 let expr = self.parse_expr()?;
                 MatchArmBody::Expr(expr)
@@ -3064,7 +3228,7 @@ impl<'a> Parser<'a> {
             } else {
                 (None, self.eat_kw(Keyword::Mut))
             };
-            let ty = self.parse_type()?;
+            let ty = self.parse_type_inner(true)?;
             let name = self.expect_ident()?;
             return Ok(Pattern::BindAt {
                 ref_mode,
@@ -3099,7 +3263,7 @@ impl<'a> Parser<'a> {
             return Ok(Pattern::Rest);
         }
 
-        // Borrow-out pattern: `borrow read T x` / `borrow write T x`
+        // Borrow-out pattern: `borrow read [T] x` / `borrow write [T] x`
         if self.eat_kw(Keyword::Borrow) {
             let mode = if self.eat_kw(Keyword::Write) {
                 RefMode::Write
@@ -3107,7 +3271,26 @@ impl<'a> Parser<'a> {
                 self.expect_kw(Keyword::Read)?;
                 RefMode::Read
             };
-            let ty = self.parse_type()?;
+            if matches!(self.peek_kind(), TokenKind::Ident { .. })
+                && !matches!(
+                    self.peek_at(1).kind,
+                    TokenKind::Ident { .. }
+                        | TokenKind::Lt
+                        | TokenKind::Dot
+                        | TokenKind::ColonColon
+                        | TokenKind::LBracket
+                        | TokenKind::Question
+                        | TokenKind::QuestionQuestion
+                )
+            {
+                let name = self.eat_ident().unwrap();
+                return Ok(Pattern::BorrowRef {
+                    mode,
+                    ty: Type::Infer,
+                    name,
+                });
+            }
+            let ty = self.parse_type_inner(true)?;
             let name = self.expect_ident()?;
             return Ok(Pattern::BorrowRef { mode, ty, name });
         }
@@ -3957,7 +4140,8 @@ impl<'a> Parser<'a> {
                 target: Box::new(self.parse_unary()?),
             });
         }
-        if self.eat_kw(Keyword::Try) {
+        if self.check_kw(Keyword::Try) && !matches!(self.peek_at(1).kind, TokenKind::LBrace) {
+            self.bump();
             return Ok(Expr::Try(Box::new(self.parse_unary()?)));
         }
         if self.eat_kw(Keyword::Await) {
@@ -4095,8 +4279,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             } else if self.check(&TokenKind::LParen)
-                && !((matches!(&expr, Expr::UnsafeBlock(_) | Expr::Match(_))
-                    || matches!(&expr, Expr::MacroCall(mc) if mc.delim == MacroDelim::Brace))
+                && !(is_block_like_expr(&expr)
                     && self.peek().span.line > self.tokens[self.pos.saturating_sub(1)].span.line)
             {
                 self.bump();
@@ -4107,8 +4290,7 @@ impl<'a> Parser<'a> {
                     args,
                 };
             } else if self.check(&TokenKind::LBracket)
-                && !((matches!(&expr, Expr::UnsafeBlock(_) | Expr::Match(_))
-                    || matches!(&expr, Expr::MacroCall(mc) if mc.delim == MacroDelim::Brace))
+                && !(is_block_like_expr(&expr)
                     && self.peek().span.line > self.tokens[self.pos.saturating_sub(1)].span.line)
             {
                 self.bump();
@@ -4189,15 +4371,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_arg_list(&mut self) -> Result<Vec<Expr>> {
-        let mut args = Vec::new();
-        while !self.check(&TokenKind::RParen) && !self.is_eof() {
-            args.push(self.parse_expr()?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
+        let prev_guard = self.in_match_guard;
+        self.in_match_guard = false;
+        let res = (|| {
+            let mut args = Vec::new();
+            while !self.check(&TokenKind::RParen) && !self.is_eof() {
+                args.push(self.parse_expr()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
-        }
-        self.expect(&TokenKind::RParen, "')'")?;
-        Ok(args)
+            self.expect(&TokenKind::RParen, "')'")?;
+            Ok(args)
+        })();
+        self.in_match_guard = prev_guard;
+        res
     }
 
     fn parse_macro_call_body(&mut self, global: bool, path: Vec<String>) -> Result<MacroCall> {
@@ -4264,9 +4452,13 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Continue { label });
         }
 
-        // Expression-bodied `if (cond) => expr else if (...) => expr else => expr`
+        // Expression-bodied or block-bodied `if` expression
         if self.check_kw(Keyword::If) {
             return self.parse_if_expr();
+        }
+
+        if self.check(&TokenKind::LBrace) {
+            return Ok(Expr::ValueBlock(self.parse_block()?));
         }
 
         if self.check_kw(Keyword::Match) {
@@ -4319,6 +4511,17 @@ impl<'a> Parser<'a> {
         if self.check_kw(Keyword::Unsafe) && matches!(self.peek_at(1).kind, TokenKind::LBrace) {
             self.bump();
             return Ok(Expr::UnsafeBlock(self.parse_block()?));
+        }
+
+        if self.eat_kw(Keyword::Try) {
+            return Ok(Expr::TryBlock(self.parse_block()?));
+        }
+
+        if self.is_contextual_at(0, "yield")
+            && starts_expr_after_control_flow(&self.peek_at(1).kind)
+        {
+            self.bump();
+            return Ok(Expr::Yield(Box::new(self.parse_expr()?)));
         }
 
         // Async lambda `async (int x) => ...` or async block `async take? { ... }`
@@ -4502,36 +4705,42 @@ impl<'a> Parser<'a> {
                 if self.eat(&TokenKind::RParen) {
                     return Ok(Expr::TupleLit(Vec::new()));
                 }
-                let first = self.parse_expr()?;
-                if self.eat(&TokenKind::Comma) {
-                    let mut elems = vec![first];
-                    while !self.check(&TokenKind::RParen) && !self.is_eof() {
-                        elems.push(self.parse_expr()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
+                let prev_guard = self.in_match_guard;
+                self.in_match_guard = false;
+                let res = (|| {
+                    let first = self.parse_expr()?;
+                    if self.eat(&TokenKind::Comma) {
+                        let mut elems = vec![first];
+                        while !self.check(&TokenKind::RParen) && !self.is_eof() {
+                            elems.push(self.parse_expr()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect(&TokenKind::RParen, "')'")?;
+                        Ok(Expr::TupleLit(elems))
+                    } else {
+                        self.expect(&TokenKind::RParen, "')'")?;
+                        let keep_group = (matches!(
+                            first,
+                            Expr::Member { .. } | Expr::TupleIndex { .. } | Expr::Lambda { .. }
+                        ) && self.check(&TokenKind::LParen))
+                            || (matches!(
+                                first,
+                                Expr::Path { .. }
+                                    | Expr::Member { .. }
+                                    | Expr::Ident(_)
+                                    | Expr::IfExpr { .. }
+                            ) && self.check(&TokenKind::Dot));
+                        if keep_group {
+                            Ok(Expr::Group(Box::new(first)))
+                        } else {
+                            Ok(first)
                         }
                     }
-                    self.expect(&TokenKind::RParen, "')'")?;
-                    Ok(Expr::TupleLit(elems))
-                } else {
-                    self.expect(&TokenKind::RParen, "')'")?;
-                    let keep_group = (matches!(
-                        first,
-                        Expr::Member { .. } | Expr::TupleIndex { .. } | Expr::Lambda { .. }
-                    ) && self.check(&TokenKind::LParen))
-                        || (matches!(
-                            first,
-                            Expr::Path { .. }
-                                | Expr::Member { .. }
-                                | Expr::Ident(_)
-                                | Expr::IfExpr { .. }
-                        ) && self.check(&TokenKind::Dot));
-                    if keep_group {
-                        Ok(Expr::Group(Box::new(first)))
-                    } else {
-                        Ok(first)
-                    }
-                }
+                })();
+                self.in_match_guard = prev_guard;
+                res
             }
             TokenKind::LBracket => {
                 self.bump();
@@ -4634,6 +4843,23 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen, "'(' after 'if'")?;
         let cond = self.parse_condition()?;
         self.expect(&TokenKind::RParen, "')'")?;
+        if self.check(&TokenKind::LBrace) {
+            let then_block = self.parse_block()?;
+            let else_branch = if self.eat_kw(Keyword::Else) {
+                if self.check_kw(Keyword::If) {
+                    Some(ElseBranch::ElseIf(Box::new(self.parse_if()?)))
+                } else {
+                    Some(ElseBranch::Else(self.parse_block()?))
+                }
+            } else {
+                None
+            };
+            return Ok(Expr::IfBlock(Box::new(IfStmt {
+                cond,
+                then_block,
+                else_branch,
+            })));
+        }
         self.expect(&TokenKind::FatArrow, "'=>' in expression-bodied 'if'")?;
         let then_expr = self.parse_expr()?;
         self.expect_kw(Keyword::Else)?;
@@ -4715,6 +4941,9 @@ impl<'a> Parser<'a> {
     }
 
     fn try_parse_lambda(&mut self) -> Result<Option<Expr>> {
+        if self.in_match_guard {
+            return Ok(None);
+        }
         let save = self.checkpoint();
         let is_async = self.eat_kw(Keyword::Async);
         let is_move = self.eat_kw(Keyword::Take);
@@ -4726,7 +4955,7 @@ impl<'a> Parser<'a> {
             self.restore(save);
             return Ok(None);
         };
-        if variadic.is_some() || !params.iter().all(lambda_param_is_typed) {
+        if variadic.is_some() || params.iter().any(|p| matches!(p, Param::Receiver { .. })) {
             self.restore(save);
             return Ok(None);
         }
@@ -4757,30 +4986,6 @@ impl<'a> Parser<'a> {
             ret_ty,
             body,
         }))
-    }
-}
-
-fn lambda_param_is_typed(param: &Param) -> bool {
-    match param {
-        Param::Normal { .. } => true,
-        Param::Pattern {
-            pat, explicit_ty, ..
-        } => {
-            explicit_ty.is_some()
-                || matches!(
-                    pat,
-                    Pattern::Wildcard
-                        | Pattern::Tuple(_)
-                        | Pattern::Struct { .. }
-                        | Pattern::Slice(_)
-                        | Pattern::BorrowRef { .. }
-                        | Pattern::BindAt { .. }
-                )
-                || (matches!(pat, Pattern::TupleStruct { .. } | Pattern::DerefPat { .. })
-                    && (pattern_has_explicit_type(pat)
-                        || matches!(pat, Pattern::DerefPat { inner, .. } if matches!(inner.as_ref(), Pattern::Wildcard))))
-        }
-        Param::Receiver { .. } => false,
     }
 }
 
@@ -5071,6 +5276,17 @@ fn is_binary_or_postfix_continuation(kind: &TokenKind) -> bool {
             | TokenKind::QuestionQuestion
             | TokenKind::Kw(Keyword::As | Keyword::With | Keyword::Is)
     )
+}
+
+fn is_block_like_expr(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::UnsafeBlock(_)
+            | Expr::TryBlock(_)
+            | Expr::Match(_)
+            | Expr::IfBlock(_)
+            | Expr::ValueBlock(_)
+    ) || matches!(expr, Expr::MacroCall(mc) if mc.delim == MacroDelim::Brace)
 }
 
 fn build_macro_call(global: bool, path: Vec<String>, delim: char, body: String) -> MacroCall {

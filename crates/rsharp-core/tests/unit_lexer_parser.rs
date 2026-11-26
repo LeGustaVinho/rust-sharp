@@ -150,9 +150,8 @@ fn test_lexer_error_cases() {
 
 #[test]
 fn test_parser_strict_rejections() {
-    // Rejects `var`
-    let err = parse_file("void main() { var x = 10; }").unwrap_err();
-    assert!(err.to_string().contains("var"));
+    // Accepts C#-style inferred `var`
+    assert!(parse_file("void main() { var x = 10; }").is_ok());
 
     // Rejects `let`
     let err = parse_file("void main() { let x = 10; }").unwrap_err();
@@ -660,9 +659,9 @@ public void TestEdgeStatements(Boxed b, (int, int) pair)
     assert!(parse_file("void f(int x) { return 1").is_err());
 
     let tmp_bin = std::env::temp_dir().join("rsharp_never_created_bin");
-    assert!(rsharp_core::build_rsharp("void main() { var x = 1; }", &tmp_bin).is_err());
-    assert!(rsharp_core::run_rsharp("void main() { var x = 1; }").is_err());
-    assert!(rsharp_core::check_rsharp("void main() { var x = 1; }").is_err());
+    assert!(rsharp_core::build_rsharp("void main() { let x = 1; }", &tmp_bin).is_err());
+    assert!(rsharp_core::run_rsharp("void main() { let x = 1; }").is_err());
+    assert!(rsharp_core::check_rsharp("void main() { let x = 1; }").is_err());
     assert!(rsharp_core::run_rsharp("void main() { int x = \"bad\"; }").is_err());
 
     // Extra parser & codegen branch coverage

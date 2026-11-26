@@ -1651,7 +1651,11 @@ impl<'a> Scanner<'a> {
                 | TokenKind::RParen
                 | TokenKind::Question
                 | TokenKind::Kw(
-                    Keyword::Void | Keyword::Never | Keyword::Dynamic | Keyword::SelfType
+                    Keyword::Void
+                        | Keyword::Never
+                        | Keyword::Dynamic
+                        | Keyword::SelfType
+                        | Keyword::Var
                 )
         ) {
             return false;

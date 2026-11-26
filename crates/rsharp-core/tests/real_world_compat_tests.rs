@@ -793,8 +793,9 @@ fn test_hints(flag: bool) {
     assert!(rsh.contains("AtomicPtr<byte> a13"));
     assert!(rsh.contains("Box<dyn LocalTrait + Send> a24"));
     assert!(rsh.contains("Box<dyn ImportedTrait + Send> a25"));
-    assert!(rsh.contains("rust { let a15 ="));
-    assert!(rsh.contains("rust { let a23 ="));
+    assert!(rsh.contains("var a15 ="), "got:\n{rsh}");
+    assert!(rsh.contains("var a23 ="), "got:\n{rsh}");
+    assert!(!rsh.contains("rust {"), "got:\n{rsh}");
 
     // 2. Pattern destructuring with hints: Tuple, Slice, TupleStruct, Struct, Reference, Paren, Wild, Rest
     let pat_src = r#"
@@ -935,23 +936,61 @@ fn break_and_loop_jumps(items: &[i32]) -> i32 {
     assert!(cx_rsh.contains("Option<read<static> str>"));
     assert!(cx_rsh.contains("(read str)[2]"));
     assert!(cx_rsh.contains("break (out);"));
-    assert!(cx_rsh.contains("break __blk_val (-10);"));
+    assert!(cx_rsh.contains("return -10;"), "got:\n{cx_rsh}");
+    assert!(!cx_rsh.contains("__blk_val"), "got:\n{cx_rsh}");
     assert!(cx_rsh.contains("Box<dyn std.any.Any + Send>"));
     assert!(cx_rust.contains("api::BUDGET"));
     assert!(cx_rust.contains("return my_macro!{ 42 };"));
 
     // 4. Closure parameter hints & strict vs non-strict fallback
-    let clo_src = "fn f() { let _ = [1].iter().map(|x| x + 1); }";
+    let clo_src = "fn f() { let _ = [1].iter().copied().map(|x| x + 1); }";
     let mut clo_hints = TypeHintMap::default();
-    clo_hints.insert(1, 34, "&i32".to_string());
+    clo_hints.insert(1, 43, "i32".to_string());
     let (clo_rsh, _) = roundtrip_and_check(clo_src, &clo_hints, false);
-    assert!(clo_rsh.contains("(read int x) =>"));
+    assert!(clo_rsh.contains("(int x) =>"), "got:\n{clo_rsh}");
 
-    // Unnameable closure param: strict=false -> rust{...}, strict=true -> Err
+    // Elided-ref closure param hint (`&str`) must stay inferred when strict=false so Rust
+    // return-lifetime unification (`let id = |x| x;`) keeps compiling, while `read_count`
+    // (identifier containing `read`) is not misdetected as a `read ` keyword.
+    let clo_ref_src = "fn f() -> &'static str { let id = |x| x; id(\"ok\") }";
+    let mut clo_ref_hints = TypeHintMap::default();
+    clo_ref_hints.insert(1, 36, "&str".to_string());
+    let (clo_ref_rsh, _) = roundtrip_and_check(clo_ref_src, &clo_ref_hints, false);
+    assert!(clo_ref_rsh.contains("(x) =>"), "got:\n{clo_ref_rsh}");
+    let clo_ref_strict_src = "fn f() { let _ = [\"a\"].iter().map(|x| x); }";
+    let mut clo_ref_strict_hints = TypeHintMap::default();
+    clo_ref_strict_hints.insert(1, 36, "&str".to_string());
+    let (clo_ref_strict, _) = roundtrip_and_check(clo_ref_strict_src, &clo_ref_strict_hints, true);
+    assert!(
+        clo_ref_strict.contains("(read str x) =>"),
+        "got:\n{clo_ref_strict}"
+    );
+    let mut clo_opt_ref_hints = TypeHintMap::default();
+    clo_opt_ref_hints.insert(1, 36, "Option<&str>".to_string());
+    let (clo_opt_ref_rsh, _) = roundtrip_and_check(clo_ref_src, &clo_opt_ref_hints, false);
+    assert!(
+        clo_opt_ref_rsh.contains("(x) =>"),
+        "got:\n{clo_opt_ref_rsh}"
+    );
+    let mut non_ref_read_ident_hints = TypeHintMap::default();
+    non_ref_read_ident_hints.insert(1, 43, "unread".to_string());
+    let (unread_rsh, _) = roundtrip_and_check(clo_src, &non_ref_read_ident_hints, false);
+    assert!(unread_rsh.contains("(unread x) =>"), "got:\n{unread_rsh}");
+
+    // Bare fn pointer hint with elided ref input (`fn(&str) -> i32`) falls back to `var`
+    // so generic fn items do not fail E0308 HRTB coercion.
+    let fn_ptr_src = "fn g<T: AsRef<str>>(_: T) -> i32 { 1 }\nfn f(c: bool) -> i32 { let r = if c { g } else { g }; r(\"a\") }";
+    let mut fn_ptr_hints = TypeHintMap::default();
+    fn_ptr_hints.insert(2, 28, "fn(&str) -> i32".to_string());
+    let (fn_ptr_rsh, _) = roundtrip_and_check(fn_ptr_src, &fn_ptr_hints, false);
+    assert!(fn_ptr_rsh.contains("var r ="), "got:\n{fn_ptr_rsh}");
+
+    // Unnameable closure param: strict=false -> native inferred `(x) =>`, strict=true -> Err
     let mut bad_clo_hints = TypeHintMap::default();
-    bad_clo_hints.insert(1, 34, "{unknown}".to_string());
+    bad_clo_hints.insert(1, 43, "{unknown}".to_string());
     let (fb_rsh, _) = roundtrip_and_check(clo_src, &bad_clo_hints, false);
-    assert!(fb_rsh.contains("rust {"));
+    assert!(fb_rsh.contains("(x) =>"), "got:\n{fb_rsh}");
+    assert!(!fb_rsh.contains("rust {"), "got:\n{fb_rsh}");
     assert!(
         convert_from_rust_with_hints(
             clo_src,
@@ -963,9 +1002,10 @@ fn break_and_loop_jumps(items: &[i32]) -> i32 {
         )
         .is_err()
     );
-    // Non-strict closure param with no hints falls back to rust{}
+    // Non-strict closure param with no hints uses native inferred `(x) =>`
     let (no_hint_clo, _) = roundtrip_and_check(clo_src, &TypeHintMap::default(), false);
-    assert!(no_hint_clo.contains("rust {"));
+    assert!(no_hint_clo.contains("(x) =>"), "got:\n{no_hint_clo}");
+    assert!(!no_hint_clo.contains("rust {"), "got:\n{no_hint_clo}");
 
     // 5. `for` loop with verified vs unverified hints
     let for_src = "fn f(xs: &[i32]) { for x in xs { let _ = x; } }";
@@ -1034,8 +1074,9 @@ fn deep() {
         deep_hints.insert_with_verified(line_no, col, (*ty).to_string(), *v);
     }
     let (deep_rsh, _) = roundtrip_and_check(deep_src, &deep_hints, false);
-    assert!(deep_rsh.contains("rust { let d0 ="));
-    assert!(deep_rsh.contains("rust { let d11 ="));
+    assert!(deep_rsh.contains("var d0 ="), "got:\n{deep_rsh}");
+    assert!(deep_rsh.contains("var d11 ="), "got:\n{deep_rsh}");
+    assert!(!deep_rsh.contains("rust {"), "got:\n{deep_rsh}");
 
     // 8. Additional from_rust edge branches for 100% line/region coverage:
     //    unverified hints in `try_fmt_pat_with_hints` (all_unverified_paths_in_scope & impl_trait_contains_dyn),
@@ -1236,7 +1277,7 @@ fn void_macro_tail() {
         }
     }
     let (extra_rsh, _) = roundtrip_and_check(extra_rust_src, &eh, false);
-    assert!(extra_rsh.contains("break __blk_val my_blk_mac!{ 1 };"));
+    assert!(extra_rsh.contains("return my_blk_mac!{ 1 };"));
     assert!(extra_rsh.contains("return mac_a!{ 1 };"));
     assert!(extra_rsh.contains("return mac_b!{ 2 };"));
     assert!(extra_rsh.contains("shadow mut int s1;"));
@@ -1512,10 +1553,8 @@ pub fn check_deny(x: i32) -> i32 {
         dn_rust.contains("#![allow(unused_parens, unused_braces, unreachable_code)]"),
         "got:\n{dn_rust}"
     );
-    assert!(
-        dn_rust.contains("break 'outer ('__blk_val:"),
-        "got:\n{dn_rust}"
-    );
+    assert!(dn_rust.contains("break 'outer {\n"), "got:\n{dn_rust}");
+    assert!(!dn_rust.contains("__blk_val"), "got:\n{dn_rust}");
 
     // Bug 9: `ref` pattern binding with rust-analyzer hint `&[u8; 15]` must not double-wrap `&`
     let ref_pat_src = r#"struct InlineExt([u8; 15], u8);
@@ -1647,11 +1686,11 @@ fn shadowed_dyn_and_never_fn() {
     );
     assert!(sc_rust.contains("(&mut a[..]).len()"), "got:\n{sc_rust}");
     assert!(
-        sc_rsh.contains("rust { let s1 = unknown_fn () + 1 ; }"),
+        sc_rsh.contains("var s1 = (unknown_fn() + 1);"),
         "got:\n{sc_rsh}"
     );
     assert!(
-        sc_rsh.contains("rust { let s2 = 1 + unknown_fn () ; }"),
+        sc_rsh.contains("var s2 = (1 + unknown_fn());"),
         "got:\n{sc_rsh}"
     );
     assert!(
@@ -1659,14 +1698,15 @@ fn shadowed_dyn_and_never_fn() {
         "got:\n{sc_rsh}"
     );
     assert!(
-        sc_rsh.contains("rust { let s4 = 1.0 + unknown_fn () ; }"),
+        sc_rsh.contains("var s4 = (1.0 + unknown_fn());"),
         "got:\n{sc_rsh}"
     );
     assert!(
         sc_rsh.contains("nuint s5 = (layout_size + 1);"),
         "got:\n{sc_rsh}"
     );
-    assert!(sc_rsh.contains("rust { let boxed ="), "got:\n{sc_rsh}");
+    assert!(sc_rsh.contains("var boxed ="), "got:\n{sc_rsh}");
+    assert!(!sc_rsh.contains("rust {"), "got:\n{sc_rsh}");
     assert!(!sc_rust.contains("Fn() -> !"), "got:\n{sc_rust}");
 
     // Final Stage C wave regressions (thiserror r#field, ripgrep self:: + static dyn ref,
@@ -1725,9 +1765,10 @@ fn static_dyn_ref_hint(read_from: &mut dyn std::io::Read) {
     );
     assert!(w2_rust.contains("a.powf(b).abs()"), "got:\n{w2_rust}");
     assert!(
-        w2_rsh.contains("rust { let dec = wrap (read_from) ; }"),
+        w2_rsh.contains("var dec = wrap(read_from);"),
         "got:\n{w2_rsh}"
     );
+    assert!(!w2_rsh.contains("rust {"), "got:\n{w2_rsh}");
 
     // Imported `List` shadowing `Vec` alias in another module (`ratatui-widgets/src/list/rendering.rs`)
     let imported_list_src = r#"
@@ -1826,16 +1867,15 @@ fn cfg_inactive_int(active: i32) -> usize {
         "got:\n{w3_rust}"
     );
     assert!(w3_rust.contains("List::new(\"a\")"), "got:\n{w3_rust}");
-    assert!(w3_rust.contains("&{ p . 0 }"), "got:\n{w3_rust}");
+    assert!(w3_rsh.contains("read { return p.0; }"), "got:\n{w3_rsh}");
+    assert!(w3_rust.contains("p.0"), "got:\n{w3_rust}");
     assert!(!w3_rust.contains("'__if_val:"), "got:\n{w3_rust}");
+    assert!(!w3_rsh.contains("rust {"), "got:\n{w3_rsh}");
     assert!(
-        w3_rust.contains("0 => { { let y : i32 = 1 ; let _ = y ; step ! () ; } }"),
+        w3_rust.contains("let y: i32 = 1;") && w3_rust.contains("step!();"),
         "got:\n{w3_rust}"
     );
-    assert!(
-        w3_rsh.contains("rust { let mut start = 0 ; }"),
-        "got:\n{w3_rsh}"
-    );
+    assert!(w3_rsh.contains("mut var start = 0;"), "got:\n{w3_rsh}");
 
     // Non-std `Error` import (e.g. `use minijinja::Error;`) must not treat `dyn Error` as in-scope trait
     let non_std_err_src = r#"
@@ -1853,7 +1893,8 @@ fn inspect(err: &Error) {
         "&dyn Error".to_string(),
     );
     let (nse_rsh, _) = roundtrip_and_check(non_std_err_src, &nse_hints, false);
-    assert!(nse_rsh.contains("rust { let source ="), "got:\n{nse_rsh}");
+    assert!(nse_rsh.contains("var source ="), "got:\n{nse_rsh}");
+    assert!(!nse_rsh.contains("rust {"), "got:\n{nse_rsh}");
 
     // Mixed `Foo<'_, 'static>` RA hint relaxes `'static` to `'_` (`minijinja-py/src/environment.rs`)
     let mixed_lt_src = "fn make(src: &str) {\n    let tmpl = parse(src);\n    let _ = tmpl;\n}\n";
@@ -2473,9 +2514,9 @@ fn from_rust_20_cases(opt: Option<i32>, flag: bool, p_const: *const bool, p_mut:
     assert!(rsh_fr20.contains("bool b_val ="), "got:\n{rsh_fr20}");
     assert!(rsh_fr20.contains("int m_val ="), "got:\n{rsh_fr20}");
     assert!(rsh_fr20.contains("String(inner)"), "got:\n{rsh_fr20}");
-    assert!(rsh_fr20.contains("rust { let h0 ="), "got:\n{rsh_fr20}");
-    assert!(rsh_fr20.contains("rust { let h2 ="), "got:\n{rsh_fr20}");
-    assert!(rsh_fr20.contains("rust { let h6 ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("var h0 ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("var h2 ="), "got:\n{rsh_fr20}");
+    assert!(rsh_fr20.contains("var h6 ="), "got:\n{rsh_fr20}");
     assert!(rust_fr20.contains("if flag"), "got:\n{rust_fr20}");
 
     // Also test `impl Future<Output = i32>` when `Future` IS explicitly imported.

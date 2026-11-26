@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use rsharp_core::{
-    FromRustOptions, PreludeMode, RustAnalyzerOracle, TranspileOptions, build_rsharp, check_rsharp,
-    convert_from_rust, convert_from_rust_with_hints, find_cargo_workspace_root, run_rsharp,
-    transpile_to_rust,
+    FromRustOptions, PreludeMode, RustAnalyzerOracle, TranspileOptions, TypeHintMap, build_rsharp,
+    check_rsharp, convert_from_rust, convert_from_rust_with_hints, count_raw_rust_blocks,
+    discover_cargo_rs_files, find_cargo_workspace_root, run_rsharp, transpile_to_rust,
 };
 
 /// Result of executing a CLI invocation.
@@ -20,7 +20,7 @@ R# (R Sharp) - Rust Performance. C# Productivity.
 Usage:
   rsharp to-rust <file.rsharp> [-o <out.rs>] [--prelude embedded|crate|none]
   rsharp from-rust <file.rs> [-o <out.rsharp>] [--workspace <dir>] [--no-rustc-infer] [--strict]
-  rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict]
+  rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict] [--no-ra] [--all-rs-files] [--no-raw-rust]
   rsharp build <file.rsharp> [-o <out_bin>]
   rsharp run <file.rsharp>
   rsharp check <file.rsharp>
@@ -209,6 +209,9 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
     let mut out_dir: Option<PathBuf> = None;
     let mut verify = false;
     let mut strict_unnameable = false;
+    let mut no_ra = false;
+    let mut all_rs_files = false;
+    let mut no_raw_rust = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -228,13 +231,32 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
                 strict_unnameable = true;
                 i += 1;
             }
+            "--no-ra" => {
+                no_ra = true;
+                i += 1;
+            }
+            "--all-rs-files" => {
+                all_rs_files = true;
+                i += 1;
+            }
+            "--no-raw-rust" => {
+                no_raw_rust = true;
+                i += 1;
+            }
             flag => return Err(format!("Unknown option '{}'", flag)),
         }
     }
 
     let ws_root = find_cargo_workspace_root(&project_dir).unwrap_or_else(|| project_dir.clone());
-    let mut rs_files = Vec::new();
-    collect_project_rs_files(&project_dir, &mut rs_files);
+    let proj_canon = std::fs::canonicalize(&project_dir).ok();
+    let rs_files = if !all_rs_files && let Some(discovered) = discover_cargo_rs_files(&project_dir)
+    {
+        discovered
+    } else {
+        let mut files = Vec::new();
+        collect_project_rs_files(&project_dir, &mut files);
+        files
+    };
     if rs_files.is_empty() {
         return Err(format!(
             "No .rs files found under '{}'",
@@ -242,24 +264,50 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
         ));
     }
 
-    let mut oracle = RustAnalyzerOracle::open(&ws_root).map_err(|e| e.to_string())?;
+    let mut oracle = if no_ra {
+        None
+    } else {
+        Some(RustAnalyzerOracle::open(&ws_root).map_err(|e| e.to_string())?)
+    };
     let mut converted = 0usize;
+    let mut total_raw_rust = 0usize;
+    let mut raw_rust_files = Vec::new();
     let mut errors = Vec::new();
     for path in &rs_files {
-        let rel = path.strip_prefix(&project_dir).unwrap_or(path);
+        let rel = path
+            .strip_prefix(&project_dir)
+            .ok()
+            .or_else(|| {
+                proj_canon
+                    .as_deref()
+                    .and_then(|c| path.strip_prefix(c).ok())
+            })
+            .unwrap_or(path);
         match convert_project_file(
-            &mut oracle,
+            oracle.as_mut(),
             path,
             rel,
             out_dir.as_deref(),
             verify,
             strict_unnameable,
         ) {
-            Ok(()) => converted += 1,
+            Ok(raw_count) => {
+                converted += 1;
+                if raw_count > 0 {
+                    total_raw_rust += raw_count;
+                    raw_rust_files.push(format!(
+                        "{}: {} rust{{}} block(s)",
+                        rel.display(),
+                        raw_count
+                    ));
+                }
+            }
             Err(e) => errors.push(format!("{}: {}", rel.display(), e)),
         }
     }
-    oracle.close();
+    if let Some(o) = oracle {
+        o.close();
+    }
 
     if !errors.is_empty() {
         return Err(format!(
@@ -270,10 +318,23 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
             errors.join("\n")
         ));
     }
+    if no_raw_rust && total_raw_rust > 0 {
+        return Err(format!(
+            "Found {} rust{{}} fallback block(s) across {} file(s) with --no-raw-rust:\n{}",
+            total_raw_rust,
+            raw_rust_files.len(),
+            raw_rust_files.join("\n")
+        ));
+    }
 
     Ok(CliOutput {
         exit_code: 0,
-        stdout: format!("Converted {}/{} files cleanly\n", converted, rs_files.len()),
+        stdout: format!(
+            "Converted {}/{} files cleanly ({} rust{{}} blocks)\n",
+            converted,
+            rs_files.len(),
+            total_raw_rust
+        ),
         stderr: String::new(),
     })
 }
@@ -311,15 +372,26 @@ fn convert_with_oracle(
 }
 
 fn convert_project_file(
-    oracle: &mut RustAnalyzerOracle,
+    oracle: Option<&mut RustAnalyzerOracle>,
     path: &Path,
     rel: &Path,
     out_dir: Option<&Path>,
     verify: bool,
     strict_unnameable: bool,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let rsharp = convert_with_oracle(oracle, path, &src, strict_unnameable)?;
+    let rsharp = match oracle {
+        Some(o) => convert_with_oracle(o, path, &src, strict_unnameable)?,
+        None => convert_from_rust_with_hints(
+            &src,
+            FromRustOptions {
+                use_rustc_inference: false,
+            },
+            &TypeHintMap::default(),
+            strict_unnameable,
+        )
+        .map_err(|e| e.to_string())?,
+    };
     if verify {
         transpile_to_rust(
             &rsharp,
@@ -335,7 +407,7 @@ fn convert_project_file(
         std::fs::create_dir_all(dest.parent().unwrap_or(base_out)).map_err(|e| e.to_string())?;
         std::fs::write(&dest, &rsharp).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(count_raw_rust_blocks(&rsharp))
 }
 
 fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -475,7 +547,7 @@ mod tests {
         // 1. Read failure (missing file)
         let mut oracle = mock_oracle(0);
         let err = convert_project_file(
-            &mut oracle,
+            Some(&mut oracle),
             &base.join("missing.rs"),
             Path::new("missing.rs"),
             None,
@@ -488,7 +560,7 @@ mod tests {
         let good_file = base.join("good.rs");
         std::fs::write(&good_file, "fn main() {}").unwrap();
         let err = convert_project_file(
-            &mut oracle,
+            Some(&mut oracle),
             &good_file,
             Path::new("good.rs"),
             None,
@@ -507,7 +579,7 @@ mod tests {
         // 4. Success with `out_dir = None`, mkdir failure, and write failure when destination is a directory
         let mut oracle2 = mock_oracle(4);
         let err = convert_project_file(
-            &mut oracle2,
+            Some(&mut oracle2),
             &bad_verify,
             Path::new("bad_verify.rs"),
             None,
@@ -516,22 +588,23 @@ mod tests {
         );
         assert!(err.is_err());
 
-        assert!(
+        assert_eq!(
             convert_project_file(
-                &mut oracle2,
+                Some(&mut oracle2),
                 &good_file,
                 Path::new("good.rs"),
                 None,
                 false,
                 false,
             )
-            .is_ok()
+            .unwrap(),
+            0
         );
 
         let blocking = base.join("blocking");
         std::fs::write(&blocking, "file").unwrap();
         let err = convert_project_file(
-            &mut oracle2,
+            Some(&mut oracle2),
             &good_file,
             Path::new("sub/good.rs"),
             Some(&blocking),
@@ -543,7 +616,7 @@ mod tests {
         let out_dir = base.join("out");
         std::fs::create_dir_all(out_dir.join("good.rsharp")).unwrap();
         let err = convert_project_file(
-            &mut oracle2,
+            Some(&mut oracle2),
             &good_file,
             Path::new("good.rs"),
             Some(&out_dir),
@@ -551,6 +624,26 @@ mod tests {
             false,
         );
         assert!(err.is_err());
+
+        // 5. No-RA mode (`oracle = None`) succeeds with 0 raw rust blocks and reports parse errors.
+        assert_eq!(
+            convert_project_file(None, &good_file, Path::new("good.rs"), None, true, false)
+                .unwrap(),
+            0
+        );
+        let bad_syntax = base.join("bad_syntax.rs");
+        std::fs::write(&bad_syntax, "fn broken( {").unwrap();
+        assert!(
+            convert_project_file(
+                None,
+                &bad_syntax,
+                Path::new("bad_syntax.rs"),
+                None,
+                false,
+                false
+            )
+            .is_err()
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }

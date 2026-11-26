@@ -13,8 +13,22 @@ use std::path::Path;
 pub use codegen_rust::{PreludeMode, TranspileOptions};
 pub use error::{RSharpError, Result, Span};
 pub use from_rust::{FromRustOptions, convert_from_rust_with_hints};
-pub use ra_oracle::{RustAnalyzerOracle, TypeHintMap, find_cargo_workspace_root};
+pub use ra_oracle::{
+    RustAnalyzerOracle, TypeHintMap, discover_cargo_rs_files, find_cargo_workspace_root,
+    parse_cargo_metadata_rs_files,
+};
 pub use rustc_runner::{RunOutput, RustcJsonOutput};
+
+/// Counts the number of verbatim `rust { ... }` blocks in R# source code.
+pub fn count_raw_rust_blocks(source: &str) -> usize {
+    lexer::tokenize(source)
+        .map(|toks| {
+            toks.iter()
+                .filter(|t| matches!(t.kind, token::TokenKind::RustBlock(_)))
+                .count()
+        })
+        .unwrap_or(0)
+}
 
 /// Transpiles R# (`.rsharp`) source code directly to Rust source code.
 pub fn transpile_to_rust(source: &str, options: TranspileOptions) -> Result<String> {
@@ -91,6 +105,6 @@ mod tests {
         assert!(!lib_err.success);
         assert!(lib_err.messages.iter().any(|m| m.contains("E0308")));
 
-        assert!(check_rsharp_json("void main() { var x = 1; }").is_err());
+        assert!(check_rsharp_json("void main() { let x = 1; }").is_err());
     }
 }

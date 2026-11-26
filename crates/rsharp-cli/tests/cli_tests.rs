@@ -174,7 +174,7 @@ fn test_cli_error_paths() {
 
     // Invalid syntax through check/run/build/from-rust
     let bad_rsh = temp_file("bad_syntax.rsharp");
-    std::fs::write(&bad_rsh, "void main() { var x = 1; }").unwrap();
+    std::fs::write(&bad_rsh, "void main() { let x = 1; }").unwrap();
     let bad_str = bad_rsh.to_string_lossy().to_string();
     assert_eq!(run_cli(&args(&["check", &bad_str])).exit_code, 1);
     assert_eq!(run_cli(&args(&["run", &bad_str])).exit_code, 1);
@@ -363,6 +363,63 @@ fn test_cli_from_rust_project_and_workspace_mode() {
             .join("bin")
             .join("tool.rsharp")
             .is_file()
+    );
+
+    // Project conversion with `--no-ra --all-rs-files --no-raw-rust --verify`
+    let no_ra_ok = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj_str,
+        "--no-ra",
+        "--all-rs-files",
+        "--no-raw-rust",
+        "--verify",
+    ]));
+    assert_eq!(no_ra_ok.exit_code, 0, "stderr: {}", no_ra_ok.stderr);
+    assert!(
+        no_ra_ok.stdout.contains("0 rust{} blocks"),
+        "stdout: {}",
+        no_ra_ok.stdout
+    );
+
+    // `--no-raw-rust` fails when a file legitimately requires verbatim `rust { ... }`
+    let raw_proj = base.join("raw_crate");
+    std::fs::create_dir_all(raw_proj.join("src")).unwrap();
+    std::fs::write(
+        raw_proj.join("Cargo.toml"),
+        "[package]\nname = \"raw_crate\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        raw_proj.join("src").join("lib.rs"),
+        "type VerbatimOnly<T>;\n",
+    )
+    .unwrap();
+    let raw_fail = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &raw_proj.to_string_lossy(),
+        "--no-ra",
+        "--no-raw-rust",
+    ]));
+    assert_eq!(raw_fail.exit_code, 1);
+    assert!(
+        raw_fail.stderr.contains("rust{} fallback block(s)"),
+        "stderr: {}",
+        raw_fail.stderr
+    );
+    // Without `--no-raw-rust`, it succeeds and reports the block count
+    let raw_ok = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &raw_proj.to_string_lossy(),
+        "--no-ra",
+    ]));
+    assert_eq!(raw_ok.exit_code, 0, "stderr: {}", raw_ok.stderr);
+    assert!(
+        raw_ok.stdout.contains("1 rust{} blocks"),
+        "stdout: {}",
+        raw_ok.stdout
     );
 
     // Single-file --workspace + --strict

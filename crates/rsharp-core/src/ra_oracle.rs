@@ -623,6 +623,113 @@ pub fn parse_inlay_hint_response(result: &Value) -> TypeHintMap {
     map
 }
 
+/// Discovers compiled Rust source files in a Cargo project/workspace via `cargo metadata`,
+/// avoiding non-member fixture and template `.rs` files. Returns `None` if `project_dir` is
+/// not a Cargo project or `cargo metadata` fails.
+pub fn discover_cargo_rs_files(project_dir: &Path) -> Option<Vec<PathBuf>> {
+    discover_cargo_rs_files_with_bin(project_dir, "cargo")
+}
+
+/// Discovers compiled Rust source files using an explicit `cargo` binary path (used by tests).
+pub fn discover_cargo_rs_files_with_bin(
+    project_dir: &Path,
+    cargo_bin: &str,
+) -> Option<Vec<PathBuf>> {
+    let manifest = project_dir.join("Cargo.toml");
+    let manifest = if manifest.is_file() {
+        manifest
+    } else {
+        find_cargo_workspace_root(project_dir)?.join("Cargo.toml")
+    };
+    let output = Command::new(cargo_bin)
+        .args([
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
+        .arg(&manifest)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json = String::from_utf8_lossy(&output.stdout);
+    parse_cargo_metadata_rs_files(&json, project_dir)
+}
+
+/// Parses `cargo metadata --no-deps --format-version 1` JSON and returns deduplicated, sorted
+/// `.rs` source files belonging to targets inside `project_dir`.
+pub fn parse_cargo_metadata_rs_files(
+    metadata_json: &str,
+    project_dir: &Path,
+) -> Option<Vec<PathBuf>> {
+    let val: Value = serde_json::from_str(metadata_json).ok()?;
+    let pkgs = val.get("packages")?.as_array()?;
+    let proj_canon =
+        std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let mut found = std::collections::BTreeSet::new();
+    for pkg in pkgs {
+        let Some(manifest_str) = pkg.get("manifest_path").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(pkg_dir) = Path::new(manifest_str).parent() else {
+            continue;
+        };
+        let pkg_canon = std::fs::canonicalize(pkg_dir).unwrap_or_else(|_| pkg_dir.to_path_buf());
+        if !pkg_canon.starts_with(&proj_canon) {
+            continue;
+        }
+        let Some(targets) = pkg.get("targets").and_then(Value::as_array) else {
+            continue;
+        };
+        for target in targets {
+            let Some(src_str) = target.get("src_path").and_then(Value::as_str) else {
+                continue;
+            };
+            let src_path = Path::new(src_str);
+            let Ok(canon) = std::fs::canonicalize(src_path) else {
+                continue;
+            };
+            if !canon.is_file() {
+                continue;
+            }
+            let is_crate_root = matches!(
+                canon.file_name().and_then(|n| n.to_str()),
+                Some("lib.rs" | "main.rs" | "mod.rs")
+            );
+            if is_crate_root && let Some(root_dir) = canon.parent() {
+                collect_crate_rs_tree(root_dir, &mut found);
+            } else {
+                found.insert(canon);
+            }
+        }
+    }
+    if found.is_empty() {
+        None
+    } else {
+        Some(found.into_iter().collect())
+    }
+}
+
+fn collect_crate_rs_tree(dir: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && !name.starts_with('.')
+                && !matches!(name, "target" | "node_modules")
+            {
+                collect_crate_rs_tree(&path, out);
+            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            let canon = std::fs::canonicalize(&path).unwrap_or(path);
+            out.insert(canon);
+        }
+    }
+}
+
 fn collect_workspace_cfg_gated_names(
     root: &Path,
     optional_deps: &mut HashSet<String>,

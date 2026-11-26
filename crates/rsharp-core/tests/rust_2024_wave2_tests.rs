@@ -1187,10 +1187,15 @@ fn body_edges(
         },
     )
     .expect("from_rust full syntax & inference branch suite must convert");
-    assert!(rsharp.contains("rust { trait AliasTr"));
+    assert!(rsharp.contains("trait AliasTr"), "got:\n{rsharp}");
+    assert!(!rsharp.contains("rust { trait AliasTr"), "got:\n{rsharp}");
     assert!(rsharp.contains("rust { default fn d_fn () { } }"));
     assert!(rsharp.contains("rust { type T : Copy ; }"));
-    assert!(rsharp.contains("rust { pub type OpaqueType ; }"));
+    assert!(rsharp.contains("public type OpaqueType;"), "got:\n{rsharp}");
+    assert!(
+        !rsharp.contains("rust { pub type OpaqueType"),
+        "got:\n{rsharp}"
+    );
     assert!(rsharp.contains("rust { pub fn foreign_with_body () { } }"));
     assert!(rsharp.contains("extern \"C\" int bare_extern(int _)"));
     assert!(rsharp.contains("[Doc(hidden)]"));

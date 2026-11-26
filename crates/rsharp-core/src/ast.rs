@@ -52,8 +52,10 @@ pub enum ItemKind {
     Enum(EnumDecl),
     Union(UnionDecl),
     Trait(TraitDecl),
+    TraitAlias(TraitAliasDecl),
     Impl(ImplDecl),
     Alias(AliasDecl),
+    ForeignType(String),
     Const(ConstDecl),
     Static(StaticDecl),
     Fn(FnDecl),
@@ -238,6 +240,7 @@ pub struct UnionDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDecl {
     pub is_unsafe: bool,
+    pub is_auto: bool,
     pub name: String,
     pub generics: Vec<GenericParam>,
     pub supertraits: Vec<TypeBound>,
@@ -245,6 +248,14 @@ pub struct TraitDecl {
     pub inner_docs: Vec<String>,
     pub inner_attrs: Vec<Attribute>,
     pub items: Vec<TraitItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitAliasDecl {
+    pub name: String,
+    pub generics: Vec<GenericParam>,
+    pub bounds: Vec<TypeBound>,
+    pub where_clause: Option<WhereClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -279,7 +290,9 @@ pub enum TraitItem {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDecl {
+    pub is_default: bool,
     pub is_unsafe: bool,
+    pub is_negative: bool,
     pub generics: Vec<GenericParam>,
     pub trait_path: Option<TypePath>,
     pub target_ty: Type,
@@ -302,7 +315,7 @@ pub enum ImplItem {
         name: String,
         generics: Vec<GenericParam>,
         where_clause: Option<WhereClause>,
-        ty: Type,
+        ty: Option<Type>,
     },
     AssocConst(Item),
     MacroCall {
@@ -553,7 +566,7 @@ pub enum StmtKind {
     Destructure {
         pat: Pattern,
         explicit_ty: Option<Type>,
-        init: Expr,
+        init: Option<Expr>,
     },
     DestructureAssign {
         pat: Pattern,
@@ -890,6 +903,8 @@ pub enum Expr {
         then_expr: Box<Expr>,
         else_expr: Box<Expr>,
     },
+    IfBlock(Box<IfStmt>),
+    ValueBlock(Block),
     While {
         label: Option<String>,
         cond: Box<Condition>,
@@ -916,6 +931,8 @@ pub enum Expr {
         block: Block,
     },
     UnsafeBlock(Block),
+    TryBlock(Block),
+    Yield(Box<Expr>),
     InlineRust(String),
     MacroCall(MacroCall),
     IsPattern {
