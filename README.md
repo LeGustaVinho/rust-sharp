@@ -9,6 +9,10 @@ R# is a programming language with C#-inspired syntax and Rust ownership semantic
 
 Use C#-style declarations, named tuples, and typed patterns with Rust's ownership model, traits, and standard library. The same CLI translates Rust source back to R# and supports inline Rust in `.rsharp` files.
 
+Author Note: I'm a senior C# engineer, and when I discovered Rust, I loved it. It's the most powerful language I've ever seen, and its only drawback is that it's difficult to learn and read. In the age of AI, where we read very little code, I didn't want to learn a whole new and enormous Rust syntax, so that's why I thought about creating R#.
+
+The main goal of R# is to be as powerful as Rust, but easy to read/understand and productive.
+
 [Quick start](#quick-start) · [Language features](#language-features) · [R# and Rust side by side](#r-and-rust-side-by-side) · [CLI reference](#cli-reference) · [VS Code](#vs-code)
 
 ## Quick start
