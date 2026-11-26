@@ -8,6 +8,7 @@ Language support for **R# (`.rsharp`)** in Visual Studio Code, powered by the na
 - **Semantic Highlighting**: LSP semantic tokens distinguishing structs, enums, traits, type parameters, fields, methods, functions, parameters, immutable vs. mutable variables, attributes, macros, and prelude library symbols.
 - **Live Syntax Checker**: Instant in-memory lex, parse, and codegen diagnostics as you type.
 - **Save-Time Semantic & Borrow Checker**: Runs `rustc --emit=metadata --error-format=json` on save (`rsharp.checkOnSave`) to surface full Rust type and borrow-checker errors and warnings.
+- **Rust method tooltips**: Hover over standard-library methods such as `map`, `fold`, and `and_then` for short offline descriptions.
 - **IDE Navigation & Assistance**: Document Outline (`Ctrl+Shift+O`), Breadcrumbs, Hover docs & signatures, Go to Definition (`F12`), context-aware Autocomplete (including dot-member completion), bracket/comment/doc-comment editing rules, and snippets.
 - **Commands**:
   - `R#: Run Current File`

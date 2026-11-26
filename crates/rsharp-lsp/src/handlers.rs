@@ -170,10 +170,13 @@ impl ServerState {
         }
         let offset = doc.lines.position_to_offset(&doc.text, pos);
 
+        let method_call = crate::functional_methods::call_separator(doc, &cursor);
+
         // 1. Resolve in current document (scoped or receiver member).
-        if let Some(sym) =
-            doc.index
-                .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
+        if (method_call.is_none() || cursor.receiver.is_some())
+            && let Some(sym) =
+                doc.index
+                    .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
         {
             return Some(hover_for_symbol(sym, cursor.range));
         }
@@ -192,7 +195,7 @@ impl ServerState {
         }
 
         // 3. Cross-open-document top-level symbol lookup.
-        if cursor.receiver.is_none() {
+        if cursor.receiver.is_none() && method_call.is_none() {
             for (other_uri, other_doc) in &self.docs {
                 if other_uri != uri
                     && let Some(sym) = other_doc.index.resolve_symbol(&cursor.name, 0, None)
@@ -200,6 +203,13 @@ impl ServerState {
                     return Some(hover_for_symbol(sym, cursor.range));
                 }
             }
+        }
+
+        if let Some(separator) = method_call
+            && let Some(markdown) =
+                crate::functional_methods::documentation(doc, &cursor.name, separator)
+        {
+            return Some(make_hover(markdown, cursor.range));
         }
 
         // 4. Built-in keyword / primitive / prelude symbol.

@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod builtins;
 pub mod diagnostics;
+mod functional_methods;
 pub mod handlers;
 pub mod position;
 pub mod semantic_tokens;

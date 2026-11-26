@@ -1,0 +1,252 @@
+Iterator map	Applies a function lazily to each item.
+Iterator filter	Yields only items that satisfy a predicate.
+Iterator filter_map	Maps each item and yields only the values returned as `Some`.
+Iterator flat_map	Maps each item to an iterable and yields its contents in order.
+Iterator flatten	Yields the contents of nested iterables, one level deep.
+Iterator map_while	Maps items until the callback first returns `None`.
+Iterator scan	Carries mutable state across items and yields the optional values produced by the callback.
+Iterator inspect	Calls a function on a reference to each item as it passes through.
+Iterator chain	Yields the first iterator's items followed by the second's.
+Iterator zip	Pairs items from two iterators until either runs out.
+Iterator enumerate	Pairs each item with its zero-based index.
+Iterator cloned	Clones each referenced item into an owned value.
+Iterator copied	Copies each referenced item that implements `Copy`.
+Iterator rev	Traverses a double-ended iterator in reverse.
+Iterator cycle	Repeats a cloneable iterator.
+Iterator step_by	Yields the first item and then advances by the given step.
+Iterator take	Yields at most the first `n` items.
+Iterator take_while	Yields the initial run of items that satisfy a predicate.
+Iterator skip	Skips the first `n` items.
+Iterator skip_while	Skips the initial run of items that satisfy a predicate.
+Iterator peekable	Wraps the iterator so the next item can be inspected before consumption.
+Iterator fuse	Keeps returning `None` after the first `None`.
+Iterator by_ref	Borrows the iterator so it can still be used after a pipeline.
+Iterator all	Tests whether every item satisfies the predicate, stopping at the first failure.
+Iterator any	Tests whether any item satisfies the predicate, stopping at the first match.
+Iterator find	Returns the first item that satisfies the predicate.
+Iterator find_map	Returns the first `Some` value produced by the callback.
+Iterator position	Returns the zero-based index of the first match.
+Iterator rposition	Searches backward and returns the last match's index from the front.
+Iterator next	Advances the iterator and returns the next item.
+Iterator nth	Skips `n` items and returns the next item.
+Iterator last	Consumes the iterator and returns its last item, if any.
+Iterator size_hint	Returns lower and optional upper bounds on the number of remaining items.
+Iterator count	Consumes the iterator and counts its items.
+Iterator fold	Combines items using an accumulator and an explicit initial value.
+Iterator reduce	Combines items using the first as the seed, returning `None` on empty input.
+Iterator try_fold	Folds items until completion or a callback signals an early exit.
+Iterator for_each	Executes a callback for every item.
+Iterator try_for_each	Executes a callback for each item until it signals an early exit.
+Iterator sum	Adds items using the output type's `Sum` implementation.
+Iterator product	Multiplies items using the output type's `Product` implementation.
+Iterator min	Returns the smallest item, or `None` for an empty iterator.
+Iterator max	Returns the largest item, or `None` for an empty iterator.
+Iterator min_by	Returns the smallest item according to a comparator.
+Iterator max_by	Returns the largest item according to a comparator.
+Iterator min_by_key	Returns the item with the smallest computed key.
+Iterator max_by_key	Returns the item with the largest computed key.
+Iterator collect	Builds a value from the items through `FromIterator`.
+Iterator partition	Collects matching and nonmatching items into two separate outputs.
+Iterator unzip	Collects the left and right items of pairs into separate outputs.
+Iterator cmp	Compares two iterators lexicographically using total ordering.
+Iterator partial_cmp	Compares two iterators lexicographically and returns `None` if incomparable.
+Iterator eq	Tests whether two iterators yield the same items in order.
+Iterator ne	Tests whether two iterators yield different items or lengths.
+Iterator lt	Tests whether this iterator is lexicographically less than another.
+Iterator le	Tests whether this iterator is lexicographically less than or equal to another.
+Iterator gt	Tests whether this iterator is lexicographically greater than another.
+Iterator ge	Tests whether this iterator is lexicographically greater than or equal to another.
+Iterator is_sorted	Checks whether items are in nondecreasing order.
+Iterator is_sorted_by	Checks adjacent items using a caller-supplied ordering predicate.
+Iterator is_sorted_by_key	Checks whether computed keys are in nondecreasing order.
+DoubleEndedIterator next_back	Advances from the back and returns the item.
+DoubleEndedIterator nth_back	Skips `n` items from the back and returns the next item.
+DoubleEndedIterator rfind	Returns the first matching item encountered from the back.
+DoubleEndedIterator rfold	Folds from the back using an explicit initial value.
+DoubleEndedIterator try_rfold	Folds from the back and supports early exit.
+Peekable peek	Borrows the next item without advancing the iterator.
+Peekable peek_mut	Mutably borrows the next item without advancing the iterator.
+Peekable next_if	Consumes the next item only when the predicate passes.
+Peekable next_if_eq	Consumes the next item only when it equals the supplied value.
+Peekable next_if_map	Returns the mapped value on `Ok` or puts the item supplied in `Err` back at the front.
+Peekable next_if_map_mut	Mutably borrows the next item and consumes it only if the callback returns `Some`.
+IntoIterator into_iter	Turns an iterable value or reference into an iterator.
+FromIterator from_iter	Constructs a value from an iterable.
+Extend extend	Adds the items of an iterable to an existing destination.
+Option map	Transforms the value in `Some` and propagates `None`.
+Result map	Transforms the value in `Ok` and propagates `Err`.
+Option|Result map_or	Transforms the success value or returns the already computed fallback.
+Option map_or_else	Transforms `Some` or calls a fallback on `None`.
+Result map_or_else	Transforms `Ok` or calls a fallback with the error.
+Option|Result map_or_default	Transforms the success value or returns the output type's default.
+Option and_then	Calls an option-returning function on `Some` and propagates `None`.
+Result and_then	Calls a result-returning function on `Ok` and propagates `Err`.
+Option|Result and	Returns the supplied second container when the first is `Some` or `Ok`.
+Option|Result or	Returns the supplied second container when the first is `None` or `Err`.
+Option or_else	Computes a replacement option only on `None`.
+Result or_else	Computes a replacement result from the error.
+Option|Result inspect	Calls a function on a reference to the success value and returns the original container.
+Option|Result unwrap_or	Extracts the success value or returns the supplied fallback.
+Option unwrap_or_else	Extracts `Some` or computes a fallback on `None`.
+Result unwrap_or_else	Extracts `Ok` or computes a fallback from the error.
+Option|Result unwrap_or_default	Extracts the success value or returns its type's default.
+Option flatten	Collapses one level of nested options.
+Result flatten	Collapses one level of nested results with the same error type.
+Option transpose	Converts `Option<Result<T, E>>` to `Result<Option<T>, E>`.
+Result transpose	Converts `Result<Option<T>, E>` to `Option<Result<T, E>>`.
+Option|Result as_ref	Borrows the payloads while preserving the variant.
+Option|Result as_mut	Mutably borrows the payloads while preserving the variant.
+Option|Result as_deref	Borrows and dereferences the success value. On `Result`, the error is borrowed.
+Option|Result as_deref_mut	Mutably borrows and dereferences the success value. On `Result`, the error is mutably borrowed.
+Option|Result cloned	Clones a referenced success value into an owned value.
+Option|Result copied	Copies a referenced success value into an owned value.
+Option|Result iter	Iterates over zero or one shared references to the success value.
+Option|Result iter_mut	Iterates over zero or one mutable references to the success value.
+Option is_some_and	Returns true when the option is `Some` and its value satisfies the predicate.
+Option is_none_or	Returns true when the option is `None` or its value satisfies the predicate.
+Option filter	Keeps a `Some` value only when it satisfies the predicate.
+Option ok_or	Converts to `Result` using the supplied error on `None`.
+Option ok_or_else	Converts to `Result`, computing the error only on `None`.
+Option get_or_insert_with	Initializes the option if empty and returns a mutable reference to its value.
+Option take_if	Takes the value if a predicate receiving a mutable reference returns true.
+Option xor	Returns the value when exactly one of two options is `Some`.
+Option zip	Pairs the values when both options are `Some`.
+Option unzip	Turns an optional pair into two options.
+Option as_slice	Views the option as a zero- or one-element slice.
+Option as_mut_slice	Views the option as a zero- or one-element mutable slice.
+Option as_pin_ref	Projects a pinned option into an option containing a pinned shared reference.
+Option as_pin_mut	Projects a pinned option into an option containing a pinned mutable reference.
+Result is_ok_and	Returns true when the result is `Ok` and its value satisfies the predicate.
+Result is_err_and	Returns true when the result is `Err` and its error satisfies the predicate.
+Result map_err	Transforms the error and propagates `Ok`.
+Result inspect_err	Calls a function on a reference to the error and returns the original result.
+Result ok	Converts the `Ok` payload to `Some` and an error to `None`.
+Result err	Converts the `Err` payload to `Some` and a success to `None`.
+array map	Transforms every element into an output array of the same length.
+array each_ref	Produces an array of shared references to the elements.
+array each_mut	Produces an array of mutable references to the elements.
+slice chunk_by	Groups neighboring items while each adjacent pair satisfies the predicate.
+slice chunk_by_mut	Groups neighboring items into mutable slices using an adjacent-pair predicate.
+slice split	Splits on matching elements and discards the separators.
+slice split_mut	Yields mutable slices separated by matching elements.
+slice split_inclusive	Splits on matching elements and keeps each separator at the end of its piece.
+slice split_inclusive_mut	Yields mutable pieces with matching separators at the end.
+slice rsplit	Splits on matching elements and yields pieces from the back.
+slice rsplit_mut	Yields mutable pieces from the back, discarding matching separators.
+slice splitn	Splits from the front into at most `n` pieces.
+slice splitn_mut	Yields at most `n` mutable pieces from the front.
+slice rsplitn	Splits from the back into at most `n` pieces.
+slice rsplitn_mut	Yields at most `n` mutable pieces from the back.
+slice|VecDeque binary_search_by	Searches an ordered sequence with a comparator, returning a match or insertion index.
+slice|VecDeque binary_search_by_key	Searches an ordered sequence by computed key, returning a match or insertion index.
+slice|VecDeque partition_point	Finds where a predicate switches from true to false in an already partitioned sequence.
+slice sort_by	Stably sorts in place using a comparator.
+slice sort_by_key	Stably sorts in place by computed key.
+slice sort_by_cached_key	Stably sorts in place by computed key, evaluating each element's key at most once.
+slice sort_unstable_by	Sorts in place with a comparator, with unspecified ordering among equal items.
+slice sort_unstable_by_key	Sorts in place by key, with unspecified ordering among equal items.
+slice select_nth_unstable_by	Places the item of rank `n` using a comparator and partitions around it.
+slice select_nth_unstable_by_key	Places the item of rank `n` by computed key and partitions around it.
+slice is_sorted_by	Checks whether adjacent elements satisfy the ordering predicate.
+slice is_sorted_by_key	Checks whether computed keys are in nondecreasing order.
+slice fill_with	Replaces each element with a fresh callback result.
+Vec from_fn	Builds a vector by calling a generator with each index.
+Vec|VecDeque resize_with	Resizes the collection, generating each newly added item on demand.
+Vec|VecDeque|BinaryHeap|HashSet|BTreeSet retain	Keeps only items that satisfy the predicate.
+String retain	Keeps only Unicode scalar values that satisfy the predicate.
+Vec|VecDeque retain_mut	Allows the predicate to edit each item before deciding whether to keep it.
+HashMap|BTreeMap retain	Keeps entries based on a predicate over the key and mutable value.
+Vec dedup_by	Removes consecutive duplicates according to a supplied equivalence test.
+Vec dedup_by_key	Removes consecutive elements that have equal computed keys.
+Vec pop_if	Removes the last element if a predicate receiving a mutable reference passes.
+VecDeque pop_front_if	Removes the front element if a predicate receiving a mutable reference passes.
+VecDeque pop_back_if	Removes the back element if a predicate receiving a mutable reference passes.
+Vec|BTreeMap|BTreeSet extract_if	Lazily removes and yields matching items within a range.
+HashMap|HashSet|LinkedList extract_if	Lazily removes and yields matching items.
+Entry and_modify	Mutates the value of an occupied map entry through a callback.
+Entry or_insert_with	Computes and inserts a value only for a vacant map entry.
+Entry or_insert_with_key	Computes a vacant map entry's initial value from its key.
+HashSet|BTreeSet union	Iterates over items that belong to either set.
+HashSet|BTreeSet intersection	Iterates over items that belong to both sets.
+HashSet|BTreeSet difference	Iterates over items in this set that are absent from the other.
+HashSet|BTreeSet symmetric_difference	Iterates over items that belong to exactly one set.
+str contains	Tests whether the pattern matches anywhere in the text.
+str starts_with	Tests whether the pattern matches at the start.
+str ends_with	Tests whether the pattern matches at the end.
+str find	Returns the UTF-8 byte index of the first match.
+str rfind	Returns the UTF-8 byte index of the last match.
+str matches	Yields matching substrings from the front.
+str rmatches	Yields matching substrings from the back.
+str match_indices	Yields each match with its starting UTF-8 byte index from the front.
+str rmatch_indices	Yields each match with its starting UTF-8 byte index from the back.
+str split	Yields pieces separated by matches from the front.
+str rsplit	Yields pieces separated by matches from the back.
+str split_inclusive	Splits at matches and keeps each match at the end of its piece.
+str split_terminator	Splits from the front, omitting the empty piece caused by a final delimiter.
+str rsplit_terminator	Splits from the back, omitting the empty piece caused by a final delimiter.
+str splitn	Splits from the front into at most `n` pieces.
+str rsplitn	Splits from the back into at most `n` pieces.
+str split_once	Splits at the first match and returns `None` if absent.
+str rsplit_once	Splits at the last match and returns `None` if absent.
+str trim_matches	Removes repeated matches from both ends.
+str trim_start_matches	Removes repeated matches from the start.
+str trim_end_matches	Removes repeated matches from the end.
+str trim_left_matches	Deprecated alias for `trim_start_matches`.
+str trim_right_matches	Deprecated alias for `trim_end_matches`.
+str strip_prefix	Removes one matching prefix and returns `None` if absent.
+str strip_suffix	Removes one matching suffix and returns `None` if absent.
+str strip_circumfix	Removes a matching prefix and suffix and returns `None` if both cannot be removed.
+str trim_prefix	Removes one matching prefix if present and always returns a slice.
+str trim_suffix	Removes one matching suffix if present and always returns a slice.
+str replace	Returns a new string with every match replaced.
+str replacen	Returns a new string with at most the first `n` matches replaced.
+bool then	Calls a function and returns `Some` only when the boolean is true.
+bool then_some	Wraps an already computed value in `Some` only when the boolean is true.
+bool ok_or	Returns `Ok(())` on true or the supplied error on false.
+bool ok_or_else	Returns `Ok(())` on true or computes an error on false.
+Ordering then	Uses a supplied tiebreaker when the first ordering is `Equal`.
+Ordering then_with	Computes a tiebreaker only when the first ordering is `Equal`.
+Ordering reverse	Swaps `Less` and `Greater`, preserving `Equal`.
+Bound map	Transforms the bounded value while preserving whether the endpoint is included.
+ControlFlow map_break	Transforms the `Break` payload.
+ControlFlow map_continue	Transforms the `Continue` payload.
+ControlFlow break_value	Returns the `Break` payload as an option.
+ControlFlow continue_value	Returns the `Continue` payload as an option.
+ControlFlow break_ok	Returns the `Break` payload as `Ok` or the `Continue` payload as `Err`.
+ControlFlow continue_ok	Returns the `Continue` payload as `Ok` or the `Break` payload as `Err`.
+Poll map	Transforms a `Ready` value and propagates `Pending`.
+Poll map_ok	Transforms the success value inside a ready result, including the optional form.
+Poll map_err	Transforms the error value inside a ready result, including the optional form.
+Box map	Consumes a boxed value, transforms it, and boxes the result.
+Rc|Arc map	Maps a reference to the value and wraps the result in a new shared pointer.
+Rc|Arc new_cyclic	Gives the initializer a weak pointer to the allocation being constructed.
+Ref|RefMut map	Projects the borrow guard onto a component selected by a callback.
+Ref|RefMut filter_map	Projects the guard onto an optional component or returns the original guard as an error.
+Ref|RefMut map_split	Splits the guard into two guards for distinct components of the value.
+Cell update	Computes and stores a replacement for the current `Copy` value.
+RefCell replace_with	Computes a replacement with mutable access and returns the old value.
+Pin map_unchecked	Projects a pinned shared reference. The caller must uphold the pinning guarantees.
+Pin map_unchecked_mut	Projects a pinned mutable reference. The caller must uphold the pinning guarantees.
+ptr|NonNull map_addr	Transforms the pointer address while preserving provenance.
+LazyCell|LazyLock new	Stores a factory that runs when the value is first forced.
+OnceCell|OnceLock get_or_init	Returns the value or initializes it from a callback.
+Once call_once	Runs an initialization routine once across callers.
+Once call_once_force	Allows an initialization attempt after poisoning and passes the poisoning status to the callback.
+Condvar wait_while	Blocks while a predicate on the mutex-protected value is true.
+Condvar wait_timeout_while	Blocks while a predicate on the mutex-protected value is true, subject to a timeout.
+Atomic update	Atomically stores a callback-computed value and returns the previous value. The callback may be retried.
+Atomic try_update	Atomically stores a callback's `Some` value or skips the update on `None`. The callback may be retried.
+Atomic fetch_update	Deprecated alias for `try_update`.
+Builder spawn	Starts a configured thread that runs the callback and returns a fallible join handle.
+Builder spawn_scoped	Starts a configured thread tied to a borrowing scope.
+Builder spawn_unchecked	Starts a thread without the usual lifetime bound. The caller must keep any borrowed data valid.
+Scope spawn	Starts a scoped thread whose callback can borrow from its surroundings.
+LocalKey with	Runs a callback with a shared reference to the thread-local value.
+LocalKey try_with	Runs a callback with the thread-local value or returns an access error.
+LocalKey update	Replaces a thread-local `Cell` value using a function.
+LocalKey with_borrow	Runs a callback with a shared borrow of a thread-local `RefCell` value.
+LocalKey with_borrow_mut	Runs a callback with a mutable borrow of a thread-local `RefCell` value.
+DropGuard new	Stores a value and a cleanup function that runs when the guard is dropped.
+RawWakerVTable new	Stores function pointers for cloning, waking, waking by reference, and dropping raw waker data.
+CommandExt pre_exec	Registers a callback to run in the Unix child process immediately before `exec`.
+CommandExt before_exec	Deprecated predecessor to `pre_exec` on Unix.
