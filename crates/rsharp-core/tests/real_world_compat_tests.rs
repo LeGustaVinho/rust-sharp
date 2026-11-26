@@ -1908,6 +1908,137 @@ fn inspect(err: &Error) {
 }
 
 #[test]
+fn ra_resolves_eight_hints_in_flight_and_retries_only_the_stale_hint() {
+    let hints: Vec<_> = (0..10)
+        .map(|i| {
+            json!({
+                "kind": 1, "position": {"line": 0, "character": i}, "label": ": Local", "data": i
+            })
+        })
+        .collect();
+    let mut stream = Vec::new();
+    for msg in [
+        json!({"id":1,"result":{}}),
+        json!({"method":"experimental/serverStatus","params":{"quiescent":true}}),
+        json!({"id":2,"result":hints}),
+        json!({"id":100,"method":"ping"}),
+        json!({"id":10,"error":{"code":-32801}}),
+        json!({"id":9,"error":{"code":-1}}),
+    ] {
+        stream.extend(frame_lsp(&msg));
+    }
+    // The retry gets ID 11. Freeing ID 9 admits the ninth original hint.
+    for (id, i) in [
+        (11, 7),
+        (13, 9),
+        (12, 8),
+        (8, 5),
+        (7, 4),
+        (6, 3),
+        (5, 2),
+        (4, 1),
+        (3, 0),
+    ] {
+        let mut resolved = hints[i].clone();
+        resolved["textEdits"] = json!([{"newText": format!(": crate::T{i}")}]);
+        stream.extend(frame_lsp(&json!({"id":id,"result":resolved})));
+    }
+    let written = Rc::new(RefCell::new(Vec::new()));
+    let mut oracle = RustAnalyzerOracle::from_io(
+        Cursor::new(stream),
+        SharedWriter(written.clone()),
+        Path::new("missing"),
+    )
+    .unwrap();
+    let result = oracle
+        .type_hints_for_file(Path::new("sample.rs"), "")
+        .unwrap();
+    for i in 0..10 {
+        if i == 6 {
+            assert_eq!(result.get_entry(1, i), Some(("Local", false)));
+        } else {
+            assert_eq!(
+                result.get_entry(1, i),
+                Some((format!("crate::T{i}").as_str(), true))
+            );
+        }
+    }
+    let sent = String::from_utf8(written.borrow().clone()).unwrap();
+    let (before_ping, after_ping) = sent.split_once("\"id\":100").unwrap();
+    assert_eq!(before_ping.matches("inlayHint/resolve").count(), 8);
+    assert_eq!(after_ping.matches("inlayHint/resolve").count(), 3);
+    assert_eq!(after_ping.matches("\"data\":7").count(), 1);
+    assert!(after_ping.rfind("didClose") > after_ping.rfind("inlayHint/resolve"));
+}
+
+#[test]
+fn failed_resolves_keep_the_original_unverified_label() {
+    fn stream(responses: Vec<serde_json::Value>) -> Cursor<Vec<u8>> {
+        let hint = json!({"kind":1,"position":{"line":0,"character":3},"label":": T","data":42});
+        let mut frames: Vec<_> = [
+            json!({"id":77,"result":null}),
+            json!({"id":1,"result":{}}),
+            json!({"method":"experimental/serverStatus","params":{"quiescent":true}}),
+            json!({"id":2,"result":[hint]}),
+            json!({"id":88,"result":null}),
+        ]
+        .iter()
+        .flat_map(frame_lsp)
+        .collect();
+        frames.extend(responses.iter().flat_map(frame_lsp));
+        Cursor::new(frames)
+    }
+    let stale = |id| json!({"id":id,"error":{"code":-32801}});
+    for replies in [Vec::new(), (3..=8).map(stale).collect()] {
+        let mut oracle =
+            RustAnalyzerOracle::from_io(stream(replies), Vec::new(), Path::new("missing")).unwrap();
+        let result = oracle
+            .type_hints_for_file(Path::new("sample.rs"), "")
+            .unwrap();
+        assert_eq!(result.get_entry(1, 3), Some(("T", false)));
+    }
+
+    struct RejectRetry;
+    impl Write for RejectRetry {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if String::from_utf8_lossy(buf).contains("\"id\":4") {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut oracle =
+        RustAnalyzerOracle::from_io(stream(vec![stale(3)]), RejectRetry, Path::new("missing"))
+            .unwrap();
+    let result = oracle
+        .type_hints_for_file(Path::new("sample.rs"), "")
+        .unwrap();
+    assert_eq!(result.get_entry(1, 3), Some(("T", false)));
+
+    let mut error_stream: Vec<_> = [
+        json!({"id":1,"result":{}}),
+        json!({"method":"experimental/serverStatus","params":{"quiescent":true}}),
+    ]
+    .iter()
+    .flat_map(frame_lsp)
+    .collect();
+    error_stream.extend(frame_lsp(&json!({"id":2,"error":{"code":-32603}})));
+    let mut oracle =
+        RustAnalyzerOracle::from_io(Cursor::new(error_stream), Vec::new(), Path::new("missing"))
+            .unwrap();
+    assert!(
+        oracle
+            .type_hints_for_file(Path::new("sample.rs"), "")
+            .unwrap_err()
+            .to_string()
+            .contains("-32603")
+    );
+}
+
+#[test]
 fn ra_oracle_retries_on_content_modified_error() {
     let mut stream = Vec::new();
     stream.extend_from_slice(&frame_lsp(

@@ -302,32 +302,7 @@ impl RustAnalyzerOracle {
             }),
         )?;
         if let Some(items) = resp.as_array_mut() {
-            for item in items.iter_mut() {
-                if item.get("kind").and_then(Value::as_u64) != Some(1) {
-                    continue;
-                }
-                let raw_label = extract_inlay_label(item);
-                let trimmed = raw_label.trim();
-                let Some(ty_str) = trimmed.strip_prefix(':').map(str::trim) else {
-                    continue;
-                };
-                if is_trivial_primitive_type(ty_str) {
-                    continue;
-                }
-                if item.get("data").is_none() {
-                    mark_no_edit_if_empty(item);
-                    continue;
-                }
-                match self.request_with_retry("inlayHint/resolve", &item.clone()) {
-                    Ok(mut resolved) => {
-                        mark_no_edit_if_empty(&mut resolved);
-                        *item = resolved;
-                    }
-                    Err(_) => {
-                        mark_no_edit_if_empty(item);
-                    }
-                }
-            }
+            self.resolve_hints(items);
         }
 
         self.send_notification(
@@ -357,6 +332,61 @@ impl RustAnalyzerOracle {
             }
         }
         Ok(hints)
+    }
+
+    fn resolve_hints(&mut self, items: &mut [Value]) {
+        const WINDOW: usize = 8;
+        let mut pending = HashMap::with_capacity(WINDOW);
+        let mut remaining = items.iter_mut();
+        loop {
+            while pending.len() < WINDOW {
+                let Some(item) = remaining.next() else { break };
+                if item.get("kind").and_then(Value::as_u64) != Some(1) {
+                    continue;
+                }
+                let raw_label = extract_inlay_label(item);
+                let trimmed = raw_label.trim();
+                let Some(ty_str) = trimmed.strip_prefix(':').map(str::trim) else {
+                    continue;
+                };
+                if is_trivial_primitive_type(ty_str) {
+                    continue;
+                }
+                if item.get("data").is_none() {
+                    mark_no_edit_if_empty(item);
+                    continue;
+                }
+                match self.send_request("inlayHint/resolve", item.clone()) {
+                    Ok(id) => {
+                        pending.insert(id, (item, 0));
+                    }
+                    Err(_) => mark_no_edit_if_empty(item),
+                }
+            }
+            if pending.is_empty() {
+                return;
+            }
+            let Ok((id, response)) = self.next_response() else {
+                for (_, (item, _)) in pending.drain() {
+                    mark_no_edit_if_empty(item);
+                }
+                continue;
+            };
+            let Some((item, attempt)) = pending.remove(&id) else {
+                continue;
+            };
+            match response {
+                Ok(resolved) => *item = resolved,
+                Err(err) if retry_content_modified(&err, attempt) => {
+                    if let Ok(id) = self.send_request("inlayHint/resolve", item.clone()) {
+                        pending.insert(id, (item, attempt + 1));
+                        continue;
+                    }
+                }
+                Err(_) => {}
+            }
+            mark_no_edit_if_empty(item);
+        }
     }
 
     /// Gracefully shuts down the `rust-analyzer` server process.
@@ -408,18 +438,13 @@ impl RustAnalyzerOracle {
     }
 
     fn request_with_retry(&mut self, method: &str, params: &Value) -> Result<Value> {
-        const MAX_RETRIES: usize = 5;
         let mut attempt = 0usize;
         loop {
             let id = self.send_request(method, params.clone())?;
             match self.read_response_raw(id)? {
                 Ok(val) => return Ok(val),
-                Err(err)
-                    if attempt < MAX_RETRIES
-                        && err.get("code").and_then(Value::as_i64) == Some(-32801) =>
-                {
+                Err(err) if retry_content_modified(&err, attempt) => {
                     attempt += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(20 * attempt as u64));
                 }
                 Err(err) => {
                     return Err(RSharpError::from_rust(format!(
@@ -443,18 +468,36 @@ impl RustAnalyzerOracle {
 
     fn read_response_raw(&mut self, expected_id: i64) -> Result<std::result::Result<Value, Value>> {
         loop {
-            let msg = read_lsp_message(&mut *self.reader)?;
-            if self.try_reply_server_request(&msg)? {
-                continue;
-            }
-            if msg.get("id").and_then(Value::as_i64) == Some(expected_id) {
-                if let Some(err) = msg.get("error") {
-                    return Ok(Err(err.clone()));
-                }
-                return Ok(Ok(msg.get("result").cloned().unwrap_or(Value::Null)));
+            let (id, response) = self.next_response()?;
+            if id == expected_id {
+                return Ok(response);
             }
         }
     }
+
+    fn next_response(&mut self) -> Result<(i64, std::result::Result<Value, Value>)> {
+        loop {
+            let mut msg = read_lsp_message(&mut *self.reader)?;
+            if self.try_reply_server_request(&msg)? {
+                continue;
+            }
+            if let Some(id) = msg.get("id").and_then(Value::as_i64) {
+                let result = match msg.get_mut("error") {
+                    Some(err) => Err(err.take()),
+                    None => Ok(msg["result"].take()),
+                };
+                return Ok((id, result));
+            }
+        }
+    }
+}
+
+fn retry_content_modified(error: &Value, attempt: usize) -> bool {
+    if attempt >= 5 || error.get("code").and_then(Value::as_i64) != Some(-32801) {
+        return false;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1) as u64));
+    true
 }
 
 impl Drop for RustAnalyzerOracle {
