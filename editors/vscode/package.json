@@ -2,7 +2,7 @@
   "name": "rsharp-vscode",
   "displayName": "R# Language Support",
   "description": "C#-like syntax and semantic highlighting, live syntax checking, rustc borrow/type checking, and core IDE features for R# (.rsharp).",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "rsharp",
   "license": "MIT",
   "engines": {
@@ -69,6 +69,12 @@
           "type": "boolean",
           "default": true,
           "description": "Run full `rustc` semantic and borrow-checker diagnostics when saving `.rsharp` files."
+        },
+        "rsharp.syncRustOnSave": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Replace the corresponding original .rs file with generated Rust when saving a .rsharp file in a converted Cargo project."
         },
         "rsharp.trace.server": {
           "type": "string",

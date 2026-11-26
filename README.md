@@ -272,6 +272,7 @@ The extension uses the native `rsharp lsp` server.
 - Completions, hover information, go-to-definition, document outline, and snippets.
 - Commands to run and check R# files, preview the generated Rust, and convert Rust files back to R#.
 - An optional prompt to convert a Rust-only Cargo project into a new folder of R# sources.
+- Optional synchronization of saved R# edits to the original Rust modules for Cargo builds (`rsharp.syncRustOnSave`).
 
 See the [extension guide](editors/vscode/README.md) for local installation and configuration.
 

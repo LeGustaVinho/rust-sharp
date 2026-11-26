@@ -5,6 +5,7 @@ import type {
   TextDocumentContentProvider,
   Uri as VsCodeUri,
 } from "vscode";
+import { relative } from "node:path";
 import {
   EventEmitter,
   Uri,
@@ -21,6 +22,8 @@ import {
 } from "vscode-languageclient/node";
 import { defaultBinaryOptions, resolveRSharpBinary } from "./binary";
 import { registerProjectSuggestions } from "./projectSuggestion";
+import { RustSourceSync } from "./rustSync";
+import { registerSyncStatus } from "./syncStatus";
 import {
   RUST_PREVIEW_SCHEME,
   RustPreviewModel,
@@ -107,6 +110,16 @@ export async function activate(context: ExtensionContext): Promise<void> {
   const execRunner = defaultExecFile();
   const runProc = (cmd: string, args: readonly string[]) =>
     runCommandProcess(cmd, args, execRunner);
+  const rustSync = new RustSourceSync({
+    state: context.workspaceState,
+    resolveBinary: resolveCurrentBinary,
+    runProcess: runProc,
+    isDirty: (target) => workspace.textDocuments.some((doc) =>
+      doc.isDirty && doc.uri.scheme === "file" && relative(doc.uri.fsPath, target) === "",
+    ),
+    confirm: async (message, action) =>
+      await window.showWarningMessage(message, { modal: true }, action) === action,
+  });
 
   const previewEmitter = new EventEmitter<VsCodeUri>();
   const previewModel = new RustPreviewModel({
@@ -124,9 +137,26 @@ export async function activate(context: ExtensionContext): Promise<void> {
       RUST_PREVIEW_SCHEME,
       previewProvider,
     ),
-    workspace.onDidSaveTextDocument((doc) => {
-      if (doc.languageId === "rsharp") {
-        previewEmitter.fire(Uri.parse(makePreviewUriString(doc.uri.fsPath)));
+    workspace.onDidSaveTextDocument(async (doc) => {
+      if (doc.languageId !== "rsharp") {
+        return;
+      }
+      previewEmitter.fire(Uri.parse(makePreviewUriString(doc.uri.fsPath)));
+      const folder = doc.uri.scheme === "file" && workspace.getWorkspaceFolder(doc.uri);
+      if (!folder) {
+        return;
+      }
+      const enabled = () => workspace.isTrusted &&
+        workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath === folder.uri.fsPath &&
+        workspace.getConfiguration("rsharp", doc.uri).get<boolean>("syncRustOnSave", false);
+      try {
+        const target = await rustSync.save(folder.uri.fsPath, doc.uri.fsPath, enabled);
+        if (target) {
+          outputChannel.appendLine(`[R# Sync] Updated ${target}`);
+        }
+      } catch (error) {
+        outputChannel.appendLine(`[R# Sync] ${error}`);
+        void window.showErrorMessage(`Rust sync for "${doc.fileName}": ${error}`);
       }
     }),
     window.onDidCloseTerminal((closed) => {
@@ -224,7 +254,17 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
   );
 
-  registerProjectSuggestions(context, outputChannel, handlers.convertProject);
+  registerSyncStatus(context);
+  registerProjectSuggestions(context, outputChannel, async (project) => {
+    const copy = await handlers.convertProject(project);
+    if (copy) {
+      try {
+        await rustSync.rememberProject(copy);
+      } catch (error) {
+        outputChannel.appendLine(`[R# Sync] Could not record the original Rust files for "${copy}": ${error}`);
+      }
+    }
+  });
   await startForOpenDocuments();
 }
 

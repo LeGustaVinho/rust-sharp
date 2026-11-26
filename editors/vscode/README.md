@@ -22,12 +22,21 @@ Open a trusted folder with a root `Cargo.toml`, Rust sources, and no R# sources.
 
 Select **Convert to R#** to convert the saved sources with `rsharp from-rust --project`. The extension verifies each result by translating it back to Rust, then puts the `.rsharp` files in a new `rsharp-…` folder inside the project. Project conversion requires the `rsharp` CLI with project support and the `rust-analyzer` and `rust-src` Rust components.
 
+### Build changes with Cargo
+
+Keep the original Cargo project open and open a converted `.rsharp` file. Click **Rust Sync: Off** in the status bar to turn synchronization on for its workspace folder. Click **Rust Sync: On** to turn it off. The same checkbox is available in Settings under `rsharp.syncRustOnSave`.
+
+With sync on, saving `rsharp-…/src/main.rsharp` regenerates `src/main.rs` for the next `cargo build`. Module files follow the same relative paths. This replaces the entire Rust source, so formatting and comments can change. The **R#** Output channel lists each updated file.
+
+For a copy created before version 0.1.2 or opened in a different workspace, choose **Link and Sync** on the first save to confirm the original project. The extension asks before replacing independently changed Rust on disk. Save or revert any unsaved edits in the Rust editor before syncing.
+
 ## Settings
 
 | Setting | Default | Description |
 | :--- | :--- | :--- |
 | `rsharp.executablePath` | `""` | Custom path to `rsharp` binary (auto-detects workspace `target/release`, `target/debug`, then `PATH`). |
 | `rsharp.checkOnSave` | `true` | Enable `rustc` type & borrow-checker diagnostics on save. |
+| `rsharp.syncRustOnSave` | `false` | Update the original Rust source when saving its converted R# file. |
 | `rsharp.trace.server` | `"off"` | LSP protocol trace verbosity (`off`, `messages`, `verbose`). |
 
 ## Local Development & Packaging
@@ -43,7 +52,7 @@ npm test
 
 # 3. Package a local .vsix and install it into VS Code
 npm run package
-code --install-extension rsharp-vscode-0.1.1.vsix
+code --install-extension rsharp-vscode-0.1.2.vsix
 ```
 
 Or open `editors/vscode` in VS Code and press **F5** to launch an Extension Development Host.

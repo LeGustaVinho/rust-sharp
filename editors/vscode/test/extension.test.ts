@@ -5,15 +5,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 import Module = require("node:module");
 
+type TestUri = { fsPath: string; scheme?: string };
+type SavedDocument = { languageId: string; uri: TestUri; fileName?: string };
+
 interface FakeState {
   workspaceFolders: Array<{ uri: { fsPath: string } }> | undefined;
-  textDocuments: Array<{ languageId: string }>;
+  trusted: boolean;
+  textDocuments: Array<{ languageId: string; isDirty?: boolean; uri?: TestUri }>;
   openListeners: Array<() => Promise<void>>;
   config: Record<string, unknown>;
   activeTextEditor:
     | {
         document: {
-          uri: { fsPath: string };
+          uri: TestUri;
           languageId: string;
           isDirty: boolean;
           save: () => Promise<boolean>;
@@ -25,7 +29,7 @@ interface FakeState {
     string,
     { provideTextDocumentContent: (uri: { path: string }) => Promise<string> }
   >;
-  saveListeners: Array<(doc: { languageId: string; uri: { fsPath: string } }) => void>;
+  saveListeners: Array<(doc: SavedDocument) => Promise<void>>;
   configListeners: Array<
     (e: { affectsConfiguration: (section: string) => boolean }) => Promise<void>
   >;
@@ -42,6 +46,7 @@ interface FakeState {
 function createFakeEnv() {
   const state: FakeState = {
     workspaceFolders: undefined,
+    trusted: true,
     textDocuments: [],
     openListeners: [],
     config: { executablePath: "", checkOnSave: true },
@@ -86,9 +91,18 @@ function createFakeEnv() {
     }
   }
 
+  const status = {
+    text: "", tooltip: "", command: "", visible: false,
+    show() { this.visible = true; },
+    hide() { this.visible = false; },
+    dispose() {},
+  };
+  const editorListeners: Array<() => void> = [];
   const vscodeMock = {
     EventEmitter: FakeEventEmitter,
     ViewColumn: { Beside: 2 },
+    StatusBarAlignment: { Right: 2 },
+    ConfigurationTarget: { WorkspaceFolder: 3 },
     Uri: {
       parse: (raw: string) => {
         const colon = raw.indexOf(":");
@@ -101,6 +115,9 @@ function createFakeEnv() {
       },
     },
     workspace: {
+      get isTrusted() { return state.trusted; },
+      getWorkspaceFolder: (uri: TestUri) => state.workspaceFolders?.find((f) =>
+        !path.relative(f.uri.fsPath, uri.fsPath).startsWith("..")),
       get workspaceFolders() {
         return state.workspaceFolders;
       },
@@ -115,6 +132,13 @@ function createFakeEnv() {
       getConfiguration: () => ({
         get: <T>(key: string, def: T): T =>
           key in state.config ? (state.config[key] as T) : def,
+        update: async (key: string, value: boolean, target: number) => {
+          assert.equal(target, 3);
+          state.config[key] = value;
+          for (const notify of state.configListeners) {
+            await notify({ affectsConfiguration: (section) => section === `rsharp.${key}` });
+          }
+        },
       }),
       registerTextDocumentContentProvider: (
         scheme: string,
@@ -124,7 +148,7 @@ function createFakeEnv() {
         return { dispose: () => {} };
       },
       onDidSaveTextDocument: (
-        cb: (doc: { languageId: string; uri: { fsPath: string } }) => void,
+        cb: (doc: SavedDocument) => Promise<void>,
       ) => {
         state.saveListeners.push(cb);
         return { dispose: () => {} };
@@ -144,6 +168,11 @@ function createFakeEnv() {
       }),
     },
     window: {
+      createStatusBarItem: () => status,
+      onDidChangeActiveTextEditor: (cb: () => void) => {
+        editorListeners.push(cb);
+        return { dispose() {} };
+      },
       get activeTextEditor() {
         return state.activeTextEditor;
       },
@@ -163,7 +192,10 @@ function createFakeEnv() {
         state.closeTerminalListeners.push(cb);
         return { dispose: () => {} };
       },
-      showWarningMessage: (m: string) => state.messages.push(`warn:${m}`),
+      showWarningMessage: (m: string, _options?: unknown, action?: string) => {
+        state.messages.push(`warn:${m}`);
+        return action;
+      },
       showInformationMessage: (m: string) => state.messages.push(`info:${m}`),
       showErrorMessage: (m: string) => state.messages.push(`err:${m}`),
       showTextDocument: async (doc: unknown) => {
@@ -180,14 +212,16 @@ function createFakeEnv() {
 
   return {
     state,
+    status,
+    refreshEditor: () => editorListeners.forEach((cb) => cb()),
     vscodeMock,
     lcMock: { LanguageClient: FakeLanguageClient },
   };
 }
 
 describe("VS Code extension lifecycle and wiring", () => {
-  it("activates, warns on missing binary, starts LSP, handles commands, config, and deactivates", async () => {
-    const { state, vscodeMock, lcMock } = createFakeEnv();
+  it("activates, warns on missing binary, starts LSP, handles commands, config, and deactivates", async (t) => {
+    const { state, vscodeMock, lcMock, status, refreshEditor } = createFakeEnv();
     const mod = Module as unknown as {
       _load: (request: string, parent: unknown, isMain: boolean) => unknown;
     };
@@ -196,6 +230,7 @@ describe("VS Code extension lifecycle and wiring", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rsharp-ext-test-"));
     const fakeBin = path.join(tmpDir, "fake-rsharp");
     fs.writeFileSync(fakeBin, "");
+    let convertProject!: (project: string) => Promise<void>;
 
     const childProcMock = {
       execFile: (
@@ -207,8 +242,14 @@ describe("VS Code extension lifecycle and wiring", () => {
         if (args[0] === "check") {
           cb(null, "OK\n", "");
         } else if (args[0] === "to-rust") {
+          if (args.includes("-o")) {
+            fs.writeFileSync(args[args.indexOf("-o") + 1], "fn main() {}\n");
+          }
           cb(null, "fn main() {}\n", "");
         } else if (args[0] === "from-rust") {
+          if (args[1] === "--project") {
+            fs.writeFileSync(path.join(args[4], "main.rsharp"), "void main() {}\n");
+          }
           cb(null, "void main() {}\n", "");
         } else {
           cb(new Error("unknown"), "", "unknown");
@@ -229,6 +270,11 @@ describe("VS Code extension lifecycle and wiring", () => {
         if (request === "child_process") {
           return childProcMock;
         }
+        if (request === "./projectSuggestion") {
+          return { registerProjectSuggestions: (_ctx: unknown, _out: unknown, run: typeof convertProject) => {
+            convertProject = run;
+          } };
+        }
         return origLoad.call(this, request, parent, isMain);
       };
 
@@ -242,7 +288,14 @@ describe("VS Code extension lifecycle and wiring", () => {
       };
 
       // A Rust-only window can offer conversion without starting the R# server.
-      const ctx = { subscriptions: [] as unknown[] };
+      const stored = new Map<string, unknown>();
+      const ctx = {
+        subscriptions: [] as unknown[],
+        workspaceState: {
+          get: (key: string) => stored.get(key),
+          update: async (key: string, value: unknown) => { stored.set(key, value); },
+        },
+      };
       state.textDocuments.push({ languageId: "rust" });
       await ext.activate(ctx);
       await state.configListeners[0]({ affectsConfiguration: () => true });
@@ -253,6 +306,8 @@ describe("VS Code extension lifecycle and wiring", () => {
       await state.openListeners[0]();
       assert.equal(state.messages.filter((m) => m.startsWith("warn:")).length, 1);
       await ext.deactivate();
+      await convertProject(tmpDir);
+      assert.ok(state.messages.some((m) => m.includes("binary not found")));
 
       // 2. Point config at fake binary + workspace folder, trigger executablePath config change
       state.workspaceFolders = [{ uri: { fsPath: tmpDir } }];
@@ -321,8 +376,8 @@ describe("VS Code extension lifecycle and wiring", () => {
       assert.match(previewContent, /fn main/);
 
       for (const l of state.saveListeners) {
-        l({ languageId: "rsharp", uri: { fsPath: path.join(tmpDir, "demo.rsharp") } });
-        l({ languageId: "rust", uri: { fsPath: path.join(tmpDir, "demo.rs") } });
+        await l({ languageId: "rsharp", uri: { fsPath: path.join(tmpDir, "demo.rsharp") } });
+        await l({ languageId: "rust", uri: { fsPath: path.join(tmpDir, "demo.rs") } });
       }
 
       // Close actual R# terminal by firing close with the same terminal object created via a spy
@@ -343,6 +398,61 @@ describe("VS Code extension lifecycle and wiring", () => {
       };
       await (state.commands.get("rsharp.convertFromRust") as () => Promise<void>)();
       assert.ok(state.shownDocs.length >= 2);
+
+      await t.test("the visible toggle uses folder settings and drives the R# save listener", async () => {
+        const target = path.join(tmpDir, "main.rs");
+        fs.writeFileSync(path.join(tmpDir, "Cargo.toml"), "[workspace]");
+        fs.writeFileSync(target, "// original");
+        await convertProject(tmpDir);
+        const copy = fs.readdirSync(tmpDir).find((name) => name.startsWith("rsharp-"))!;
+        const source = path.join(tmpDir, copy, "main.rsharp");
+        const doc = { uri: { fsPath: source, scheme: "file" }, fileName: source,
+          languageId: "rsharp", isDirty: false, save: async () => true };
+        state.activeTextEditor = { document: doc };
+        const click = () => state.commands.get("rsharp.toggleRustSync")!();
+        const save = () => state.saveListeners[0](doc);
+        state.trusted = false;
+        refreshEditor();
+        await click();
+        assert.equal(status.visible, false);
+        state.trusted = true;
+        state.workspaceFolders = undefined;
+        refreshEditor();
+        await save();
+        assert.equal(status.visible, false);
+        state.workspaceFolders = [{ uri: { fsPath: tmpDir } }];
+        refreshEditor();
+        assert.equal(status.command, "rsharp.toggleRustSync");
+        assert.equal(status.visible, true);
+        assert.match(status.text, /Rust Sync: Off/);
+        await save();
+        assert.equal(fs.readFileSync(target, "utf8"), "// original");
+        await click();
+        assert.equal(state.config.syncRustOnSave, true);
+        assert.match(status.text, /Rust Sync: On/);
+        assert.match(status.tooltip, /Turn off/);
+        const dirtyRust = { languageId: "rust", uri: { fsPath: target, scheme: "file" }, isDirty: true };
+        state.textDocuments.push(dirtyRust);
+        await save();
+        assert.ok(state.messages.some((m) => m.includes("unsaved Rust edits")));
+        dirtyRust.isDirty = false;
+        await save();
+        assert.equal(fs.readFileSync(target, "utf8"), "fn main() {}\n");
+        assert.ok(state.outputLines.includes(`[R# Sync] Updated ${target}`));
+        fs.writeFileSync(target, "// independent edit");
+        await save();
+        assert.ok(state.messages.some((m) => m.includes("changed separately")));
+        assert.equal(fs.readFileSync(target, "utf8"), "fn main() {}\n");
+        await click();
+        assert.match(status.text, /Rust Sync: Off/);
+        doc.uri.scheme = "untitled";
+        refreshEditor();
+        assert.equal(status.visible, false);
+
+        ctx.workspaceState.update = async () => { throw new Error("storage unavailable"); };
+        await convertProject(tmpDir);
+        assert.ok(state.outputLines.some((line) => line.includes("storage unavailable")));
+      });
 
       // Deactivate stops active client
       await ext.deactivate();

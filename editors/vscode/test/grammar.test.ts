@@ -33,6 +33,10 @@ describe("VS Code manifest, grammar, language config, and snippets", () => {
       fs.readFileSync(path.join(EXT_ROOT, "package.json"), "utf8"),
     );
     assert.equal(pkg.contributes.languages[0].id, "rsharp");
+    const sync = pkg.contributes.configuration.properties["rsharp.syncRustOnSave"];
+    assert.equal(sync.type, "boolean");
+    assert.equal(sync.default, false);
+    assert.equal(sync.scope, "resource");
     assert.ok(pkg.activationEvents.includes("workspaceContains:Cargo.toml"));
     assert.deepEqual(pkg.contributes.languages[0].extensions, [".rsharp"]);
     assert.equal(pkg.contributes.grammars[0].scopeName, "source.rsharp");

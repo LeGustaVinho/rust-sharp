@@ -109,7 +109,7 @@ export interface CommandHandlers {
   checkFile: () => Promise<void>;
   previewRust: () => Promise<void>;
   convertFromRust: () => Promise<void>;
-  convertProject: (projectDir: string) => Promise<void>;
+  convertProject: (projectDir: string) => Promise<string | undefined>;
 }
 
 export function createCommandHandlers(host: CommandHost): CommandHandlers {
@@ -224,6 +224,7 @@ export function createCommandHandlers(host: CommandHost): CommandHandlers {
         throw error;
       }
       host.showInfo(`R# sources saved to ${output}`);
+      return output;
     },
   };
 }
