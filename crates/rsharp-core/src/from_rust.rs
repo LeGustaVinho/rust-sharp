@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -15,7 +16,7 @@ use crate::ra_oracle::TypeHintMap;
 use crate::rustc_runner::probes::TypeProbes;
 use crate::token::Keyword;
 
-const INDENT: &str = "    ";
+const SPACES: &str = "                                                                ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BlankLines {
@@ -87,6 +88,16 @@ enum HintLookup {
     Unnameable,
 }
 
+#[derive(Clone)]
+struct ModuleSymbols {
+    fn_returns: HashMap<String, String>,
+    struct_fields: HashMap<String, HashMap<String, String>>,
+    known_path_roots: HashSet<String>,
+    in_scope_traits: HashSet<String>,
+    renamed_use_origs: HashSet<String>,
+    shadowed_std_aliases: HashSet<String>,
+}
+
 struct RustToRSharp<'a> {
     probes: &'a TypeProbes<'a>,
     source_lines: Rc<Vec<&'a str>>,
@@ -96,12 +107,7 @@ struct RustToRSharp<'a> {
     strict_unnameable: bool,
     out: String,
     indent: usize,
-    fn_returns: HashMap<String, String>,
-    struct_fields: HashMap<String, HashMap<String, String>>,
-    known_path_roots: HashSet<String>,
-    in_scope_traits: HashSet<String>,
-    renamed_use_origs: HashSet<String>,
-    shadowed_std_aliases: HashSet<String>,
+    symbols: Rc<ModuleSymbols>,
     scopes: Vec<HashMap<String, String>>,
     declared_in_fn: HashSet<String>,
     rustc_probe_aborted: Rc<Cell<bool>>,
@@ -132,14 +138,16 @@ impl<'a> RustToRSharp<'a> {
             options,
             type_hints,
             strict_unnameable,
-            out: String::new(),
+            out: String::with_capacity(raw_source.len()),
             indent: 0,
-            fn_returns: HashMap::new(),
-            struct_fields: HashMap::new(),
-            known_path_roots,
-            in_scope_traits: HashSet::new(),
-            renamed_use_origs: HashSet::new(),
-            shadowed_std_aliases: HashSet::new(),
+            symbols: Rc::new(ModuleSymbols {
+                fn_returns: HashMap::new(),
+                struct_fields: HashMap::new(),
+                known_path_roots,
+                in_scope_traits: HashSet::new(),
+                renamed_use_origs: HashSet::new(),
+                shadowed_std_aliases: HashSet::new(),
+            }),
             scopes: vec![HashMap::new()],
             declared_in_fn: HashSet::new(),
             rustc_probe_aborted: Rc::new(Cell::new(false)),
@@ -157,17 +165,28 @@ impl<'a> RustToRSharp<'a> {
             strict_unnameable: self.strict_unnameable,
             out: String::new(),
             indent: self.indent + 1,
-            fn_returns: self.fn_returns.clone(),
-            struct_fields: self.struct_fields.clone(),
-            known_path_roots: self.known_path_roots.clone(),
-            in_scope_traits: self.in_scope_traits.clone(),
-            renamed_use_origs: self.renamed_use_origs.clone(),
-            shadowed_std_aliases: self.shadowed_std_aliases.clone(),
+            symbols: Rc::clone(&self.symbols),
             scopes: self.scopes.clone(),
             declared_in_fn: HashSet::new(),
             rustc_probe_aborted: Rc::clone(&self.rustc_probe_aborted),
             first_err: Rc::clone(&self.first_err),
         }
+    }
+
+    fn capture_sub_block<F>(&mut self, indent_delta: usize, f: F) -> String
+    where
+        F: FnOnce(&mut Self),
+    {
+        let saved_out = std::mem::take(&mut self.out);
+        let saved_indent = self.indent;
+        let saved_declared = std::mem::take(&mut self.declared_in_fn);
+        self.indent += indent_delta;
+        self.push_scope();
+        f(self);
+        self.pop_scope();
+        self.indent = saved_indent;
+        self.declared_in_fn = saved_declared;
+        std::mem::replace(&mut self.out, saved_out)
     }
 
     fn span_end_utf16(&self, span: proc_macro2::Span) -> (u32, u32) {
@@ -234,8 +253,12 @@ impl<'a> RustToRSharp<'a> {
             )
             || has_unqualified_qself_trait(&ty)
             || impl_trait_returns_elided_ref(&ty)
-            || contains_unimported_dyn_trait(&ty, &self.in_scope_traits, &self.renamed_use_origs)
-            || contains_unimported_impl_future(&ty, &self.in_scope_traits)
+            || contains_unimported_dyn_trait(
+                &ty,
+                &self.symbols.in_scope_traits,
+                &self.symbols.renamed_use_origs,
+            )
+            || contains_unimported_impl_future(&ty, &self.symbols.in_scope_traits)
             || contains_ref_to_static_dyn(&ty)
             || (!verified && (!all_unverified_paths_in_scope(&ty) || impl_trait_contains_dyn(&ty)))
         {
@@ -387,9 +410,7 @@ impl<'a> RustToRSharp<'a> {
     }
 
     fn write_indent(&mut self) {
-        for _ in 0..self.indent {
-            self.out.push_str(INDENT);
-        }
+        push_indent_to(&mut self.out, self.indent);
     }
 
     fn line(&mut self, s: &str) {
@@ -441,15 +462,24 @@ impl<'a> RustToRSharp<'a> {
     }
 
     fn fmt_block(&self, body: &str) -> String {
-        format!("{{\n{body}{}}}", INDENT.repeat(self.indent))
+        let mut s = String::with_capacity(body.len() + self.indent * 4 + 3);
+        s.push_str("{\n");
+        s.push_str(body);
+        push_indent_to(&mut s, self.indent);
+        s.push('}');
+        s
     }
 
     fn fmt_named_block(&self, header: &str, body: &str) -> String {
-        format!(
-            "{header}\n{}{}",
-            INDENT.repeat(self.indent),
-            self.fmt_block(body)
-        )
+        let mut s = String::with_capacity(header.len() + body.len() + self.indent * 8 + 4);
+        s.push_str(header);
+        s.push('\n');
+        push_indent_to(&mut s, self.indent);
+        s.push_str("{\n");
+        s.push_str(body);
+        push_indent_to(&mut s, self.indent);
+        s.push('}');
+        s
     }
 
     fn push_scope(&mut self) {
@@ -537,7 +567,9 @@ impl<'a> RustToRSharp<'a> {
                 Item::Fn(f) => {
                     if f.sig.generics.type_params().next().is_none() {
                         let ret = self.fmt_return_type(&f.sig.output, false);
-                        self.fn_returns.insert(f.sig.ident.to_string(), ret);
+                        Rc::make_mut(&mut self.symbols)
+                            .fn_returns
+                            .insert(f.sig.ident.to_string(), ret);
                     }
                 }
                 Item::Impl(im) => {
@@ -551,16 +583,19 @@ impl<'a> RustToRSharp<'a> {
                             if ret == "Self" {
                                 ret = self_ty.clone();
                             }
-                            self.fn_returns
-                                .insert(format!("{}::{}", self_ty, m.sig.ident), ret.clone());
+                            let fn_returns = &mut Rc::make_mut(&mut self.symbols).fn_returns;
+                            fn_returns.insert(format!("{}::{}", self_ty, m.sig.ident), ret.clone());
                             if !is_trait_impl {
-                                self.fn_returns.insert(m.sig.ident.to_string(), ret);
+                                fn_returns.insert(m.sig.ident.to_string(), ret);
                             }
                         }
                     }
                 }
                 Item::Struct(s) => {
-                    record_shadowed_std_alias(&s.ident.to_string(), &mut self.shadowed_std_aliases);
+                    record_shadowed_std_alias(
+                        &s.ident.to_string(),
+                        &mut Rc::make_mut(&mut self.symbols).shadowed_std_aliases,
+                    );
                     if s.generics.type_params().next().is_none() {
                         let mut fields = HashMap::new();
                         match &s.fields {
@@ -583,25 +618,40 @@ impl<'a> RustToRSharp<'a> {
                             syn::Fields::Unit => {}
                         }
                         if !fields.is_empty() {
-                            self.struct_fields.insert(s.ident.to_string(), fields);
+                            Rc::make_mut(&mut self.symbols)
+                                .struct_fields
+                                .insert(s.ident.to_string(), fields);
                         }
                     }
                 }
                 Item::Enum(e) => {
-                    record_shadowed_std_alias(&e.ident.to_string(), &mut self.shadowed_std_aliases);
+                    record_shadowed_std_alias(
+                        &e.ident.to_string(),
+                        &mut Rc::make_mut(&mut self.symbols).shadowed_std_aliases,
+                    );
                 }
                 Item::Type(t) => {
-                    record_shadowed_std_alias(&t.ident.to_string(), &mut self.shadowed_std_aliases);
+                    record_shadowed_std_alias(
+                        &t.ident.to_string(),
+                        &mut Rc::make_mut(&mut self.symbols).shadowed_std_aliases,
+                    );
                 }
                 Item::Union(u) => {
-                    record_shadowed_std_alias(&u.ident.to_string(), &mut self.shadowed_std_aliases);
+                    record_shadowed_std_alias(
+                        &u.ident.to_string(),
+                        &mut Rc::make_mut(&mut self.symbols).shadowed_std_aliases,
+                    );
                 }
                 Item::Trait(t) => {
-                    record_shadowed_std_alias(&t.ident.to_string(), &mut self.shadowed_std_aliases);
-                    self.in_scope_traits.insert(t.ident.to_string());
+                    let syms = Rc::make_mut(&mut self.symbols);
+                    let name = t.ident.to_string();
+                    record_shadowed_std_alias(&name, &mut syms.shadowed_std_aliases);
+                    syms.in_scope_traits.insert(name);
                 }
                 Item::Mod(m) => {
-                    self.known_path_roots.insert(m.ident.to_string());
+                    Rc::make_mut(&mut self.symbols)
+                        .known_path_roots
+                        .insert(m.ident.to_string());
                 }
                 Item::ExternCrate(ec) => {
                     let key = ec
@@ -609,16 +659,17 @@ impl<'a> RustToRSharp<'a> {
                         .as_ref()
                         .map(|(_, id)| id.to_string())
                         .unwrap_or_else(|| ec.ident.to_string());
-                    self.known_path_roots.insert(key);
+                    Rc::make_mut(&mut self.symbols).known_path_roots.insert(key);
                 }
                 Item::Use(u) => {
-                    collect_use_root_ident(&u.tree, &mut self.known_path_roots);
-                    collect_use_leaf_idents(&u.tree, false, false, &mut self.in_scope_traits);
-                    collect_use_renamed_origs(&u.tree, &mut self.renamed_use_origs);
+                    let syms = Rc::make_mut(&mut self.symbols);
+                    collect_use_root_ident(&u.tree, &mut syms.known_path_roots);
+                    collect_use_leaf_idents(&u.tree, false, false, &mut syms.in_scope_traits);
+                    collect_use_renamed_origs(&u.tree, &mut syms.renamed_use_origs);
                     collect_use_shadowed_std_aliases(
                         &u.tree,
                         false,
-                        &mut self.shadowed_std_aliases,
+                        &mut syms.shadowed_std_aliases,
                     );
                 }
                 _ => {}
@@ -761,10 +812,11 @@ impl<'a> RustToRSharp<'a> {
                 if let Some((_, items)) = &m.content {
                     self.open_block(&format!("{}namespace {}", vis, name));
                     let mut sub = self.child();
-                    sub.known_path_roots.clear();
-                    sub.in_scope_traits.clear();
+                    let syms = Rc::make_mut(&mut sub.symbols);
+                    syms.known_path_roots.clear();
+                    syms.in_scope_traits.clear();
                     for root in ["std", "core", "alloc", "crate", "super", "self", "Self"] {
-                        sub.known_path_roots.insert(root.to_string());
+                        syms.known_path_roots.insert(root.to_string());
                     }
                     sub.collect_signatures(items);
                     sub.emit_split_attrs(&m.attrs, true, "module");
@@ -1587,7 +1639,8 @@ impl<'a> RustToRSharp<'a> {
                     .last()
                     .map(|s| s.ident.to_string())
                     .unwrap_or_default();
-                let known_fields = self.struct_fields.get(&struct_key).cloned();
+                let symbols = Rc::clone(&self.symbols);
+                let known_fields = symbols.struct_fields.get(&struct_key);
                 let fs: Vec<String> = pts
                     .elems
                     .iter()
@@ -1926,7 +1979,8 @@ impl<'a> RustToRSharp<'a> {
                     .last()
                     .map(|s| s.ident.to_string())
                     .unwrap_or_default();
-                let known_fields = self.struct_fields.get(&struct_key).cloned();
+                let symbols = Rc::clone(&self.symbols);
+                let known_fields = symbols.struct_fields.get(&struct_key);
                 let mut fs = Vec::new();
                 let mut any_typed = false;
                 for f in &ps.fields {
@@ -2006,7 +2060,8 @@ impl<'a> RustToRSharp<'a> {
                     .last()
                     .map(|s| s.ident.to_string())
                     .unwrap_or_default();
-                let known_fields = self.struct_fields.get(&struct_key).cloned();
+                let symbols = Rc::clone(&self.symbols);
+                let known_fields = symbols.struct_fields.get(&struct_key);
                 if known_fields.is_none() && !self.strict_unnameable {
                     let pat_s = self.fmt_pat(inner_pat, None);
                     let rhs = self.fmt_expr(&init.expr);
@@ -2742,30 +2797,25 @@ impl<'a> RustToRSharp<'a> {
     }
 
     fn fmt_expr_path(&self, path: &Path) -> String {
-        let formatted = self.fmt_path(path);
-        if path.leading_colon.is_none()
+        let use_colon = path.leading_colon.is_none()
             && path.segments.len() > 1
-            && let Some(first) = path.segments.first()
-        {
-            let first_raw = first.ident.to_string();
-            let first_clean = first_raw.strip_prefix("r#").unwrap_or(&first_raw);
-            let has_all_caps_prefix = path
-                .segments
-                .iter()
-                .take(path.segments.len() - 1)
-                .any(|s| is_all_caps_ident(&s.ident.to_string()));
-            if has_all_caps_prefix
-                || first_clean == "self"
-                || (first_clean.chars().next().is_some_and(|c| c.is_lowercase())
-                    && (!self.known_path_roots.contains(first_clean)
-                        || (first_clean != "crate"
-                            && first_clean != "super"
-                            && self.lookup_var(first_clean).is_some())))
-            {
-                return self.fmt_path_with_sep(path, "::");
-            }
-        }
-        formatted
+            && path.segments.first().is_some_and(|first| {
+                let first_raw = first.ident.to_string();
+                let first_clean = first_raw.strip_prefix("r#").unwrap_or(&first_raw);
+                let has_all_caps_prefix = path
+                    .segments
+                    .iter()
+                    .take(path.segments.len() - 1)
+                    .any(|s| is_all_caps_ident(&s.ident.to_string()));
+                has_all_caps_prefix
+                    || first_clean == "self"
+                    || (first_clean.chars().next().is_some_and(|c| c.is_lowercase())
+                        && (!self.symbols.known_path_roots.contains(first_clean)
+                            || (first_clean != "crate"
+                                && first_clean != "super"
+                                && self.lookup_var(first_clean).is_some())))
+            });
+        self.fmt_path_with_sep(path, if use_colon { "::" } else { "." })
     }
 
     fn fmt_path(&self, path: &Path) -> String {
@@ -2777,10 +2827,16 @@ impl<'a> RustToRSharp<'a> {
             && path.segments.len() == 1
             && path.segments[0].arguments.is_empty()
         {
-            let name = path.segments[0].ident.to_string();
-            if let Some(mapped) = map_rust_primitive(&name) {
+            let raw_name = path.segments[0].ident.to_string();
+            if let Some(mapped) = map_rust_primitive(&raw_name) {
                 return mapped.to_string();
             }
+            let mapped = map_rust_std_alias(&raw_name);
+            return if self.symbols.shadowed_std_aliases.contains(mapped) {
+                escape_ident(&raw_name)
+            } else {
+                escape_ident(mapped)
+            };
         }
         let is_std_root = path.segments.first().is_some_and(|s| {
             matches!(
@@ -2789,7 +2845,7 @@ impl<'a> RustToRSharp<'a> {
             )
         });
         let seg_count = path.segments.len();
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(seg_count);
         for (idx, seg) in path.segments.iter().enumerate() {
             let raw_name = seg.ident.to_string();
             let name = if idx == 0 && raw_name == "self" {
@@ -2798,10 +2854,10 @@ impl<'a> RustToRSharp<'a> {
                 && (seg_count == 1 || (idx + 1 == seg_count && is_std_root))
             {
                 let mapped = map_rust_std_alias(&raw_name);
-                if seg_count == 1 && self.shadowed_std_aliases.contains(&mapped) {
+                if seg_count == 1 && self.symbols.shadowed_std_aliases.contains(mapped) {
                     escape_ident(&raw_name)
                 } else {
-                    escape_ident(&mapped)
+                    escape_ident(mapped)
                 }
             } else {
                 escape_ident(&raw_name)
@@ -3218,7 +3274,7 @@ impl<'a> RustToRSharp<'a> {
                 match eu.op {
                     UnOp::Deref(_) => format!("deref {}", inner),
                     UnOp::Not(_) => format!("!{}", inner),
-                    _ => format!("{}{}", eu.op.to_token_stream(), inner),
+                    _ => format!("-{}", inner),
                 }
             }
             Expr::Reference(er) => {
@@ -3240,13 +3296,14 @@ impl<'a> RustToRSharp<'a> {
                 if let Some(single) = single_tail_expr(&ec.block) {
                     format!("const({})", self.fmt_expr(single))
                 } else {
-                    let mut sub = self.child();
-                    sub.emit_block_stmts(&ec.block, BlockTail::Return);
-                    self.fmt_named_block("const", &sub.out)
+                    let body = self.capture_sub_block(1, |sub| {
+                        sub.emit_block_stmts(&ec.block, BlockTail::Return);
+                    });
+                    self.fmt_named_block("const", &body)
                 }
             }
             Expr::Binary(eb) => {
-                let op = eb.op.to_token_stream().to_string();
+                let op = bin_op_str(&eb.op);
                 format!(
                     "({} {} {})",
                     self.fmt_expr(&eb.left),
@@ -3361,10 +3418,10 @@ impl<'a> RustToRSharp<'a> {
                 if let Some(inline_if) = self.try_fmt_inline_if(eif, true) {
                     inline_if
                 } else {
-                    let mut sub = self.child();
-                    sub.indent = self.indent;
-                    sub.emit_if(eif, false, BlockTail::Value);
-                    sub.out.trim_start().trim_end().to_string()
+                    let body = self.capture_sub_block(0, |sub| {
+                        sub.emit_if(eif, false, BlockTail::Value);
+                    });
+                    body.trim_start().trim_end().to_string()
                 }
             }
             Expr::Loop(el) => {
@@ -3373,9 +3430,10 @@ impl<'a> RustToRSharp<'a> {
                     .as_ref()
                     .map(|l| format!("{}: ", escape_lifetime(&l.name)))
                     .unwrap_or_default();
-                let mut sub = self.child();
-                sub.emit_block_stmts(&el.body, BlockTail::None);
-                self.fmt_named_block(&format!("{}loop", lbl), &sub.out)
+                let body = self.capture_sub_block(1, |sub| {
+                    sub.emit_block_stmts(&el.body, BlockTail::None);
+                });
+                self.fmt_named_block(&format!("{}loop", lbl), &body)
             }
             Expr::While(ew) => {
                 let lbl = ew
@@ -3384,9 +3442,10 @@ impl<'a> RustToRSharp<'a> {
                     .map(|l| format!("{}: ", escape_lifetime(&l.name)))
                     .unwrap_or_default();
                 let cond = self.fmt_condition(&ew.cond);
-                let mut sub = self.child();
-                sub.emit_block_stmts(&ew.body, BlockTail::None);
-                self.fmt_named_block(&format!("{}while ({})", lbl, cond), &sub.out)
+                let body = self.capture_sub_block(1, |sub| {
+                    sub.emit_block_stmts(&ew.body, BlockTail::None);
+                });
+                self.fmt_named_block(&format!("{}while ({})", lbl, cond), &body)
             }
             Expr::ForLoop(ef) => {
                 let lbl = ef
@@ -3396,9 +3455,10 @@ impl<'a> RustToRSharp<'a> {
                     .unwrap_or_default();
                 let pat = self.fmt_for_loop_pat(&ef.pat, &ef.expr);
                 let iter = self.fmt_expr(&ef.expr);
-                let mut sub = self.child();
-                sub.emit_block_stmts(&ef.body, BlockTail::None);
-                self.fmt_named_block(&format!("{}foreach ({} in {})", lbl, pat, iter), &sub.out)
+                let body = self.capture_sub_block(1, |sub| {
+                    sub.emit_block_stmts(&ef.body, BlockTail::None);
+                });
+                self.fmt_named_block(&format!("{}foreach ({} in {})", lbl, pat, iter), &body)
             }
             Expr::Return(er) => match &er.expr {
                 Some(e) => format!("return {}", self.fmt_expr(e)),
@@ -3423,7 +3483,6 @@ impl<'a> RustToRSharp<'a> {
                 let scr = self.fmt_expr(&em.expr);
                 let mut arms = String::new();
                 self.indent += 1;
-                let indent = INDENT.repeat(self.indent);
                 for arm in &em.arms {
                     let mut pfx = String::new();
                     for a in &arm.attrs {
@@ -3453,15 +3512,18 @@ impl<'a> RustToRSharp<'a> {
                         if has_val_tail {
                             format!("{} ({})", header, self.fmt_expr(&arm.body))
                         } else {
-                            let mut sub = self.child();
-                            sub.emit_block_stmts(&eb.block, BlockTail::None);
-                            self.fmt_named_block(&header, &sub.out)
+                            let body = self.capture_sub_block(1, |sub| {
+                                sub.emit_block_stmts(&eb.block, BlockTail::None);
+                            });
+                            self.fmt_named_block(&header, &body)
                         }
                     } else {
                         format!("{} {}", header, self.fmt_expr(&arm.body))
                     };
                     self.pop_scope();
-                    arms.push_str(&format!("{indent}{arm},\n"));
+                    push_indent_to(&mut arms, self.indent);
+                    arms.push_str(&arm);
+                    arms.push_str(",\n");
                 }
                 self.indent -= 1;
                 self.fmt_named_block(&format!("match ({})", scr), &arms)
@@ -3547,7 +3609,6 @@ impl<'a> RustToRSharp<'a> {
                 };
                 let res = match ec.body.as_ref() {
                     Expr::Block(eb) => {
-                        let mut sub = self.child();
                         let has_value_tail = matches!(
                             eb.block.stmts.last(),
                             Some(Stmt::Expr(_, None))
@@ -3561,10 +3622,12 @@ impl<'a> RustToRSharp<'a> {
                         } else {
                             BlockTail::None
                         };
-                        sub.emit_block_stmts(&eb.block, tail);
+                        let body = self.capture_sub_block(1, |sub| {
+                            sub.emit_block_stmts(&eb.block, tail);
+                        });
                         self.fmt_named_block(
                             &format!("{}({}){} =>", prefix, ps.join(", "), ret),
-                            &sub.out,
+                            &body,
                         )
                     }
                     other => format!(
@@ -3580,9 +3643,10 @@ impl<'a> RustToRSharp<'a> {
             }
             Expr::Block(eb) => {
                 if let Some(lbl) = &eb.label {
-                    let mut sub = self.child();
-                    sub.emit_block_stmts(&eb.block, BlockTail::None);
-                    self.fmt_named_block(&format!("{}:", escape_lifetime(&lbl.name)), &sub.out)
+                    let body = self.capture_sub_block(1, |sub| {
+                        sub.emit_block_stmts(&eb.block, BlockTail::None);
+                    });
+                    self.fmt_named_block(&format!("{}:", escape_lifetime(&lbl.name)), &body)
                 } else if let Some(single) = single_tail_expr(&eb.block) {
                     if matches!(single, Expr::Field(_)) {
                         format!("{{ return {}; }}", self.fmt_expr(single))
@@ -3590,9 +3654,10 @@ impl<'a> RustToRSharp<'a> {
                         self.fmt_expr(single)
                     }
                 } else {
-                    let mut sub = self.child();
-                    sub.emit_block_stmts(&eb.block, BlockTail::Value);
-                    self.fmt_block(&sub.out)
+                    let body = self.capture_sub_block(1, |sub| {
+                        sub.emit_block_stmts(&eb.block, BlockTail::Value);
+                    });
+                    self.fmt_block(&body)
                 }
             }
             Expr::Async(ea) => {
@@ -3601,19 +3666,22 @@ impl<'a> RustToRSharp<'a> {
                 } else {
                     "async"
                 };
-                let mut sub = self.child();
-                sub.emit_block_stmts(&ea.block, BlockTail::Return);
-                self.fmt_named_block(header, &sub.out)
+                let body = self.capture_sub_block(1, |sub| {
+                    sub.emit_block_stmts(&ea.block, BlockTail::Return);
+                });
+                self.fmt_named_block(header, &body)
             }
             Expr::Unsafe(eu) => {
-                let mut sub = self.child();
-                sub.emit_block_stmts(&eu.block, BlockTail::Value);
-                self.fmt_named_block("unsafe", &sub.out)
+                let body = self.capture_sub_block(1, |sub| {
+                    sub.emit_block_stmts(&eu.block, BlockTail::Value);
+                });
+                self.fmt_named_block("unsafe", &body)
             }
             Expr::TryBlock(etb) => {
-                let mut sub = self.child();
-                sub.emit_block_stmts(&etb.block, BlockTail::Value);
-                self.fmt_named_block("try", &sub.out)
+                let body = self.capture_sub_block(1, |sub| {
+                    sub.emit_block_stmts(&etb.block, BlockTail::Value);
+                });
+                self.fmt_named_block("try", &body)
             }
             Expr::Yield(ey) => match &ey.expr {
                 Some(e) => format!("yield {}", self.fmt_expr(e)),
@@ -3846,7 +3914,7 @@ impl<'a> RustToRSharp<'a> {
                         .map(|s| s.ident.to_string())
                         .collect::<Vec<_>>()
                         .join("::");
-                    if let Some(ret) = self.fn_returns.get(&rust_key) {
+                    if let Some(ret) = self.symbols.fn_returns.get(&rust_key) {
                         return Some(strip_non_static_lifetimes(ret));
                     }
                 }
@@ -3860,6 +3928,7 @@ impl<'a> RustToRSharp<'a> {
                     "is_empty" => Some("bool".to_string()),
                     "clone" => self.infer_expr_type(&mc.receiver),
                     _ => self
+                        .symbols
                         .fn_returns
                         .get(&m)
                         .map(|r| strip_non_static_lifetimes(r)),
@@ -4629,19 +4698,64 @@ fn format_meta_attr(meta: &syn::Meta, prefix: &str, safety: &str) -> String {
     }
 }
 
+fn push_indent_to(buf: &mut String, indent: usize) {
+    let mut rem = indent * 4;
+    while rem > 0 {
+        let n = rem.min(SPACES.len());
+        buf.push_str(&SPACES[..n]);
+        rem -= n;
+    }
+}
+
+fn bin_op_str(op: &BinOp) -> Cow<'static, str> {
+    Cow::Borrowed(match op {
+        BinOp::Add(_) => "+",
+        BinOp::Sub(_) => "-",
+        BinOp::Mul(_) => "*",
+        BinOp::Div(_) => "/",
+        BinOp::Rem(_) => "%",
+        BinOp::And(_) => "&&",
+        BinOp::Or(_) => "||",
+        BinOp::BitXor(_) => "^",
+        BinOp::BitAnd(_) => "&",
+        BinOp::BitOr(_) => "|",
+        BinOp::Shl(_) => "<<",
+        BinOp::Shr(_) => ">>",
+        BinOp::Eq(_) => "==",
+        BinOp::Lt(_) => "<",
+        BinOp::Le(_) => "<=",
+        BinOp::Ne(_) => "!=",
+        BinOp::Ge(_) => ">=",
+        BinOp::Gt(_) => ">",
+        BinOp::AddAssign(_) => "+=",
+        BinOp::SubAssign(_) => "-=",
+        BinOp::MulAssign(_) => "*=",
+        BinOp::DivAssign(_) => "/=",
+        BinOp::RemAssign(_) => "%=",
+        BinOp::BitXorAssign(_) => "^=",
+        BinOp::BitAndAssign(_) => "&=",
+        BinOp::BitOrAssign(_) => "|=",
+        BinOp::ShlAssign(_) => "<<=",
+        _ => return Cow::Owned(op.to_token_stream().to_string()),
+    })
+}
+
 fn fmt_syn_lit(lit: &syn::Lit) -> String {
     match lit {
+        syn::Lit::Int(li) => li.to_string(),
+        syn::Lit::Float(lf) => lf.to_string(),
+        syn::Lit::Bool(lb) => if lb.value { "true" } else { "false" }.to_string(),
         syn::Lit::Str(ls) => {
-            let raw = ls.to_token_stream().to_string();
+            let raw = ls.token().to_string();
             if raw.starts_with('r') {
                 format_rsharp_raw_str(&ls.value(), "")
             } else {
                 raw
             }
         }
-        syn::Lit::Byte(lb) => lb.to_token_stream().to_string(),
+        syn::Lit::Byte(lb) => lb.token().to_string(),
         syn::Lit::ByteStr(lbs) => {
-            let raw = lbs.to_token_stream().to_string();
+            let raw = lbs.token().to_string();
             if raw.starts_with("br")
                 && let Ok(s) = std::str::from_utf8(&lbs.value())
             {
@@ -4663,7 +4777,7 @@ fn fmt_syn_lit(lit: &syn::Lit) -> String {
             }
         }
         syn::Lit::CStr(lcs) => {
-            let raw = lcs.to_token_stream().to_string();
+            let raw = lcs.token().to_string();
             if let Ok(s) = lcs.value().to_str() {
                 if raw.starts_with("cr") {
                     format!("c{}", format_rsharp_raw_str(s, ""))
@@ -4872,7 +4986,7 @@ fn fmt_use_tree_with_prefix(
             let seg = if n.ident == "self" {
                 "this".to_string()
             } else if in_std {
-                escape_ident(&map_rust_std_alias(&n.ident.to_string()))
+                escape_ident(map_rust_std_alias(&n.ident.to_string()))
             } else {
                 escape_ident(&n.ident.to_string())
             };
@@ -4883,7 +4997,7 @@ fn fmt_use_tree_with_prefix(
             let seg = if r.ident == "self" {
                 "this".to_string()
             } else if in_std {
-                escape_ident(&map_rust_std_alias(&r.ident.to_string()))
+                escape_ident(map_rust_std_alias(&r.ident.to_string()))
             } else {
                 escape_ident(&r.ident.to_string())
             };
@@ -5116,16 +5230,16 @@ fn map_rust_primitive(name: &str) -> Option<&'static str> {
     }
 }
 
-fn map_rust_std_alias(name: &str) -> String {
+fn map_rust_std_alias(name: &str) -> &str {
     match name {
-        "Vec" => "List".to_string(),
-        "VecDeque" => "Queue".to_string(),
-        "HashMap" => "Dictionary".to_string(),
-        "BTreeMap" => "SortedDictionary".to_string(),
-        "BTreeSet" => "SortedSet".to_string(),
-        "BinaryHeap" => "PriorityQueue".to_string(),
-        "String" => "string".to_string(),
-        other => other.to_string(),
+        "Vec" => "List",
+        "VecDeque" => "Queue",
+        "HashMap" => "Dictionary",
+        "BTreeMap" => "SortedDictionary",
+        "BTreeSet" => "SortedSet",
+        "BinaryHeap" => "PriorityQueue",
+        "String" => "string",
+        other => other,
     }
 }
 

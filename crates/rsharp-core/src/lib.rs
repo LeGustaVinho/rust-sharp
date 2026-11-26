@@ -24,8 +24,27 @@ pub use ra_oracle::{
 };
 pub use rustc_runner::{RunOutput, RustcJsonOutput};
 
+fn has_candidate_rust_block(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut offset = 0;
+    while let Some(rel) = source[offset..].find("rust") {
+        let start = offset + rel;
+        let end = start + 4;
+        let left_ok =
+            start == 0 || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+        if left_ok && source[end..].bytes().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+
 /// Counts the number of verbatim `rust { ... }` blocks in R# source code.
 pub fn count_raw_rust_blocks(source: &str) -> usize {
+    if !has_candidate_rust_block(source) {
+        return 0;
+    }
     lexer::tokenize(source)
         .map(|toks| {
             toks.iter()
@@ -111,5 +130,35 @@ mod tests {
         assert!(lib_err.messages.iter().any(|m| m.contains("E0308")));
 
         assert!(check_rsharp_json("void main() { let x = 1; }").is_err());
+    }
+
+    #[test]
+    fn count_raw_rust_blocks_fast_path_and_all_bin_ops_covered() {
+        assert_eq!(count_raw_rust_blocks("void main() { int x = 1; }"), 0);
+        assert_eq!(
+            count_raw_rust_blocks("void main() { int rust_val = 1; /* rust */ }"),
+            0
+        );
+        assert_eq!(count_raw_rust_blocks("rust { type X; }"), 1);
+
+        let all_ops = "\
+fn ops(mut a: i32, b: i32, c: bool) -> i32 {
+    let _ = a + b - a * b / 1 % 2;
+    let _ = (c && !c) || (a == b) || (a != b) || (a < b) || (a <= b) || (a > b) || (a >= b);
+    let _ = (a ^ b) & (a | b) | (a << 1) | (a >> 1);
+    a += 1; a -= 1; a *= 2; a /= 2; a %= 3;
+    a ^= 1; a &= 7; a |= 2; a <<= 1; a >>= 1;
+    a
+}
+";
+        let rsh = convert_from_rust(
+            all_ops,
+            FromRustOptions {
+                use_rustc_inference: false,
+            },
+        )
+        .unwrap();
+        assert!(rsh.contains(">>="));
+        assert!(rsh.contains("<<="));
     }
 }
