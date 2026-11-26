@@ -71,6 +71,7 @@ pub struct DeclSymbol {
 pub struct DocumentIndex {
     pub outline: Vec<DeclSymbol>,
     pub symbols: Vec<DeclSymbol>,
+    pub(crate) imports: Vec<crate::imports::Import>,
 }
 
 impl DocumentIndex {
@@ -80,12 +81,14 @@ impl DocumentIndex {
             tokens,
             pos: 0,
             all: Vec::new(),
+            imports: Vec::new(),
         };
         let end = tokens.len().saturating_sub(1);
         let outline = scanner.scan_items(end, None, 0, source.len());
         Self {
             outline,
             symbols: scanner.all,
+            imports: scanner.imports,
         }
     }
 
@@ -236,6 +239,7 @@ fn to_lsp_doc_symbol(sym: &DeclSymbol, source: &str, lines: &LineIndex) -> Docum
 
 #[derive(Default)]
 struct Modifiers {
+    visible: bool,
     is_mut: bool,
     is_static: bool,
     is_async: bool,
@@ -248,6 +252,7 @@ struct Scanner<'a> {
     tokens: &'a [Token],
     pos: usize,
     all: Vec<DeclSymbol>,
+    imports: Vec<crate::imports::Import>,
 }
 
 impl<'a> Scanner<'a> {
@@ -349,6 +354,7 @@ impl<'a> Scanner<'a> {
         while self.pos < end {
             match &self.tokens[self.pos].kind {
                 TokenKind::Kw(Keyword::Public) => {
+                    mods.visible = true;
                     self.pos += 1;
                     if self.pos + 1 < end
                         && matches!(self.tokens[self.pos].kind, TokenKind::LParen)
@@ -367,6 +373,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 TokenKind::Kw(Keyword::Internal | Keyword::Private | Keyword::Unsafe) => {
+                    mods.visible |= self.tokens[self.pos].kind == TokenKind::Kw(Keyword::Internal);
                     self.pos += 1;
                 }
                 TokenKind::Kw(Keyword::Const) => {
@@ -465,7 +472,16 @@ impl<'a> Scanner<'a> {
 
             match &self.tokens[self.pos].kind {
                 TokenKind::Kw(Keyword::Using) => {
+                    let start = self.pos + 1;
                     self.skip_to_semicolon(end);
+                    if self.tokens[self.pos - 1].kind == TokenKind::Semicolon {
+                        crate::imports::collect(
+                            &self.tokens[start..self.pos - 1],
+                            scope_start..=scope_end,
+                            mods.visible,
+                            &mut self.imports,
+                        );
+                    }
                 }
                 TokenKind::Kw(Keyword::Namespace) => {
                     if let Some(sym) =
@@ -1058,7 +1074,11 @@ impl<'a> Scanner<'a> {
     ) -> Option<DeclSymbol> {
         self.pos += 1; // 'alias' | 'type'
         let (name, sel_span) = self.take_ident(end)?;
+        let start = self.pos;
         self.skip_to_semicolon(end);
+        let ty_name = (start..self.pos)
+            .find(|i| self.tokens[*i].kind == TokenKind::Eq)
+            .and_then(|i| self.extract_base_type_name(i + 1, self.pos, owner));
         let full_end = self.tokens[self.pos.saturating_sub(1)].span.end;
         Some(DeclSymbol {
             name,
@@ -1068,7 +1088,7 @@ impl<'a> Scanner<'a> {
             scope_start,
             scope_end,
             owner: owner.map(str::to_string),
-            ty_name: None,
+            ty_name,
             signature: self.slice_text(item_start.start, full_end),
             docs,
             is_mut: false,
@@ -1461,7 +1481,7 @@ impl<'a> Scanner<'a> {
 
     fn scan_body_locals(&mut self, lbrace: usize, rbrace: usize, owner: Option<&str>) {
         // Maintain stack of enclosing block end byte offsets.
-        let mut block_ends = vec![self.tokens[rbrace].span.end];
+        let mut blocks = vec![(self.tokens[lbrace].span.start, self.tokens[rbrace].span.end)];
         let mut i = lbrace + 1;
         let mut at_stmt_start = true;
 
@@ -1469,12 +1489,12 @@ impl<'a> Scanner<'a> {
             match &self.tokens[i].kind {
                 TokenKind::LBrace => {
                     let close = self.find_matching_delim(i, &TokenKind::LBrace, &TokenKind::RBrace);
-                    block_ends.push(self.tokens[close].span.end);
+                    blocks.push((self.tokens[i].span.start, self.tokens[close].span.end));
                     at_stmt_start = true;
                     i += 1;
                 }
                 TokenKind::RBrace => {
-                    block_ends.pop();
+                    blocks.pop();
                     at_stmt_start = true;
                     i += 1;
                 }
@@ -1482,11 +1502,24 @@ impl<'a> Scanner<'a> {
                     at_stmt_start = true;
                     i += 1;
                 }
+                TokenKind::Kw(Keyword::Using) => {
+                    let end = (i + 1..rbrace)
+                        .find(|j| self.tokens[*j].kind == TokenKind::Semicolon)
+                        .unwrap_or(rbrace);
+                    let (start_pos, end_pos) = blocks.last().unwrap();
+                    crate::imports::collect(
+                        &self.tokens[i + 1..end],
+                        *start_pos..=*end_pos,
+                        false,
+                        &mut self.imports,
+                    );
+                    i = end;
+                }
                 TokenKind::Kw(Keyword::Foreach) => {
                     if i + 1 < rbrace && matches!(self.tokens[i + 1].kind, TokenKind::LParen) {
                         let rp =
                             self.find_matching_delim(i + 1, &TokenKind::LParen, &TokenKind::RParen);
-                        let loop_end = self.block_end_after(rp + 1, *block_ends.last().unwrap());
+                        let loop_end = self.block_end_after(rp + 1, blocks.last().unwrap().1);
                         // `foreach ([mut] Type name in iter)`
                         let mut in_idx = i + 2;
                         while in_idx < rp
@@ -1513,7 +1546,7 @@ impl<'a> Scanner<'a> {
                     if i + 1 < rbrace && matches!(self.tokens[i + 1].kind, TokenKind::LParen) {
                         let rp =
                             self.find_matching_delim(i + 1, &TokenKind::LParen, &TokenKind::RParen);
-                        let loop_end = self.block_end_after(rp + 1, *block_ends.last().unwrap());
+                        let loop_end = self.block_end_after(rp + 1, blocks.last().unwrap().1);
                         let mut eq_idx = i + 2;
                         while eq_idx < rp
                             && !matches!(
@@ -1540,7 +1573,7 @@ impl<'a> Scanner<'a> {
                 }
                 TokenKind::Kw(Keyword::Is) => {
                     // Pattern binding inside `if (x is Some(int n))` or `while (x is Ok(read int v))`.
-                    let scope_end = *block_ends.last().unwrap();
+                    let scope_end = blocks.last().unwrap().1;
                     let mut j = i + 1;
                     while j < rbrace
                         && !matches!(
@@ -1567,7 +1600,7 @@ impl<'a> Scanner<'a> {
                     at_stmt_start = false;
                 }
                 _ if at_stmt_start => {
-                    let scope_end = *block_ends.last().unwrap();
+                    let scope_end = blocks.last().unwrap().1;
                     if let Some(next_i) = self.try_scan_local_stmt(i, rbrace, owner, scope_end) {
                         i = next_i;
                         at_stmt_start = false;
@@ -1769,21 +1802,18 @@ impl<'a> Scanner<'a> {
             }
             _ => {}
         }
-        // Take the last identifier segment in `a.b.Type<...>` before generics/array/`?`.
-        let mut last_ident: Option<String> = None;
+        // Keep the module path so types with the same name remain distinguishable.
+        let mut parts = Vec::new();
         let mut j = i;
         while j < end {
-            match &self.tokens[j].kind {
-                TokenKind::Ident { name, .. } => {
-                    last_ident = Some(name.clone());
-                }
-                TokenKind::Dot | TokenKind::ColonColon => {}
-                TokenKind::Lt | TokenKind::LBracket | TokenKind::Question => break,
-                _ => break,
+            if let Some(part) = crate::imports::segment(&self.tokens[j]) {
+                parts.push(part);
+            } else if !matches!(self.tokens[j].kind, TokenKind::Dot | TokenKind::ColonColon) {
+                break;
             }
             j += 1;
         }
-        last_ident
+        (!parts.is_empty()).then(|| parts.join("."))
     }
 
     fn take_ident(&mut self, end: usize) -> Option<(String, Span)> {

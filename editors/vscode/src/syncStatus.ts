@@ -21,6 +21,7 @@ export function registerSyncStatus(context: ExtensionContext): void {
 
   function refresh() {
     const settings = activeSettings();
+    void commands.executeCommand("setContext", "rsharp.hasOriginalProject", Boolean(settings));
     if (!settings) {
       status.hide();
       return;

@@ -5,11 +5,11 @@ use lsp_types::{
     Diagnostic, DidChangeConfigurationParams, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverParams, HoverProviderCapability, Location, MarkupContent,
-    MarkupKind, OneOf, PublishDiagnosticsParams, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent, MarkupKind, OneOf,
+    PublishDiagnosticsParams, SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri,
 };
 use rsharp_core::lexer;
 use rsharp_core::token::Token;
@@ -18,24 +18,42 @@ use serde_json::Value;
 use crate::analysis::{DeclKind, DeclSymbol, DocumentIndex};
 use crate::builtins::{BUILTINS, BuiltinKind, builtin_members_for, find_builtin};
 use crate::diagnostics::{semantic_diagnostics, syntax_diagnostics};
+use crate::navigation::RESOLUTION_DEPTH;
 use crate::position::{LineIndex, ident_at_position};
 use crate::semantic_tokens::{compute_semantic_tokens, legend};
 
 #[derive(Debug, Clone)]
 pub struct DocumentState {
+    pub uri: Uri,
+    pub(crate) module: crate::workspace::Module,
+    pub(crate) version: Option<i32>,
+    pub(crate) fresh: bool,
     pub text: String,
     pub lines: LineIndex,
     pub tokens: Vec<Token>,
+    pub(crate) expressions: Vec<Vec<Token>>,
     pub index: DocumentIndex,
 }
 
 impl DocumentState {
-    fn new(text: String, prior: Option<&DocumentState>) -> Self {
+    pub(crate) fn new(
+        uri: Uri,
+        text: String,
+        version: Option<i32>,
+        roots: &[std::path::PathBuf],
+        prior: Option<&DocumentState>,
+    ) -> Self {
+        let module = crate::workspace::Module::new(&uri, roots);
         let lines = LineIndex::new(&text);
         match lexer::tokenize(&text) {
             Ok(tokens) => {
                 let index = DocumentIndex::build(&text, &tokens);
                 Self {
+                    uri,
+                    module,
+                    version,
+                    fresh: true,
+                    expressions: crate::interpolation::expression_tokens(&text, &tokens),
                     text,
                     lines,
                     tokens,
@@ -48,6 +66,11 @@ impl DocumentState {
                     None => (Vec::new(), DocumentIndex::default()),
                 };
                 Self {
+                    uri,
+                    module,
+                    version,
+                    fresh: false,
+                    expressions: Vec::new(),
                     text,
                     lines,
                     tokens,
@@ -62,6 +85,9 @@ impl DocumentState {
 #[derive(Debug)]
 pub struct ServerState {
     pub docs: HashMap<Uri, DocumentState>,
+    pub(crate) roots: Vec<std::path::PathBuf>,
+    pub(crate) exports: crate::workspace::SymbolMap,
+    pub(crate) reexports: crate::workspace::SymbolMap,
     pub check_on_save: bool,
 }
 
@@ -69,6 +95,9 @@ impl Default for ServerState {
     fn default() -> Self {
         Self {
             docs: HashMap::new(),
+            roots: Vec::new(),
+            exports: HashMap::new(),
+            reexports: HashMap::new(),
             check_on_save: true,
         }
     }
@@ -87,6 +116,20 @@ pub fn server_capabilities() -> ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        type_definition_provider: Some(true.into()),
+        references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(lsp_types::RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        workspace: Some(lsp_types::WorkspaceServerCapabilities {
+            workspace_folders: Some(lsp_types::WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
+            ..Default::default()
+        }),
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_string()]),
             ..CompletionOptions::default()
@@ -116,9 +159,15 @@ impl ServerState {
 
     pub fn did_open(&mut self, params: DidOpenTextDocumentParams) -> PublishDiagnosticsParams {
         let uri = params.text_document.uri;
-        let doc = DocumentState::new(params.text_document.text, None);
+        let doc = DocumentState::new(
+            uri.clone(),
+            params.text_document.text,
+            Some(params.text_document.version),
+            &self.roots,
+            None,
+        );
         let diagnostics = syntax_diagnostics(&doc.text, &doc.lines);
-        self.docs.insert(uri.clone(), doc);
+        self.put(doc);
         PublishDiagnosticsParams::new(uri, diagnostics, None)
     }
 
@@ -128,15 +177,21 @@ impl ServerState {
     ) -> Option<PublishDiagnosticsParams> {
         let uri = params.text_document.uri;
         let text = params.content_changes.into_iter().last()?.text;
-        let doc = DocumentState::new(text, self.docs.get(&uri));
+        let doc = DocumentState::new(
+            uri.clone(),
+            text,
+            Some(params.text_document.version),
+            &self.roots,
+            self.document(&uri),
+        );
         let diagnostics = syntax_diagnostics(&doc.text, &doc.lines);
-        self.docs.insert(uri.clone(), doc);
+        self.put(doc);
         Some(PublishDiagnosticsParams::new(uri, diagnostics, None))
     }
 
     pub fn did_save(&self, params: DidSaveTextDocumentParams) -> Option<PublishDiagnosticsParams> {
         let uri = params.text_document.uri;
-        let doc = self.docs.get(&uri)?;
+        let doc = self.document(&uri)?;
         let mut diagnostics = syntax_diagnostics(&doc.text, &doc.lines);
         if diagnostics.is_empty() && self.check_on_save {
             diagnostics.extend(semantic_diagnostics(&doc.text, &doc.lines, &doc.index));
@@ -146,7 +201,8 @@ impl ServerState {
 
     pub fn did_close(&mut self, params: DidCloseTextDocumentParams) -> PublishDiagnosticsParams {
         let uri = params.text_document.uri;
-        self.docs.remove(&uri);
+        self.remove(&crate::workspace::key(&uri));
+        self.reload(&uri);
         PublishDiagnosticsParams::new(uri, Vec::<Diagnostic>::new(), None)
     }
 
@@ -155,7 +211,7 @@ impl ServerState {
     }
 
     pub fn document_symbol(&self, params: DocumentSymbolParams) -> Option<DocumentSymbolResponse> {
-        let doc = self.docs.get(&params.text_document.uri)?;
+        let doc = self.document(&params.text_document.uri)?;
         let symbols = doc.index.to_document_symbols(&doc.text, &doc.lines);
         Some(DocumentSymbolResponse::Nested(symbols))
     }
@@ -163,7 +219,7 @@ impl ServerState {
     pub fn hover(&self, params: HoverParams) -> Option<Hover> {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
-        let doc = self.docs.get(uri)?;
+        let doc = self.document(uri)?;
         let cursor = ident_at_position(&doc.text, &doc.lines, pos)?;
         if cursor.name.is_empty() {
             return None;
@@ -171,14 +227,10 @@ impl ServerState {
         let offset = doc.lines.position_to_offset(&doc.text, pos);
 
         let method_call = crate::functional_methods::call_separator(doc, &cursor);
-
-        // 1. Resolve in current document (scoped or receiver member).
-        if (method_call.is_none() || cursor.receiver.is_some())
-            && let Some(sym) =
-                doc.index
-                    .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
+        if let Some(found) = self.at(&params.text_document_position_params)
+            && (method_call.is_none() || cursor.receiver.is_some() || found.sym.owner.is_some())
         {
-            return Some(hover_for_symbol(sym, cursor.range));
+            return Some(hover_for_symbol(found.sym, cursor.range));
         }
 
         // 2. Built-in receiver member (e.g., `accounts.Add`, `text.Length`).
@@ -194,17 +246,6 @@ impl ServerState {
             ));
         }
 
-        // 3. Cross-open-document top-level symbol lookup.
-        if cursor.receiver.is_none() && method_call.is_none() {
-            for (other_uri, other_doc) in &self.docs {
-                if other_uri != uri
-                    && let Some(sym) = other_doc.index.resolve_symbol(&cursor.name, 0, None)
-                {
-                    return Some(hover_for_symbol(sym, cursor.range));
-                }
-            }
-        }
-
         if let Some(separator) = method_call
             && let Some(markdown) =
                 crate::functional_methods::documentation(doc, &cursor.name, separator)
@@ -212,7 +253,6 @@ impl ServerState {
             return Some(make_hover(markdown, cursor.range));
         }
 
-        // 4. Built-in keyword / primitive / prelude symbol.
         let builtin = find_builtin(&cursor.name)?;
         Some(make_hover(
             format!(
@@ -224,49 +264,23 @@ impl ServerState {
     }
 
     pub fn goto_definition(&self, params: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let pos = params.text_document_position_params.position;
-        let doc = self.docs.get(uri)?;
-        let cursor = ident_at_position(&doc.text, &doc.lines, pos)?;
-        if cursor.name.is_empty() {
-            return None;
-        }
-        let offset = doc.lines.position_to_offset(&doc.text, pos);
+        self.at(&params.text_document_position_params)
+            .map(|s| GotoDefinitionResponse::Scalar(s.location()))
+    }
 
-        if let Some(sym) =
-            doc.index
-                .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
-        {
-            let range = doc.lines.span_to_range(&doc.text, sym.selection_span);
-            return Some(GotoDefinitionResponse::Scalar(Location::new(
-                uri.clone(),
-                range,
-            )));
-        }
-
-        // Cross-open-document lookup.
-        if cursor.receiver.is_none() {
-            for (other_uri, other_doc) in &self.docs {
-                if other_uri != uri
-                    && let Some(sym) = other_doc.index.resolve_symbol(&cursor.name, 0, None)
-                {
-                    let range = other_doc
-                        .lines
-                        .span_to_range(&other_doc.text, sym.selection_span);
-                    return Some(GotoDefinitionResponse::Scalar(Location::new(
-                        other_uri.clone(),
-                        range,
-                    )));
-                }
-            }
-        }
-        None
+    pub fn goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Option<GotoDefinitionResponse> {
+        let found = self.at(&params.text_document_position_params)?;
+        self.type_of(found, RESOLUTION_DEPTH)
+            .map(|s| GotoDefinitionResponse::Scalar(s.location()))
     }
 
     pub fn completion(&self, params: CompletionParams) -> Option<CompletionResponse> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
-        let doc = self.docs.get(uri)?;
+        let doc = self.document(uri)?;
         let offset = doc.lines.position_to_offset(&doc.text, pos);
         let cursor = ident_at_position(&doc.text, &doc.lines, pos);
 
@@ -276,14 +290,23 @@ impl ServerState {
         if let Some(c) = &cursor
             && c.dot_triggered
         {
+            let start = doc.lines.position_to_offset(&doc.text, c.range.start);
+            let tokens = doc.stream_at(start);
+            if let Some(dot) = tokens
+                .partition_point(|t| t.span.end <= start)
+                .checked_sub(1)
+                && let Some(found) = self.before_dot(doc, tokens, dot, RESOLUTION_DEPTH)
+                && let Some(owner) = self.type_of(found, RESOLUTION_DEPTH)
+            {
+                for member in self.members(owner) {
+                    if seen.insert(member.sym.name.clone()) {
+                        items.push(symbol_to_completion(member.sym));
+                    }
+                }
+            }
             if let Some(recv) = c.receiver.as_deref()
                 && let Some(ty_name) = doc.index.resolve_receiver_type(recv, offset)
             {
-                for member in doc.index.members_of(&ty_name) {
-                    if seen.insert(member.name.clone()) {
-                        items.push(symbol_to_completion(member));
-                    }
-                }
                 for builtin_member in builtin_members_for(&ty_name) {
                     if seen.insert(builtin_member.name.to_string()) {
                         items.push(CompletionItem {
@@ -334,7 +357,7 @@ impl ServerState {
         &self,
         params: SemanticTokensParams,
     ) -> Option<SemanticTokensResult> {
-        let doc = self.docs.get(&params.text_document.uri)?;
+        let doc = self.document(&params.text_document.uri)?;
         let data = compute_semantic_tokens(&doc.text, &doc.tokens, &doc.lines, &doc.index);
         Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,

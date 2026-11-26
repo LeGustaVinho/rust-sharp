@@ -60,6 +60,20 @@ export class RustSourceSync {
 
   constructor(private readonly host: SyncHost) {}
 
+  originalForComparison(root: string, source: string): string | undefined {
+    const copy = findConvertedFolder(root, source);
+    if (!copy) {
+      return;
+    }
+    const name = rustName(relative(copy, source));
+    const originals = this.host.state.get<Originals>(stateKey(copy));
+    const target = join(dirname(copy), name);
+    if ((!originals || Object.hasOwn(originals, name)) && isProjectFile(root, target)) {
+      return target;
+    }
+    return undefined;
+  }
+
   rememberProject(copy: string): Promise<Originals> {
     return this.inProject(dirname(copy), () => this.recordOriginals(copy));
   }

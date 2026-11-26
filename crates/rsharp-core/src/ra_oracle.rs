@@ -81,15 +81,29 @@ pub fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
 /// Converts a filesystem path into a standard `file://` URI accepted by `rust-analyzer`.
 pub fn path_to_file_uri(path: &Path) -> String {
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let raw = abs.to_string_lossy();
+    absolute_file_uri(&abs)
+}
+
+/// Encodes an absolute path, including paths for files deleted since an editor indexed them.
+pub fn absolute_file_uri(path: &Path) -> String {
+    let raw = path.to_string_lossy();
     let stripped = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
-    let forward = stripped.replace('\\', "/");
-    let mut encoded = String::with_capacity(forward.len() + 16);
-    if forward.starts_with('/') {
-        encoded.push_str("file://");
-    } else {
-        encoded.push_str("file:///");
+    let mut forward = stripped.replace('\\', "/");
+    if cfg!(windows) {
+        if let Some(unc) = forward.strip_prefix("UNC/") {
+            forward = format!("//{unc}");
+        }
+        if forward.as_bytes().get(1) == Some(&b':') {
+            forward[..1].make_ascii_uppercase();
+        }
     }
+    let (prefix, forward) = match forward.strip_prefix("//") {
+        Some(unc) if cfg!(windows) => ("file://", unc),
+        _ if forward.starts_with('/') => ("file://", forward.as_str()),
+        _ => ("file:///", forward.as_str()),
+    };
+    let mut encoded = String::with_capacity(forward.len() + prefix.len());
+    encoded.push_str(prefix);
     for b in forward.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {

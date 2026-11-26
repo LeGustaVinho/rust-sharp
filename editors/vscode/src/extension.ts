@@ -1,11 +1,12 @@
 import type {
   ExtensionContext,
+  FileSystemWatcher,
   OutputChannel,
   Terminal,
   TextDocumentContentProvider,
   Uri as VsCodeUri,
 } from "vscode";
-import { relative } from "node:path";
+import { basename, relative } from "node:path";
 import {
   EventEmitter,
   Uri,
@@ -64,6 +65,7 @@ function resolveCurrentBinary(): string | undefined {
 
 async function startLanguageClient(
   outputChannel: OutputChannel,
+  files: FileSystemWatcher,
 ): Promise<void> {
   const bin = resolveCurrentBinary();
   if (!bin) {
@@ -78,7 +80,8 @@ async function startLanguageClient(
     args: ["lsp"],
   };
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "rsharp" }],
+    documentSelector: [{ scheme: "file", language: "rsharp" }, { scheme: "untitled", language: "rsharp" }],
+    synchronize: { fileEvents: files },
     outputChannel,
     initializationOptions: {
       checkOnSave: getCheckOnSave(),
@@ -105,7 +108,8 @@ async function stopLanguageClient(): Promise<void> {
 
 export async function activate(context: ExtensionContext): Promise<void> {
   const outputChannel = window.createOutputChannel("R#");
-  context.subscriptions.push(outputChannel);
+  const files = workspace.createFileSystemWatcher("**/*.rsharp");
+  context.subscriptions.push(outputChannel, files);
 
   const execRunner = defaultExecFile();
   const runProc = (cmd: string, args: readonly string[]) =>
@@ -120,6 +124,45 @@ export async function activate(context: ExtensionContext): Promise<void> {
     confirm: async (message, action) =>
       await window.showWarningMessage(message, { modal: true }, action) === action,
   });
+
+  const comparisons = new Map<string, string>();
+  const comparisonChanges = new EventEmitter<VsCodeUri>();
+  const comparisonScheme = "rsharp-sync-preview";
+  context.subscriptions.push(
+    comparisonChanges,
+    workspace.registerTextDocumentContentProvider(comparisonScheme, {
+      onDidChange: comparisonChanges.event,
+      provideTextDocumentContent: (uri) => comparisons.get(uri.toString()),
+    }),
+    workspace.onDidCloseTextDocument((doc) => comparisons.delete(doc.uri.toString())),
+    commands.registerCommand("rsharp.compareOriginalRust", async () => {
+      const doc = window.activeTextEditor?.document;
+      const folder = doc?.languageId === "rsharp" && doc.uri.scheme === "file" && workspace.getWorkspaceFolder(doc.uri);
+      const target = folder && rustSync.originalForComparison(folder.uri.fsPath, doc.uri.fsPath);
+      if (!target) {
+        void window.showInformationMessage("Open an R# file linked to an original Rust file in this workspace.");
+        return;
+      }
+      if (!client) {
+        void window.showErrorMessage("Start the R# language server to compare with the original Rust.");
+        return;
+      }
+      if (workspace.textDocuments.some((d) => d.isDirty && d.uri.scheme === "file" && relative(d.uri.fsPath, target) === "")) {
+        void window.showInformationMessage("Save or revert the Rust editor changes before comparing with the original file on disk.");
+        return;
+      }
+      try {
+        const generated = await client.sendRequest<string>("rsharp/rustForSync", { text: doc.getText() });
+        const original = Uri.file(target);
+        const preview = original.with({ scheme: comparisonScheme, query: doc.uri.toString() });
+        comparisons.set(preview.toString(), generated);
+        comparisonChanges.fire(preview);
+        await commands.executeCommand("vscode.diff", original, preview, `${basename(target)} — Original ↔ Rust Sync`);
+      } catch (error) {
+        void window.showErrorMessage(`Could not compare the original Rust: ${error}`);
+      }
+    }),
+  );
 
   const previewEmitter = new EventEmitter<VsCodeUri>();
   const previewModel = new RustPreviewModel({
@@ -222,7 +265,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
   const restartServer = async () => {
     serverRequested = true;
     await stopLanguageClient();
-    await startLanguageClient(outputChannel);
+    await startLanguageClient(outputChannel, files);
   };
   const startForOpenDocuments = async () => {
     if (

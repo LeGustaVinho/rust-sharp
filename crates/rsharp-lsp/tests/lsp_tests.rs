@@ -33,6 +33,10 @@ struct LspHarness {
 
 impl LspHarness {
     fn start(init_opts: Option<Value>) -> Self {
+        Self::initialize(json!({"capabilities": {}, "initializationOptions": init_opts}))
+    }
+
+    fn initialize(params: Value) -> Self {
         let (server, client) = Connection::memory();
         let server_thread = std::thread::spawn(move || run_connection(&server));
         let mut h = Self {
@@ -40,10 +44,6 @@ impl LspHarness {
             server_thread: Some(server_thread),
             next_id: 1,
         };
-        let mut params = json!({ "capabilities": {} });
-        if let Some(opts) = init_opts {
-            params["initializationOptions"] = opts;
-        }
         let resp = h.request("initialize", params);
         assert!(resp.error.is_none());
         assert!(resp.result.unwrap().get("capabilities").is_some());
@@ -103,6 +103,8 @@ fn find_pos(source: &str, needle: &str) -> Position {
     let idx = source.find(needle).expect("needle not found in source");
     LineIndex::new(source).offset_to_position(source, idx)
 }
+
+mod navigation;
 
 #[test]
 fn lsp_full_workflow_on_examples_and_ide_features() {

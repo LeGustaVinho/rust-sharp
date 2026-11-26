@@ -50,6 +50,8 @@ async function fixture(t: TestContext) {
 it("maps only existing originals in a converted Cargo tree, including nested modules", async (t) => {
   const f = await fixture(t);
   assert.equal(findConvertedFolder(f.root, f.source), f.copy);
+  assert.equal(f.sync.originalForComparison(f.root, f.source), f.target);
+  assert.equal(f.sync.originalForComparison(f.root, f.target), undefined);
   assert.equal(findConvertedFolder(f.copy, f.source), undefined);
   assert.equal(findConvertedFolder(f.project, join(f.root, "outside.rsharp")), undefined);
   assert.equal(findConvertedFolder(f.project, f.target), undefined);
@@ -66,6 +68,7 @@ it("maps only existing originals in a converted Cargo tree, including nested mod
   await f.sync.save(f.root, join(f.project, "standalone.rsharp"), () => true);
   await f.sync.save(f.root, join(f.copy, "new.rsharp"), () => true);
   await fs.writeFile(join(f.project, "new.rs"), "not part of the conversion");
+  assert.equal(f.sync.originalForComparison(f.root, join(f.copy, "new.rsharp")), undefined);
   await f.sync.save(f.root, join(f.copy, "new.rsharp"), () => true);
   assert.equal(f.calls(), 0);
 

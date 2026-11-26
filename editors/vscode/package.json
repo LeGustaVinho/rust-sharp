@@ -2,7 +2,7 @@
   "name": "rsharp-vscode",
   "displayName": "R# Language Support",
   "description": "C#-like syntax and semantic highlighting, live syntax checking, rustc borrow/type checking, and core IDE features for R# (.rsharp).",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "publisher": "rsharp",
   "license": "MIT",
   "engines": {
@@ -105,6 +105,11 @@
         "icon": "$(open-preview)"
       },
       {
+        "command": "rsharp.compareOriginalRust",
+        "title": "R#: Compare with Original Rust",
+        "icon": "$(diff)"
+      },
+      {
         "command": "rsharp.convertFromRust",
         "title": "R#: Convert Rust File to R#"
       },
@@ -123,6 +128,11 @@
         {
           "when": "resourceLangId == rsharp",
           "command": "rsharp.previewRust",
+          "group": "navigation"
+        },
+        {
+          "when": "rsharp.hasOriginalProject",
+          "command": "rsharp.compareOriginalRust",
           "group": "navigation"
         }
       ]

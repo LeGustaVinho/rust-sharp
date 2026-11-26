@@ -14,8 +14,17 @@ Language support for **R# (`.rsharp`)** in Visual Studio Code, powered by the na
   - `R#: Run Current File`
   - `R#: Check Current File`
   - `R#: Preview Generated Rust` (live side-by-side read-only Rust view)
+  - `R#: Compare with Original Rust` (diff against the linked Cargo source using the current R# buffer)
   - `R#: Convert Rust File to R#`
   - `R#: Restart Language Server`
+
+## Navigate and edit R# projects
+
+Press **F12** or **Ctrl+click** on either part of `Status.Ready` to open the enum or the variant. The language server indexes workspace `.rsharp` files, including closed modules, and resolves qualified paths, grouped imports, aliases and re-exports. Unsaved edits take precedence over disk contents. Untitled R# documents also support navigation within the document.
+
+Use **Go to Type Definition** on a variable to open its type, including a `var` initialized by a function with a declared return type. Type `Status.` to complete its variants. Inside a `match` on that enum, press **Ctrl+.** and select **Add missing enum variants**. New arms use `todo!()` as a placeholder. Replace those placeholders with your implementation.
+
+Use **Shift+F12** to find references and **F2** to rename a symbol across the project. An explicit import alias keeps its spelling when the original declaration is renamed.
 
 ## Convert a Rust project
 
@@ -26,6 +35,8 @@ Select **Convert to R#** to convert the saved sources with `rsharp from-rust --p
 ### Build changes with Cargo
 
 Keep the original Cargo project open and open a converted `.rsharp` file. Click **Rust Sync: Off** in the status bar to turn synchronization on for its workspace folder. Click **Rust Sync: On** to turn it off. The same checkbox is available in Settings under `rsharp.syncRustOnSave`.
+
+Use **R#: Compare with Original Rust** in the editor toolbar to compare your current R# buffer with the linked `.rs` on disk before saving. The generated side uses the same prelude settings as Rust Sync. Comparing works with synchronization switched off or on.
 
 With sync on, saving `rsharp-…/src/main.rsharp` regenerates `src/main.rs` for the next `cargo build`. Module files follow the same relative paths. This replaces the entire Rust source, so formatting and comments can change. The **R#** Output channel lists each updated file.
 
@@ -53,7 +64,7 @@ npm test
 
 # 3. Package a local .vsix and install it into VS Code
 npm run package
-code --install-extension rsharp-vscode-0.1.2.vsix
+code --install-extension rsharp-vscode-0.2.0.vsix
 ```
 
 Or open `editors/vscode` in VS Code and press **F5** to launch an Extension Development Host.

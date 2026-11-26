@@ -41,6 +41,9 @@ interface FakeState {
   clientStops: number;
   notifications: Array<{ method: string; params: unknown }>;
   shownDocs: unknown[];
+  diff?: unknown[];
+  closeDoc?: (doc: { uri: { toString(): string } }) => void;
+  failComparison?: boolean;
 }
 
 function createFakeEnv() {
@@ -80,6 +83,12 @@ function createFakeEnv() {
   }
 
   class FakeLanguageClient {
+    async sendRequest(method: string, params: { text: string }): Promise<string> {
+      assert.equal(method, "rsharp/rustForSync");
+      if (state.failComparison) { throw new Error("invalid R#"); }
+      assert.equal(params.text, "unsaved R#");
+      return "fn from_unsaved_buffer() {}";
+    }
     async start(): Promise<void> {
       state.clientStarts += 1;
     }
@@ -104,6 +113,8 @@ function createFakeEnv() {
     StatusBarAlignment: { Right: 2 },
     ConfigurationTarget: { WorkspaceFolder: 3 },
     Uri: {
+      file: (file: string) => ({ fsPath: file, with: ({ scheme, query }: { scheme: string; query: string }) =>
+        ({ toString: () => scheme + ":" + file + "?" + query }) }),
       parse: (raw: string) => {
         const colon = raw.indexOf(":");
         return {
@@ -115,6 +126,14 @@ function createFakeEnv() {
       },
     },
     workspace: {
+      createFileSystemWatcher: (pattern: string) => {
+        assert.equal(pattern, "**/*.rsharp");
+        return { dispose() {} };
+      },
+      onDidCloseTextDocument: (listener: typeof state.closeDoc) => {
+        state.closeDoc = listener;
+        return { dispose() {} };
+      },
       get isTrusted() { return state.trusted; },
       getWorkspaceFolder: (uri: TestUri) => state.workspaceFolders?.find((f) =>
         !path.relative(f.uri.fsPath, uri.fsPath).startsWith("..")),
@@ -203,6 +222,7 @@ function createFakeEnv() {
       },
     },
     commands: {
+      executeCommand: async (id: string, ...args: unknown[]) => { if (id === "vscode.diff") state.diff = args; },
       registerCommand: (id: string, cb: (...args: unknown[]) => unknown) => {
         state.commands.set(id, cb);
         return { dispose: () => {} };
@@ -306,6 +326,8 @@ describe("VS Code extension lifecycle and wiring", () => {
       await state.openListeners[0]();
       assert.equal(state.messages.filter((m) => m.startsWith("warn:")).length, 1);
       await ext.deactivate();
+      await state.commands.get("rsharp.compareOriginalRust")!();
+      assert.match(state.messages.at(-1)!, /linked to an original/);
       await convertProject(tmpDir);
       assert.ok(state.messages.some((m) => m.includes("binary not found")));
 
@@ -407,8 +429,21 @@ describe("VS Code extension lifecycle and wiring", () => {
         const copy = fs.readdirSync(tmpDir).find((name) => name.startsWith("rsharp-"))!;
         const source = path.join(tmpDir, copy, "main.rsharp");
         const doc = { uri: { fsPath: source, scheme: "file" }, fileName: source,
-          languageId: "rsharp", isDirty: false, save: async () => true };
+          languageId: "rsharp", isDirty: false, save: async () => true, getText: () => "unsaved R#" };
         state.activeTextEditor = { document: doc };
+        const compare = () => state.commands.get("rsharp.compareOriginalRust")!();
+        await compare();
+        const [original, snapshot] = state.diff! as [{fsPath: string}, { toString(): string }];
+        assert.equal(original.fsPath, target);
+        const content = state.providers.get("rsharp-sync-preview")!.provideTextDocumentContent;
+        assert.equal(await content(snapshot as never), "fn from_unsaved_buffer() {}");
+        assert.equal(fs.readFileSync(target, "utf8"), "// original");
+        state.closeDoc!({ uri: snapshot });
+        assert.equal(await content(snapshot as never), undefined);
+        state.failComparison = true;
+        await compare();
+        assert.match(state.messages.at(-1)!, /invalid R#/);
+        state.failComparison = false;
         const click = () => state.commands.get("rsharp.toggleRustSync")!();
         const save = () => state.saveListeners[0](doc);
         state.trusted = false;
@@ -433,6 +468,8 @@ describe("VS Code extension lifecycle and wiring", () => {
         assert.match(status.tooltip, /Turn off/);
         const dirtyRust = { languageId: "rust", uri: { fsPath: target, scheme: "file" }, isDirty: true };
         state.textDocuments.push(dirtyRust);
+        await compare();
+        assert.match(state.messages.at(-1)!, /changes before comparing/);
         await save();
         assert.ok(state.messages.some((m) => m.includes("unsaved Rust edits")));
         dirtyRust.isDirty = false;
@@ -457,6 +494,9 @@ describe("VS Code extension lifecycle and wiring", () => {
       // Deactivate stops active client
       await ext.deactivate();
       assert.equal(state.clientStops, 2);
+      if (state.activeTextEditor) state.activeTextEditor.document.uri.scheme = "file";
+      await state.commands.get("rsharp.compareOriginalRust")!();
+      assert.match(state.messages.at(-1)!, /Start the R# language server/);
 
       // Re-activate fresh to verify exact terminal close branch
       delete require.cache[extPath];
