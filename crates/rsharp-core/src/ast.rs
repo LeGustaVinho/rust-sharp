@@ -256,6 +256,7 @@ pub enum TraitItem {
         decl: FnDecl,
     },
     AssocType {
+        docs: Vec<String>,
         attrs: Vec<Attribute>,
         name: String,
         generics: Vec<GenericParam>,
@@ -264,6 +265,7 @@ pub enum TraitItem {
         default: Option<Type>,
     },
     AssocConst {
+        docs: Vec<String>,
         attrs: Vec<Attribute>,
         ty: Type,
         name: String,

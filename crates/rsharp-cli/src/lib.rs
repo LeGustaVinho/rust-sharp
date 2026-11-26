@@ -342,7 +342,6 @@ fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     const SKIP: &[&str] = &[
         "target",
         "node_modules",
-        "vendor",
         "dist",
         "build",
         "pkg",
@@ -351,6 +350,7 @@ fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
         "worktrees",
         "third_party",
     ];
+    let in_src = dir.file_name().and_then(|n| n.to_str()) == Some("src");
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -363,6 +363,7 @@ fn collect_project_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
             if let Some(name) = p.file_name().and_then(|n| n.to_str())
                 && !name.starts_with('.')
                 && !SKIP.contains(&name)
+                && !(name == "vendor" && !in_src)
             {
                 collect_project_rs_files(&p, out);
             }

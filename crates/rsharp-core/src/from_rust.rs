@@ -66,6 +66,7 @@ pub fn convert_from_rust_with_hints(
 #[derive(Clone, Copy)]
 enum BlockTail<'a> {
     None,
+    UnitReturn,
     Return,
     Break(&'a str),
 }
@@ -88,6 +89,9 @@ struct RustToRSharp {
     struct_fields: HashMap<String, HashMap<String, String>>,
     known_path_roots: HashSet<String>,
     in_scope_traits: HashSet<String>,
+    renamed_use_origs: HashSet<String>,
+    shadowed_std_aliases: HashSet<String>,
+    loop_jump_macros: HashSet<String>,
     scopes: Vec<HashMap<String, String>>,
     declared_in_fn: HashSet<String>,
     probe_counter: Rc<Cell<usize>>,
@@ -119,6 +123,9 @@ impl RustToRSharp {
             struct_fields: HashMap::new(),
             known_path_roots,
             in_scope_traits: HashSet::new(),
+            renamed_use_origs: HashSet::new(),
+            shadowed_std_aliases: HashSet::new(),
+            loop_jump_macros: HashSet::new(),
             scopes: vec![HashMap::new()],
             declared_in_fn: HashSet::new(),
             probe_counter: Rc::new(Cell::new(0)),
@@ -140,6 +147,9 @@ impl RustToRSharp {
             struct_fields: self.struct_fields.clone(),
             known_path_roots: self.known_path_roots.clone(),
             in_scope_traits: self.in_scope_traits.clone(),
+            renamed_use_origs: self.renamed_use_origs.clone(),
+            shadowed_std_aliases: self.shadowed_std_aliases.clone(),
+            loop_jump_macros: self.loop_jump_macros.clone(),
             scopes: self.scopes.clone(),
             declared_in_fn: HashSet::new(),
             probe_counter: Rc::clone(&self.probe_counter),
@@ -206,7 +216,8 @@ impl RustToRSharp {
             || contains_nested_bare_fn(&ty)
             || has_unqualified_qself_trait(&ty)
             || impl_trait_returns_elided_ref(&ty)
-            || contains_unimported_dyn_trait(&ty, &self.in_scope_traits)
+            || contains_unimported_dyn_trait(&ty, &self.in_scope_traits, &self.renamed_use_origs)
+            || contains_ref_to_static_dyn(&ty)
             || (!verified && (!all_unverified_paths_in_scope(&ty) || impl_trait_contains_dyn(&ty)))
         {
             return HintLookup::Unnameable;
@@ -217,7 +228,14 @@ impl RustToRSharp {
     fn try_fmt_pat_with_hints(&mut self, pat: &Pat) -> HintLookup {
         match pat {
             Pat::Ident(pi) => match self.lookup_hint_at_span(pi.ident.span()) {
-                HintLookup::Resolved(ty) => HintLookup::Resolved(self.fmt_pat(pat, Some(&ty))),
+                HintLookup::Resolved(ty) => {
+                    let eff_ty = if pi.by_ref.is_some() {
+                        strip_leading_borrow_prefix(&ty, pi.mutability.is_some())
+                    } else {
+                        ty.as_str()
+                    };
+                    HintLookup::Resolved(self.fmt_pat(pat, Some(eff_ty)))
+                }
                 other => other,
             },
             Pat::Wild(pw) => match self.lookup_hint_at_span(pw.underscore_token.span) {
@@ -413,6 +431,7 @@ impl RustToRSharp {
                     }
                 }
                 Item::Struct(s) => {
+                    record_shadowed_std_alias(&s.ident.to_string(), &mut self.shadowed_std_aliases);
                     if s.generics.type_params().next().is_none() {
                         let mut fields = HashMap::new();
                         match &s.fields {
@@ -439,7 +458,17 @@ impl RustToRSharp {
                         }
                     }
                 }
+                Item::Enum(e) => {
+                    record_shadowed_std_alias(&e.ident.to_string(), &mut self.shadowed_std_aliases);
+                }
+                Item::Type(t) => {
+                    record_shadowed_std_alias(&t.ident.to_string(), &mut self.shadowed_std_aliases);
+                }
+                Item::Union(u) => {
+                    record_shadowed_std_alias(&u.ident.to_string(), &mut self.shadowed_std_aliases);
+                }
                 Item::Trait(t) => {
+                    record_shadowed_std_alias(&t.ident.to_string(), &mut self.shadowed_std_aliases);
                     self.in_scope_traits.insert(t.ident.to_string());
                 }
                 Item::Mod(m) => {
@@ -455,7 +484,16 @@ impl RustToRSharp {
                 }
                 Item::Use(u) => {
                     collect_use_root_ident(&u.tree, &mut self.known_path_roots);
-                    collect_use_leaf_idents(&u.tree, &mut self.in_scope_traits);
+                    collect_use_leaf_idents(&u.tree, false, false, &mut self.in_scope_traits);
+                    collect_use_renamed_origs(&u.tree, &mut self.renamed_use_origs);
+                    collect_use_shadowed_std_aliases(
+                        &u.tree,
+                        false,
+                        &mut self.shadowed_std_aliases,
+                    );
+                }
+                Item::Macro(im) => {
+                    record_loop_jump_macro(im, &mut self.loop_jump_macros);
                 }
                 _ => {}
             }
@@ -501,9 +539,16 @@ impl RustToRSharp {
             && let syn::Lit::Str(ls) = &el.lit
         {
             let s = ls.value();
-            let trimmed = s.strip_prefix(' ').unwrap_or(&s);
             let marker = if inner_target.is_some() { "//!" } else { "///" };
-            self.line(&format!("{} {}", marker, trimmed));
+            for raw_line in s.split('\n') {
+                let raw_line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+                let trimmed = raw_line.strip_prefix(' ').unwrap_or(raw_line);
+                if trimmed.is_empty() {
+                    self.line(marker);
+                } else {
+                    self.line(&format!("{} {}", marker, trimmed));
+                }
+            }
             return;
         }
         let formatted = self.fmt_attr_inline(attr, inner_target);
@@ -1173,7 +1218,7 @@ impl RustToRSharp {
         ));
 
         let tail = if matches!(sig.output, ReturnType::Default) {
-            BlockTail::None
+            BlockTail::UnitReturn
         } else {
             BlockTail::Return
         };
@@ -1312,7 +1357,7 @@ impl RustToRSharp {
     fn emit_block_stmts(&mut self, block: &Block, tail: BlockTail<'_>) {
         self.push_scope();
         let len = block.stmts.len();
-        let last_is_cfg_tail = !matches!(tail, BlockTail::None)
+        let last_is_cfg_tail = !matches!(tail, BlockTail::None | BlockTail::UnitReturn)
             && block.stmts.last().is_some_and(|s| match s {
                 Stmt::Expr(e, None) => has_cfg_attr(expr_outer_attrs(e)),
                 Stmt::Macro(sm) => sm.semi_token.is_none() && has_cfg_attr(&sm.attrs),
@@ -1322,7 +1367,12 @@ impl RustToRSharp {
             let is_last = idx + 1 == len;
             match stmt {
                 Stmt::Local(local) => self.emit_local(local, &block.stmts[idx + 1..]),
-                Stmt::Item(item) => self.emit_item(item),
+                Stmt::Item(item) => {
+                    if let Item::Macro(im) = item {
+                        record_loop_jump_macro(im, &mut self.loop_jump_macros);
+                    }
+                    self.emit_item(item);
+                }
                 Stmt::Expr(expr, semi) => {
                     if semi.is_none()
                         && (is_last || (last_is_cfg_tail && has_cfg_attr(expr_outer_attrs(expr))))
@@ -1349,7 +1399,7 @@ impl RustToRSharp {
                                 self.line(&format!("break {} {};", lbl, ms));
                                 continue;
                             }
-                            BlockTail::None => {}
+                            BlockTail::None | BlockTail::UnitReturn => {}
                         }
                     }
                     if matches!(sm.mac.delimiter, syn::MacroDelimiter::Brace(_))
@@ -1376,6 +1426,13 @@ impl RustToRSharp {
     fn emit_tail(&mut self, expr: &Expr, tail: BlockTail<'_>) {
         match tail {
             BlockTail::None => self.emit_expr_stmt(expr),
+            BlockTail::UnitReturn => {
+                if matches!(expr, Expr::Call(_) | Expr::MethodCall(_)) {
+                    self.emit_tail(expr, BlockTail::Return);
+                } else {
+                    self.emit_expr_stmt(expr);
+                }
+            }
             BlockTail::Return => match expr {
                 Expr::Return(_) => self.emit_expr_stmt(expr),
                 Expr::If(eif) => {
@@ -1401,12 +1458,18 @@ impl RustToRSharp {
                     self.line("}");
                 }
                 other => {
-                    let s = self.fmt_expr(other);
+                    for a in expr_outer_attrs(other) {
+                        self.emit_attr(a, false);
+                    }
+                    let s = self.fmt_expr_with_attrs(other, false);
                     self.line(&format!("return {};", s));
                 }
             },
             BlockTail::Break(label) => {
-                let s = self.fmt_break_value(false, expr);
+                for a in expr_outer_attrs(expr) {
+                    self.emit_attr(a, false);
+                }
+                let s = self.fmt_break_value_with_attrs(false, expr, false);
                 self.line(&format!("break {} {};", label, s));
             }
         }
@@ -1553,6 +1616,10 @@ impl RustToRSharp {
                         self.bind_var(&raw_fname, ty_s.to_string());
                         fs.push(format!("{}{}{} {}", apfx, mk, ty_s, fname));
                     }
+                } else if let Pat::Ident(pi) = f.pat.as_ref()
+                    && pi.mutability.is_some()
+                {
+                    fs.push(format!("{}mut {}", apfx, fname));
                 } else {
                     fs.push(format!("{}{}", apfx, fname));
                 }
@@ -1805,6 +1872,13 @@ impl RustToRSharp {
                 }
                 HintLookup::None => {
                     if let Some(init) = &local.init {
+                        if !self.type_hints.is_empty()
+                            && !self.strict_unnameable
+                            && is_unsuffixed_num_lit(&init.expr)
+                        {
+                            self.line(&format!("rust {{ {} }}", local.to_token_stream()));
+                            return;
+                        }
                         if let Some(inferred) = self.infer_expr_type(&init.expr) {
                             inferred
                         } else if self.options.use_rustc_inference
@@ -2318,10 +2392,10 @@ impl RustToRSharp {
                 .take(path.segments.len() - 1)
                 .any(|s| is_all_caps_ident(&s.ident.to_string()));
             if has_all_caps_prefix
+                || first_clean == "self"
                 || (first_clean.chars().next().is_some_and(|c| c.is_lowercase())
                     && (!self.known_path_roots.contains(first_clean)
-                        || (first_clean != "self"
-                            && first_clean != "crate"
+                        || (first_clean != "crate"
                             && first_clean != "super"
                             && self.lookup_var(first_clean).is_some())))
             {
@@ -2360,7 +2434,12 @@ impl RustToRSharp {
             } else if path.leading_colon.is_none()
                 && (seg_count == 1 || (idx + 1 == seg_count && is_std_root))
             {
-                escape_ident(&map_rust_std_alias(&raw_name))
+                let mapped = map_rust_std_alias(&raw_name);
+                if seg_count == 1 && self.shadowed_std_aliases.contains(&mapped) {
+                    escape_ident(&raw_name)
+                } else {
+                    escape_ident(&mapped)
+                }
             } else {
                 escape_ident(&raw_name)
             };
@@ -2628,7 +2707,11 @@ impl RustToRSharp {
                     }
                     let sub_s = self.fmt_pat(sub, None);
                     let hinted_ty = match self.lookup_hint_at_span(pi.ident.span()) {
-                        HintLookup::Resolved(t) => Some(t),
+                        HintLookup::Resolved(t) => Some(if pi.by_ref.is_some() {
+                            strip_leading_borrow_prefix(&t, pi.mutability.is_some()).to_string()
+                        } else {
+                            t
+                        }),
                         _ => None,
                     };
                     let inferred_ty = hinted_ty
@@ -2715,6 +2798,10 @@ impl RustToRSharp {
                             "read"
                         };
                         fs.push(format!("{}borrow {} {}", apfx, mode, fname));
+                    } else if let Pat::Ident(pi) = f.pat.as_ref()
+                        && pi.mutability.is_some()
+                    {
+                        fs.push(format!("{}mut {}", apfx, fname));
                     } else {
                         fs.push(format!("{}{}", apfx, fname));
                     }
@@ -2738,11 +2825,16 @@ impl RustToRSharp {
     }
 
     fn fmt_expr(&mut self, expr: &Expr) -> String {
-        let attrs = expr_outer_attrs(expr);
+        self.fmt_expr_with_attrs(expr, true)
+    }
+
+    fn fmt_expr_with_attrs(&mut self, expr: &Expr, include_attrs: bool) -> String {
         let mut attr_pfx = String::new();
-        for a in attrs {
-            attr_pfx.push_str(&self.fmt_attr_inline(a, None));
-            attr_pfx.push(' ');
+        if include_attrs {
+            for a in expr_outer_attrs(expr) {
+                attr_pfx.push_str(&self.fmt_attr_inline(a, None));
+                attr_pfx.push(' ');
+            }
         }
         let core = match expr {
             Expr::Lit(l) => fmt_syn_lit(&l.lit),
@@ -2920,7 +3012,10 @@ impl RustToRSharp {
             Expr::If(eif) => {
                 if let Some(inline_if) = self.try_fmt_inline_if(eif, true) {
                     inline_if
-                } else if expr_has_unlabeled_loop_jump(&Expr::If(eif.clone())) {
+                } else if expr_has_unlabeled_loop_jump(
+                    &Expr::If(eif.clone()),
+                    &self.loop_jump_macros,
+                ) {
                     format!("rust {{ {} }}", eif.to_token_stream())
                 } else {
                     // Convert multi-statement `if` expression into a labeled value block without `rust { ... }`!
@@ -3068,8 +3163,14 @@ impl RustToRSharp {
                 match ec.body.as_ref() {
                     Expr::Block(eb) => {
                         let mut sub = self.child();
-                        let has_value_tail =
-                            matches!(eb.block.stmts.last(), Some(Stmt::Expr(_, None)));
+                        let has_value_tail = matches!(
+                            eb.block.stmts.last(),
+                            Some(Stmt::Expr(_, None))
+                                | Some(Stmt::Macro(syn::StmtMacro {
+                                    semi_token: None,
+                                    ..
+                                }))
+                        );
                         let tail = if !matches!(ec.output, ReturnType::Default) || has_value_tail {
                             BlockTail::Return
                         } else {
@@ -3093,8 +3194,12 @@ impl RustToRSharp {
                     sub.emit_block_stmts(&eb.block, BlockTail::None);
                     format!("{}: {{\n{}}}", escape_lifetime(&lbl.name), sub.out)
                 } else if let Some(single) = single_tail_expr(&eb.block) {
-                    self.fmt_expr(single)
-                } else if block_has_unlabeled_loop_jump(&eb.block) {
+                    if matches!(single, Expr::Field(_)) {
+                        format!("rust {{ {} }}", single.to_token_stream())
+                    } else {
+                        self.fmt_expr(single)
+                    }
+                } else if block_has_unlabeled_loop_jump(&eb.block, &self.loop_jump_macros) {
                     format!("rust {{ {} }}", eb.to_token_stream())
                 } else {
                     let mut sub = self.child();
@@ -3110,7 +3215,14 @@ impl RustToRSharp {
             }
             Expr::Unsafe(eu) => {
                 let mut sub = self.child();
-                let tail = if matches!(eu.block.stmts.last(), Some(Stmt::Expr(_, None))) {
+                let tail = if matches!(
+                    eu.block.stmts.last(),
+                    Some(Stmt::Expr(_, None))
+                        | Some(Stmt::Macro(syn::StmtMacro {
+                            semi_token: None,
+                            ..
+                        }))
+                ) {
                     BlockTail::Return
                 } else {
                     BlockTail::None
@@ -3225,9 +3337,23 @@ impl RustToRSharp {
                 | BinOp::Ge(_)
                 | BinOp::And(_)
                 | BinOp::Or(_) => Some("bool".to_string()),
-                _ => self
-                    .infer_expr_type(&eb.left)
-                    .or_else(|| self.infer_expr_type(&eb.right)),
+                _ => {
+                    let l = self.infer_expr_type(&eb.left);
+                    let r = self.infer_expr_type(&eb.right);
+                    match (l, r) {
+                        (Some(lt), Some(rt)) => {
+                            if is_unsuffixed_num_lit(&eb.left) && !is_unsuffixed_num_lit(&eb.right)
+                            {
+                                Some(rt)
+                            } else {
+                                Some(lt)
+                            }
+                        }
+                        (Some(lt), None) if !is_unsuffixed_num_lit(&eb.left) => Some(lt),
+                        (None, Some(rt)) if !is_unsuffixed_num_lit(&eb.right) => Some(rt),
+                        _ => None,
+                    }
+                }
             },
             Expr::Struct(es) => Some(self.fmt_path(&es.path)),
             Expr::Tuple(et) => {
@@ -3464,7 +3590,16 @@ impl RustToRSharp {
     }
 
     fn fmt_break_value(&mut self, unlabeled: bool, expr: &Expr) -> String {
-        let s = self.fmt_expr(expr);
+        self.fmt_break_value_with_attrs(unlabeled, expr, true)
+    }
+
+    fn fmt_break_value_with_attrs(
+        &mut self,
+        unlabeled: bool,
+        expr: &Expr,
+        include_attrs: bool,
+    ) -> String {
+        let s = self.fmt_expr_with_attrs(expr, include_attrs);
         // `break ident;` is parsed as a labeled break in R#; parenthesize bare-ident values.
         // `break lbl -10;` or `break lbl [a];` would parse `-`/`[` as continuing `lbl`.
         if (unlabeled
@@ -3485,8 +3620,9 @@ impl RustToRSharp {
             && ep.qself.is_none()
             && !ep.path.is_ident("self")
             && (ep.path.segments.len() >= 2
-                || ep.path.get_ident().is_some_and(|id| {
-                    id.to_string()
+                || ep.path.segments.first().is_some_and(|seg| {
+                    seg.ident
+                        .to_string()
                         .chars()
                         .next()
                         .is_some_and(char::is_uppercase)
@@ -3732,77 +3868,128 @@ fn contains_nested_bare_fn(ty: &Type) -> bool {
     any_child_type(ty, &mut |t| matches!(t, Type::BareFn(_)))
 }
 
-fn block_has_unlabeled_loop_jump(block: &syn::Block) -> bool {
-    for stmt in &block.stmts {
-        match stmt {
-            Stmt::Local(loc) => {
-                if let Some(init) = &loc.init {
-                    if expr_has_unlabeled_loop_jump(&init.expr) {
-                        return true;
-                    }
-                    if let Some((_, div)) = &init.diverge
-                        && expr_has_unlabeled_loop_jump(div)
-                    {
-                        return true;
-                    }
-                }
+fn record_loop_jump_macro(im: &syn::ItemMacro, out: &mut HashSet<String>) {
+    if let Some(id) = &im.ident
+        && im.mac.path.is_ident("macro_rules")
+        && token_stream_has_loop_jump(im.mac.tokens.clone())
+    {
+        out.insert(id.to_string());
+    }
+}
+
+fn token_stream_has_loop_jump(ts: proc_macro2::TokenStream) -> bool {
+    for tt in ts {
+        match tt {
+            proc_macro2::TokenTree::Ident(id)
+                if matches!(id.to_string().as_str(), "break" | "continue") =>
+            {
+                return true;
             }
-            Stmt::Expr(e, _) if expr_has_unlabeled_loop_jump(e) => return true,
+            proc_macro2::TokenTree::Group(g) if token_stream_has_loop_jump(g.stream()) => {
+                return true;
+            }
             _ => {}
         }
     }
     false
 }
 
-fn expr_has_unlabeled_loop_jump(expr: &Expr) -> bool {
+fn macro_is_loop_jump(mac: &syn::Macro, jump_macros: &HashSet<String>) -> bool {
+    mac.path
+        .get_ident()
+        .is_some_and(|id| jump_macros.contains(&id.to_string()))
+}
+
+fn block_has_unlabeled_loop_jump(block: &syn::Block, jump_macros: &HashSet<String>) -> bool {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Local(loc) => {
+                if let Some(init) = &loc.init {
+                    if expr_has_unlabeled_loop_jump(&init.expr, jump_macros) {
+                        return true;
+                    }
+                    if let Some((_, div)) = &init.diverge
+                        && expr_has_unlabeled_loop_jump(div, jump_macros)
+                    {
+                        return true;
+                    }
+                }
+            }
+            Stmt::Expr(e, _) if expr_has_unlabeled_loop_jump(e, jump_macros) => return true,
+            Stmt::Macro(sm) if macro_is_loop_jump(&sm.mac, jump_macros) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn expr_has_unlabeled_loop_jump(expr: &Expr, jump_macros: &HashSet<String>) -> bool {
     match expr {
         Expr::Break(eb) => eb.label.is_none(),
         Expr::Continue(ec) => ec.label.is_none(),
+        Expr::Macro(em) => macro_is_loop_jump(&em.mac, jump_macros),
         // Loops, closures, and async blocks catch or isolate inner unlabeled jumps.
         Expr::Loop(_) | Expr::While(_) | Expr::ForLoop(_) | Expr::Closure(_) | Expr::Async(_) => {
             false
         }
-        Expr::Block(eb) => block_has_unlabeled_loop_jump(&eb.block),
-        Expr::Unsafe(eu) => block_has_unlabeled_loop_jump(&eu.block),
+        Expr::Block(eb) => block_has_unlabeled_loop_jump(&eb.block, jump_macros),
+        Expr::Unsafe(eu) => block_has_unlabeled_loop_jump(&eu.block, jump_macros),
         Expr::If(eif) => {
-            expr_has_unlabeled_loop_jump(&eif.cond)
-                || block_has_unlabeled_loop_jump(&eif.then_branch)
+            expr_has_unlabeled_loop_jump(&eif.cond, jump_macros)
+                || block_has_unlabeled_loop_jump(&eif.then_branch, jump_macros)
                 || eif
                     .else_branch
                     .as_ref()
-                    .is_some_and(|(_, e)| expr_has_unlabeled_loop_jump(e))
+                    .is_some_and(|(_, e)| expr_has_unlabeled_loop_jump(e, jump_macros))
         }
         Expr::Match(em) => {
-            expr_has_unlabeled_loop_jump(&em.expr)
+            expr_has_unlabeled_loop_jump(&em.expr, jump_macros)
                 || em.arms.iter().any(|a| {
                     a.guard
                         .as_ref()
-                        .is_some_and(|(_, g)| expr_has_unlabeled_loop_jump(g))
-                        || expr_has_unlabeled_loop_jump(&a.body)
+                        .is_some_and(|(_, g)| expr_has_unlabeled_loop_jump(g, jump_macros))
+                        || expr_has_unlabeled_loop_jump(&a.body, jump_macros)
                 })
         }
-        Expr::Paren(ep) => expr_has_unlabeled_loop_jump(&ep.expr),
-        Expr::Unary(eu) => expr_has_unlabeled_loop_jump(&eu.expr),
-        Expr::Reference(er) => expr_has_unlabeled_loop_jump(&er.expr),
-        Expr::Try(et) => expr_has_unlabeled_loop_jump(&et.expr),
-        Expr::Await(ea) => expr_has_unlabeled_loop_jump(&ea.base),
+        Expr::Paren(ep) => expr_has_unlabeled_loop_jump(&ep.expr, jump_macros),
+        Expr::Unary(eu) => expr_has_unlabeled_loop_jump(&eu.expr, jump_macros),
+        Expr::Reference(er) => expr_has_unlabeled_loop_jump(&er.expr, jump_macros),
+        Expr::Try(et) => expr_has_unlabeled_loop_jump(&et.expr, jump_macros),
+        Expr::Await(ea) => expr_has_unlabeled_loop_jump(&ea.base, jump_macros),
         Expr::Binary(eb) => {
-            expr_has_unlabeled_loop_jump(&eb.left) || expr_has_unlabeled_loop_jump(&eb.right)
+            expr_has_unlabeled_loop_jump(&eb.left, jump_macros)
+                || expr_has_unlabeled_loop_jump(&eb.right, jump_macros)
         }
         Expr::Assign(ea) => {
-            expr_has_unlabeled_loop_jump(&ea.left) || expr_has_unlabeled_loop_jump(&ea.right)
+            expr_has_unlabeled_loop_jump(&ea.left, jump_macros)
+                || expr_has_unlabeled_loop_jump(&ea.right, jump_macros)
         }
-        Expr::Return(er) => er.expr.as_deref().is_some_and(expr_has_unlabeled_loop_jump),
+        Expr::Return(er) => er
+            .expr
+            .as_deref()
+            .is_some_and(|e| expr_has_unlabeled_loop_jump(e, jump_macros)),
         Expr::Call(ec) => {
-            expr_has_unlabeled_loop_jump(&ec.func)
-                || ec.args.iter().any(expr_has_unlabeled_loop_jump)
+            expr_has_unlabeled_loop_jump(&ec.func, jump_macros)
+                || ec
+                    .args
+                    .iter()
+                    .any(|a| expr_has_unlabeled_loop_jump(a, jump_macros))
         }
         Expr::MethodCall(mc) => {
-            expr_has_unlabeled_loop_jump(&mc.receiver)
-                || mc.args.iter().any(expr_has_unlabeled_loop_jump)
+            expr_has_unlabeled_loop_jump(&mc.receiver, jump_macros)
+                || mc
+                    .args
+                    .iter()
+                    .any(|a| expr_has_unlabeled_loop_jump(a, jump_macros))
         }
-        Expr::Tuple(et) => et.elems.iter().any(expr_has_unlabeled_loop_jump),
-        Expr::Array(ea) => ea.elems.iter().any(expr_has_unlabeled_loop_jump),
+        Expr::Tuple(et) => et
+            .elems
+            .iter()
+            .any(|e| expr_has_unlabeled_loop_jump(e, jump_macros)),
+        Expr::Array(ea) => ea
+            .elems
+            .iter()
+            .any(|e| expr_has_unlabeled_loop_jump(e, jump_macros)),
         _ => false,
     }
 }
@@ -3863,7 +4050,45 @@ fn is_unqualified_non_prelude_path(path: &Path) -> bool {
             .is_some_and(|seg| !is_rust_prelude_or_primitive_type(&seg.ident.to_string()))
 }
 
-fn contains_unimported_dyn_trait(ty: &Type, in_scope: &HashSet<String>) -> bool {
+fn is_unsuffixed_num_lit(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(li),
+            ..
+        }) => li.suffix().is_empty(),
+        Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Float(lf),
+            ..
+        }) => lf.suffix().is_empty(),
+        Expr::Paren(ep) => is_unsuffixed_num_lit(&ep.expr),
+        _ => false,
+    }
+}
+
+fn contains_ref_to_static_dyn(ty: &Type) -> bool {
+    any_type_node(ty, &mut |t| {
+        let Type::Reference(tr) = t else {
+            return false;
+        };
+        let mut inner = tr.elem.as_ref();
+        while let Type::Paren(tp) = inner {
+            inner = tp.elem.as_ref();
+        }
+        matches!(
+            inner,
+            Type::TraitObject(to)
+                if to.bounds.iter().any(|b| {
+                    matches!(b, TypeParamBound::Lifetime(lt) if lt.ident == "static")
+                })
+        )
+    })
+}
+
+fn contains_unimported_dyn_trait(
+    ty: &Type,
+    in_scope: &HashSet<String>,
+    renamed_origs: &HashSet<String>,
+) -> bool {
     any_type_node(ty, &mut |t| {
         matches!(t, Type::TraitObject(to) if to.bounds.iter().any(|b| {
             matches!(b, TypeParamBound::Trait(tb)
@@ -3871,7 +4096,9 @@ fn contains_unimported_dyn_trait(ty: &Type, in_scope: &HashSet<String>) -> bool 
                     && tb.path.segments.len() == 1
                     && tb.path.segments.first().is_some_and(|seg| {
                         let name = seg.ident.to_string();
-                        !is_rust_prelude_or_primitive_type(&name) && !in_scope.contains(&name)
+                        renamed_origs.contains(&name)
+                            || (!is_rust_prelude_or_primitive_type(&name)
+                                && !in_scope.contains(&name))
                     }))
         }))
     })
@@ -3916,8 +4143,16 @@ fn normalize_unstable_stdlib_type(ty: &mut Type) {
             }
             for seg in &mut tp.path.segments {
                 if let PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+                    let has_non_static_lt = ab.args.iter().any(
+                        |a| matches!(a, GenericArgument::Lifetime(lt) if lt.ident != "static"),
+                    );
                     for arg in &mut ab.args {
                         match arg {
+                            GenericArgument::Lifetime(lt)
+                                if has_non_static_lt && lt.ident == "static" =>
+                            {
+                                lt.ident = syn::Ident::new("_", lt.ident.span());
+                            }
                             GenericArgument::Type(t) => normalize_unstable_stdlib_type(t),
                             GenericArgument::AssocType(at) => {
                                 normalize_unstable_stdlib_type(&mut at.ty)
@@ -4113,44 +4348,114 @@ fn collect_use_root_ident(tree: &syn::UseTree, roots: &mut HashSet<String>) {
     }
 }
 
-fn collect_use_leaf_idents(tree: &syn::UseTree, leaves: &mut HashSet<String>) {
+fn collect_use_leaf_idents(
+    tree: &syn::UseTree,
+    root_is_std_core: bool,
+    in_std_error_mod: bool,
+    leaves: &mut HashSet<String>,
+) {
     match tree {
-        syn::UseTree::Path(p) => collect_use_leaf_idents(&p.tree, leaves),
+        syn::UseTree::Path(p) => {
+            let seg = p.ident.to_string();
+            let is_std_core = root_is_std_core || matches!(seg.as_str(), "std" | "core");
+            let is_err_mod = root_is_std_core && seg == "error";
+            collect_use_leaf_idents(&p.tree, is_std_core, is_err_mod, leaves);
+        }
         syn::UseTree::Name(n) => {
-            leaves.insert(n.ident.to_string());
+            let name = n.ident.to_string();
+            if name != "Error" || in_std_error_mod {
+                leaves.insert(name);
+            }
         }
         syn::UseTree::Rename(r) => {
             leaves.insert(r.rename.to_string());
         }
         syn::UseTree::Group(g) => {
             for item in &g.items {
-                collect_use_leaf_idents(item, leaves);
+                collect_use_leaf_idents(item, root_is_std_core, in_std_error_mod, leaves);
             }
         }
         syn::UseTree::Glob(_) => {}
     }
 }
 
-fn fmt_use_tree(tree: &syn::UseTree) -> String {
-    fmt_use_tree_with_prefix(tree, Vec::new())
+fn record_shadowed_std_alias(name: &str, out: &mut HashSet<String>) {
+    if matches!(
+        name,
+        "List" | "Queue" | "Dictionary" | "SortedDictionary" | "SortedSet" | "PriorityQueue"
+    ) {
+        out.insert(name.to_string());
+    }
 }
 
-fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> String {
+fn collect_use_shadowed_std_aliases(tree: &syn::UseTree, in_std: bool, out: &mut HashSet<String>) {
     match tree {
         syn::UseTree::Path(p) => {
+            let std_here = in_std
+                || matches!(
+                    p.ident.to_string().as_str(),
+                    "std" | "core" | "alloc" | "rsharp_prelude"
+                );
+            collect_use_shadowed_std_aliases(&p.tree, std_here, out);
+        }
+        syn::UseTree::Name(n) if !in_std => {
+            record_shadowed_std_alias(&n.ident.to_string(), out);
+        }
+        syn::UseTree::Rename(r) => {
+            record_shadowed_std_alias(&r.rename.to_string(), out);
+        }
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                collect_use_shadowed_std_aliases(item, in_std, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_use_renamed_origs(tree: &syn::UseTree, renamed: &mut HashSet<String>) {
+    match tree {
+        syn::UseTree::Path(p) => collect_use_renamed_origs(&p.tree, renamed),
+        syn::UseTree::Rename(r) => {
+            if r.ident != r.rename {
+                renamed.insert(r.ident.to_string());
+            }
+        }
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                collect_use_renamed_origs(item, renamed);
+            }
+        }
+        syn::UseTree::Name(_) | syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn fmt_use_tree(tree: &syn::UseTree) -> String {
+    fmt_use_tree_with_prefix(tree, Vec::new(), false)
+}
+
+fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>, in_std: bool) -> String {
+    match tree {
+        syn::UseTree::Path(p) => {
+            let raw = p.ident.to_string();
+            let std_here = in_std
+                || (prefix.is_empty()
+                    && matches!(raw.as_str(), "std" | "core" | "alloc" | "rsharp_prelude"));
             let seg = if p.ident == "self" {
                 "this".to_string()
             } else {
-                escape_ident(&p.ident.to_string())
+                escape_ident(&raw)
             };
             prefix.push(seg);
-            fmt_use_tree_with_prefix(&p.tree, prefix)
+            fmt_use_tree_with_prefix(&p.tree, prefix, std_here)
         }
         syn::UseTree::Name(n) => {
             let seg = if n.ident == "self" {
                 "this".to_string()
-            } else {
+            } else if in_std {
                 escape_ident(&map_rust_std_alias(&n.ident.to_string()))
+            } else {
+                escape_ident(&n.ident.to_string())
             };
             prefix.push(seg);
             prefix.join(".")
@@ -4158,8 +4463,10 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> Str
         syn::UseTree::Rename(r) => {
             let seg = if r.ident == "self" {
                 "this".to_string()
-            } else {
+            } else if in_std {
                 escape_ident(&map_rust_std_alias(&r.ident.to_string()))
+            } else {
+                escape_ident(&r.ident.to_string())
             };
             prefix.push(seg);
             format!(
@@ -4176,7 +4483,7 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> Str
             let subs: Vec<String> = g
                 .items
                 .iter()
-                .map(|sub| fmt_use_tree_with_prefix(sub, Vec::new()))
+                .map(|sub| fmt_use_tree_with_prefix(sub, Vec::new(), in_std))
                 .collect();
             if prefix.is_empty() {
                 format!("{{{}}}", subs.join(", "))
@@ -4186,6 +4493,19 @@ fn fmt_use_tree_with_prefix(tree: &syn::UseTree, mut prefix: Vec<String>) -> Str
             }
         }
     }
+}
+
+fn strip_leading_borrow_prefix(ty: &str, is_mut: bool) -> &str {
+    let kw = if is_mut { "write" } else { "read" };
+    if let Some(rest) = ty.strip_prefix(kw) {
+        if let Some(after_sp) = rest.strip_prefix(' ') {
+            return after_sp;
+        }
+        if let Some((_, tail)) = rest.strip_prefix('<').and_then(|s| s.split_once("> ")) {
+            return tail;
+        }
+    }
+    ty
 }
 
 fn strip_non_static_lifetimes(ty: &str) -> String {

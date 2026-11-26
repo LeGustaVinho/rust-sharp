@@ -388,7 +388,14 @@ impl<'a> Parser<'a> {
             name.push_str("::");
             name.push_str(&self.expect_member_ident()?);
         }
-        let args = if self.check(&TokenKind::LParen) {
+        let args = if let TokenKind::RawMacroBody { delim, body } = self.peek_kind().clone() {
+            self.bump();
+            match delim {
+                '(' => Some(AttrArgs::Paren(body)),
+                '[' => Some(AttrArgs::Bracket(body)),
+                _ => Some(AttrArgs::Brace(body)),
+            }
+        } else if self.check(&TokenKind::LParen) {
             Some(AttrArgs::Paren(self.collect_balanced_raw(
                 TokenKind::LParen,
                 TokenKind::RParen,
@@ -1260,13 +1267,27 @@ impl<'a> Parser<'a> {
         }
         let save = self.checkpoint();
         if let Ok(ty) = self.parse_type()
-            && let Ok(name) = self.expect_ident()
+            && let Ok(name) = self.expect_field_ident()
             && self.eat(&TokenKind::Semicolon)
         {
             return Some((ty, name));
         }
         self.restore(save);
         None
+    }
+
+    fn expect_field_ident(&mut self) -> Result<String> {
+        match self.peek_kind().clone() {
+            TokenKind::Ident { name, verbatim } => {
+                self.bump();
+                if verbatim && Keyword::parse(&name).is_none() && name != "global" {
+                    Ok(format!("r#{}", name))
+                } else {
+                    Ok(name)
+                }
+            }
+            _ => self.expect_ident(),
+        }
     }
 
     fn parse_enum(&mut self) -> Result<EnumDecl> {
@@ -1465,6 +1486,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(&TokenKind::Semicolon, "';'")?;
                 items.push(TraitItem::AssocType {
+                    docs,
                     attrs,
                     name: aname,
                     generics: agens,
@@ -1480,6 +1502,7 @@ impl<'a> Parser<'a> {
                 };
                 self.expect(&TokenKind::Semicolon, "';'")?;
                 items.push(TraitItem::AssocConst {
+                    docs,
                     attrs,
                     ty,
                     name: cname,
@@ -1767,7 +1790,19 @@ impl<'a> Parser<'a> {
         if self.eat_kw(Keyword::Extern) && matches!(self.peek_kind(), TokenKind::StringLit(_)) {
             self.bump();
         }
-        let is_ptr = self.check(&TokenKind::LParen);
+        let is_ptr = if self.eat(&TokenKind::LParen) {
+            let mut depth = 1usize;
+            while depth > 0 && !self.is_eof() {
+                match self.bump().kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth -= 1,
+                    _ => {}
+                }
+            }
+            self.check(&TokenKind::ThinArrow)
+        } else {
+            false
+        };
         self.restore(save);
         is_ptr
     }
@@ -2498,11 +2533,20 @@ impl<'a> Parser<'a> {
             });
         }
         if self.check_kw(Keyword::Unsafe) && matches!(self.peek_at(1).kind, TokenKind::LBrace) {
+            let save = self.checkpoint();
             self.bump();
-            return Ok(Stmt {
-                attrs,
-                kind: StmtKind::Unsafe(self.parse_block()?),
-            });
+            let block = self.parse_block()?;
+            if matches!(
+                self.peek_kind(),
+                TokenKind::Dot | TokenKind::Question | TokenKind::LBracket | TokenKind::LParen
+            ) {
+                self.restore(save);
+            } else {
+                return Ok(Stmt {
+                    attrs,
+                    kind: StmtKind::Unsafe(block),
+                });
+            }
         }
 
         // Labeled loop statement: `outer: loop/while/for/foreach`
@@ -3403,14 +3447,14 @@ impl<'a> Parser<'a> {
                 pat: None,
             });
         }
-        if ref_mode.is_some() {
+        if ref_mode.is_some() || is_mut {
             self.restore(after_prefix);
             let name = self.expect_ident()?;
             return Ok(StructPatField {
                 attrs,
                 ref_mode,
                 ty: None,
-                is_mut: false,
+                is_mut,
                 name,
                 pat: None,
             });
@@ -3952,6 +3996,19 @@ impl<'a> Parser<'a> {
                     let type_args = self.try_parse_expr_generic_args();
                     if saw_cc {
                         expr = match expr {
+                            Expr::This => Expr::Path {
+                                global: false,
+                                segments: vec![
+                                    PathExprSegment {
+                                        name: "self".to_string(),
+                                        type_args: Vec::new(),
+                                    },
+                                    PathExprSegment {
+                                        name: field,
+                                        type_args,
+                                    },
+                                ],
+                            },
                             Expr::Ident(first) => Expr::Path {
                                 global: false,
                                 segments: vec![
@@ -4695,17 +4752,23 @@ fn is_unambiguous_inherent_qself_type(ty: &Type) -> bool {
         | Type::Never
         | Type::Dynamic
         | Type::Optional(_)
-        | Type::Array { .. }
         | Type::QualifiedPath { .. } => true,
+        Type::Array { elem, dims } => {
+            !dims.iter().any(|d| matches!(d, Expr::Range { .. }))
+                && is_unambiguous_inherent_qself_type(elem)
+        }
         Type::Read { inner, .. } | Type::Write { inner, .. } => {
             is_unambiguous_inherent_qself_type(inner)
         }
         Type::Path(tp) => {
+            if !tp.global && tp.segments.len() == 1 && tp.segments[0].name == "None" {
+                return false;
+            }
             tp.global
                 || tp
                     .segments
                     .iter()
-                    .any(|s| !matches!(s.args, TypePathArgs::None))
+                    .any(|s| matches!(s.args, TypePathArgs::Angle(_)))
                 || (tp.segments.len() == 1
                     && (is_primitive_or_scalar_name(&tp.segments[0].name)
                         || tp.segments[0].name == "string"))

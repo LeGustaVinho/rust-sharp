@@ -206,11 +206,14 @@ impl RustCodegen {
                 }
                 ItemKind::Using(u) => {
                     register_using_tree(&u.tree, &mut self.known_paths);
-                    register_shadowed_using_aliases(
-                        &u.tree,
-                        &self.enum_variants,
-                        &mut self.shadowed_expr_aliases,
-                    );
+                    let mut shadowed = HashSet::new();
+                    register_shadowed_using_aliases(&u.tree, &self.enum_variants, &mut shadowed);
+                    for s in shadowed {
+                        if is_std_collection_alias(&s) {
+                            self.known_types.insert(s.clone());
+                        }
+                        self.shadowed_expr_aliases.insert(s);
+                    }
                 }
                 _ => {}
             }
@@ -241,7 +244,15 @@ impl RustCodegen {
                 self.line("use rsharp_prelude::*;");
                 self.out.push('\n');
             }
-            PreludeMode::None => {}
+            PreludeMode::None => {
+                if file
+                    .inner_attrs
+                    .iter()
+                    .any(|a| matches!(a.name.as_str(), "Deny" | "deny"))
+                {
+                    self.line("#![allow(unused_parens, unused_braces, unreachable_code)]");
+                }
+            }
         }
 
         let mut idx = 0;
@@ -653,6 +664,7 @@ impl RustCodegen {
                     self.emit_fn("", decl);
                 }
                 TraitItem::AssocType {
+                    docs,
                     attrs,
                     name,
                     generics,
@@ -660,9 +672,7 @@ impl RustCodegen {
                     where_clause,
                     default,
                 } => {
-                    for a in attrs {
-                        self.line(&format_attr(a));
-                    }
+                    self.emit_docs_and_attrs(docs, attrs);
                     let ag = self.fmt_generics(generics, true);
                     let b = if bounds.is_empty() {
                         String::new()
@@ -685,14 +695,13 @@ impl RustCodegen {
                     ));
                 }
                 TraitItem::AssocConst {
+                    docs,
                     attrs,
                     ty,
                     name,
                     default,
                 } => {
-                    for a in attrs {
-                        self.line(&format_attr(a));
-                    }
+                    self.emit_docs_and_attrs(docs, attrs);
                     let ty_s = self.fmt_type(ty);
                     let d = match default {
                         Some(ex) => format!(" = {}", self.fmt_expr(ex)),
@@ -965,6 +974,9 @@ impl RustCodegen {
             for st in init {
                 self.emit_stmt(st);
             }
+            for a in &last.attrs {
+                self.line(&format_attr(a));
+            }
             let t = self.fmt_expr(tail);
             self.line(&t);
         } else {
@@ -1007,7 +1019,7 @@ impl RustCodegen {
                             match expr {
                                 Expr::ArrayLit(elems) => {
                                     let items: Vec<_> =
-                                        elems.iter().map(|e| self.fmt_expr(e)).collect();
+                                        elems.iter().map(|e| self.fmt_list_elem_expr(e)).collect();
                                     format!("vec![{}]", items.join(", "))
                                 }
                                 Expr::ArrayRepeat { value, count } => {
@@ -1081,7 +1093,7 @@ impl RustCodegen {
                 }
                 if let Some(v) = value {
                     line.push(' ');
-                    line.push_str(&self.fmt_expr(v));
+                    line.push_str(&self.fmt_break_value_expr(label.is_some(), v));
                 }
                 line.push(';');
                 self.line(&line);
@@ -1479,7 +1491,10 @@ impl RustCodegen {
         }
         let check_bounds: Vec<String> = bounds
             .iter()
-            .filter(|b| !matches!(b, TypeBound::PreciseCapture(_) | TypeBound::Lifetime(_)))
+            .filter(|b| {
+                !matches!(b, TypeBound::PreciseCapture(_) | TypeBound::Lifetime(_))
+                    && !bound_contains_never(b)
+            })
             .map(|b| self.fmt_bound(b))
             .collect();
         if check_bounds.is_empty() {
@@ -1662,7 +1677,7 @@ impl RustCodegen {
         });
         let mut out = Vec::new();
         for (idx, seg) in segments.iter().enumerate() {
-            let map_alias = is_std_root
+            let map_alias = (is_std_root && idx + 1 == segments.len())
                 || (idx == 0 && segments.len() == 1 && !self.known_types.contains(&seg.name));
             let mapped = if map_alias {
                 fmt_rust_ident(&map_std_type_alias(&seg.name))
@@ -1692,13 +1707,8 @@ impl RustCodegen {
 
     fn fmt_turbofish_segments(&self, segments: &[TypePathSegment]) -> String {
         let mut out = Vec::new();
-        for (idx, seg) in segments.iter().enumerate() {
-            let mapped = if idx == 0 && segments.len() == 1 && !self.known_types.contains(&seg.name)
-            {
-                fmt_rust_ident(&map_std_type_alias(&seg.name))
-            } else {
-                fmt_rust_ident(&seg.name)
-            };
+        for seg in segments {
+            let mapped = fmt_rust_ident(&seg.name);
             match &seg.args {
                 TypePathArgs::Angle(args) if !args.is_empty() => {
                     let ga: Vec<_> = args.iter().map(|a| self.fmt_generic_arg(a)).collect();
@@ -2107,7 +2117,10 @@ impl RustCodegen {
                 }
             }
             Expr::Ident(name) => {
-                if self.is_local_var(name) || self.shadowed_expr_aliases.contains(name) {
+                if self.is_local_var(name)
+                    || self.shadowed_expr_aliases.contains(name)
+                    || self.known_types.contains(name)
+                {
                     fmt_rust_ident(name)
                 } else {
                     fmt_rust_ident(&map_std_type_alias(name))
@@ -2118,7 +2131,12 @@ impl RustCodegen {
             Expr::Path { global, segments } => {
                 let mut parts = Vec::new();
                 for (idx, seg) in segments.iter().enumerate() {
-                    let mapped = if !*global && idx == 0 && segments.len() == 1 {
+                    let mapped = if !*global
+                        && idx == 0
+                        && segments.len() == 1
+                        && !self.known_types.contains(&seg.name)
+                        && !self.shadowed_expr_aliases.contains(&seg.name)
+                    {
                         fmt_rust_ident(&map_std_type_alias(&seg.name))
                     } else {
                         fmt_rust_ident(&seg.name)
@@ -2194,8 +2212,16 @@ impl RustCodegen {
                 }
             }
             Expr::Binary { op, lhs, rhs } => {
-                let l = self.fmt_expr(lhs);
-                let r = self.fmt_expr(rhs);
+                let l = if matches!(lhs.as_ref(), Expr::Range { .. }) {
+                    format!("({})", self.fmt_expr(lhs))
+                } else {
+                    self.fmt_expr(lhs)
+                };
+                let r = if matches!(rhs.as_ref(), Expr::Range { .. }) {
+                    format!("({})", self.fmt_expr(rhs))
+                } else {
+                    self.fmt_expr(rhs)
+                };
                 let sym = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -2317,7 +2343,7 @@ impl RustCodegen {
                     let ta: Vec<_> = type_args.iter().map(|a| self.fmt_generic_arg(a)).collect();
                     format!("::<{}>", ta.join(", "))
                 };
-                let a: Vec<_> = args.iter().map(|e| self.fmt_expr(e)).collect();
+                let a: Vec<_> = args.iter().map(|e| self.fmt_list_elem_expr(e)).collect();
                 format!("{}{}({})", c, targs, a.join(", "))
             }
             Expr::Group(inner) => format!("({})", self.fmt_expr(inner)),
@@ -2343,7 +2369,10 @@ impl RustCodegen {
                     "."
                 };
                 let obj = self.fmt_postfix_object(object);
-                let mapped_field = if sep == "::" && is_std_collections_root(object) {
+                let mapped_field = if sep == "::"
+                    && is_std_collections_root(object)
+                    && (field != "string" || is_string_module_expr(object))
+                {
                     fmt_rust_ident(&map_std_type_alias(field))
                 } else {
                     fmt_rust_ident(field)
@@ -2367,14 +2396,14 @@ impl RustCodegen {
                 out
             }
             Expr::ArrayLit(elems) => {
-                let items: Vec<_> = elems.iter().map(|e| self.fmt_expr(e)).collect();
+                let items: Vec<_> = elems.iter().map(|e| self.fmt_list_elem_expr(e)).collect();
                 format!("[{}]", items.join(", "))
             }
             Expr::ArrayRepeat { value, count } => {
                 format!("[{}; {}]", self.fmt_expr(value), self.fmt_expr(count))
             }
             Expr::TupleLit(elems) => {
-                let items: Vec<_> = elems.iter().map(|e| self.fmt_expr(e)).collect();
+                let items: Vec<_> = elems.iter().map(|e| self.fmt_list_elem_expr(e)).collect();
                 if items.len() == 1 {
                     format!("({},)", items[0])
                 } else {
@@ -2443,7 +2472,7 @@ impl RustCodegen {
                 }
                 if let Some(v) = value {
                     out.push(' ');
-                    out.push_str(&self.fmt_expr(v));
+                    out.push_str(&self.fmt_break_value_expr(label.is_some(), v));
                 }
                 out
             }
@@ -2679,6 +2708,38 @@ impl RustCodegen {
         }
     }
 
+    fn fmt_list_elem_expr(&self, expr: &Expr) -> String {
+        if let Expr::Attributed { attrs, expr: inner } = expr {
+            let mut prefix = String::new();
+            for a in attrs {
+                prefix.push_str(&format_attr(a));
+                prefix.push(' ');
+            }
+            format!("{}{}", prefix, self.fmt_expr(inner))
+        } else {
+            self.fmt_expr(expr)
+        }
+    }
+
+    fn fmt_break_value_expr(&self, has_label: bool, v: &Expr) -> String {
+        let vs = self.fmt_expr(v);
+        if has_label
+            && matches!(
+                v,
+                Expr::Loop { .. }
+                    | Expr::While { .. }
+                    | Expr::Foreach { .. }
+                    | Expr::LabeledBlock { .. }
+                    | Expr::InlineRust(_)
+                    | Expr::Attributed { .. }
+            )
+        {
+            format!("({})", vs)
+        } else {
+            vs
+        }
+    }
+
     fn fmt_postfix_object(&self, object: &Expr) -> String {
         let s = self.fmt_expr(object);
         if matches!(
@@ -2874,10 +2935,10 @@ fn collect_syn_pat_idents(pat: &syn::Pat, out: &mut Vec<String>) {
 }
 
 fn format_using_tree(tree: &UsingTree) -> String {
-    format_using_tree_inner(tree, false)
+    format_using_tree_inner(tree, false, None)
 }
 
-fn format_using_tree_inner(tree: &UsingTree, in_std: bool) -> String {
+fn format_using_tree_inner(tree: &UsingTree, in_std: bool, parent_mod: Option<&str>) -> String {
     match tree {
         UsingTree::Path {
             global,
@@ -2889,11 +2950,23 @@ fn format_using_tree_inner(tree: &UsingTree, in_std: bool) -> String {
                 || prefix.first().is_some_and(|r| {
                     matches!(r.as_str(), "std" | "core" | "alloc" | "rsharp_prelude")
                 });
+            let last_idx = prefix.len().saturating_sub(1);
             let mapped: Vec<String> = prefix
                 .iter()
-                .map(|s| {
-                    if std_here {
-                        fmt_rust_ident(&map_std_type_alias(s))
+                .enumerate()
+                .map(|(idx, s)| {
+                    let is_leaf = !*wildcard && idx == last_idx;
+                    if std_here && is_leaf {
+                        let prev = if idx > 0 {
+                            Some(prefix[idx - 1].as_str())
+                        } else {
+                            parent_mod
+                        };
+                        if s == "string" && !matches!(prev, Some("string" | "rsharp_prelude")) {
+                            fmt_rust_ident(s)
+                        } else {
+                            fmt_rust_ident(&map_std_type_alias(s))
+                        }
                     } else {
                         fmt_rust_ident(s)
                     }
@@ -2924,19 +2997,11 @@ fn format_using_tree_inner(tree: &UsingTree, in_std: bool) -> String {
                 || prefix.first().is_some_and(|r| {
                     matches!(r.as_str(), "std" | "core" | "alloc" | "rsharp_prelude")
                 });
-            let mapped: Vec<String> = prefix
-                .iter()
-                .map(|s| {
-                    if std_here {
-                        fmt_rust_ident(&map_std_type_alias(s))
-                    } else {
-                        fmt_rust_ident(s)
-                    }
-                })
-                .collect();
+            let mapped: Vec<String> = prefix.iter().map(|s| fmt_rust_ident(s)).collect();
+            let next_parent = prefix.last().map(String::as_str).or(parent_mod);
             let subs: Vec<String> = items
                 .iter()
-                .map(|it| format_using_tree_inner(it, std_here))
+                .map(|it| format_using_tree_inner(it, std_here, next_parent))
                 .collect();
             let g = if *global { "::" } else { "" };
             if mapped.is_empty() {
@@ -3448,6 +3513,33 @@ fn is_std_collections_root(expr: &Expr) -> bool {
     }
 }
 
+fn bound_contains_never(b: &TypeBound) -> bool {
+    let TypeBound::Trait(path) = b else {
+        return false;
+    };
+    path.segments.iter().any(|seg| match &seg.args {
+        TypePathArgs::Parenthesized { params, ret } => {
+            params.iter().any(|t| matches!(t, Type::Never))
+                || ret.as_deref().is_some_and(|t| matches!(t, Type::Never))
+        }
+        TypePathArgs::Angle(args) => args.iter().any(|a| match a {
+            GenericArg::Type(t) | GenericArg::AssocBinding { ty: t, .. } => {
+                matches!(t, Type::Never)
+            }
+            _ => false,
+        }),
+        TypePathArgs::None => false,
+    })
+}
+
+fn is_string_module_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Member { field, .. } => field == "string",
+        Expr::Path { segments, .. } => segments.last().is_some_and(|s| s.name == "string"),
+        _ => false,
+    }
+}
+
 fn is_all_caps_const(name: &str) -> bool {
     name.len() >= 2
         && name.bytes().any(|b| b.is_ascii_uppercase())
@@ -3457,7 +3549,9 @@ fn is_all_caps_const(name: &str) -> bool {
 }
 
 fn fmt_rust_ident(name: &str) -> String {
-    if is_rust_keyword(name) {
+    if name.starts_with("r#") {
+        name.to_string()
+    } else if is_rust_keyword(name) {
         format!("r#{}", name)
     } else {
         name.to_string()

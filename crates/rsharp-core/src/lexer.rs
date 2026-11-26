@@ -114,6 +114,35 @@ impl<'a> Lexer<'a> {
                     },
                     self.span_from(line, col, start),
                 ));
+            } else if is_attr_arg_prefix(&tokens)
+                && let Some((open, close)) = self.peek_macro_delim()
+            {
+                let saved_pos = self.pos;
+                let saved_line = self.line;
+                let saved_col = self.col;
+                let (line, col, start) = self.skip_ascii_ws_pos();
+                if let Ok(raw) = self.lex_balanced_rust_group(
+                    open,
+                    close,
+                    line,
+                    col,
+                    start,
+                    "Unterminated attribute delimiter group",
+                ) && self.peek_next_non_ws() == Some(']')
+                    && tokenize(&raw).is_err()
+                {
+                    tokens.push(Token::new(
+                        TokenKind::RawMacroBody {
+                            delim: open,
+                            body: raw.trim().to_string(),
+                        },
+                        self.span_from(line, col, start),
+                    ));
+                } else {
+                    self.pos = saved_pos;
+                    self.line = saved_line;
+                    self.col = saved_col;
+                }
             }
         }
     }
@@ -1098,6 +1127,36 @@ impl<'a> Lexer<'a> {
         };
         Ok(Token::new(kind, self.span_from(line, col, start)))
     }
+    fn peek_next_non_ws(&self) -> Option<char> {
+        self.src[self.pos..].chars().find(|c| !c.is_whitespace())
+    }
+}
+
+fn is_attr_arg_prefix(tokens: &[Token]) -> bool {
+    let mut i = tokens.len();
+    if i < 2 || !matches!(tokens[i - 1].kind, TokenKind::Ident { .. }) {
+        return false;
+    }
+    i -= 1;
+    while i >= 2
+        && matches!(tokens[i - 1].kind, TokenKind::Dot | TokenKind::ColonColon)
+        && matches!(tokens[i - 2].kind, TokenKind::Ident { .. })
+    {
+        i -= 2;
+    }
+    if i >= 1 && matches!(tokens[i - 1].kind, TokenKind::Kw(Keyword::Unsafe)) {
+        i -= 1;
+    }
+    if i >= 2
+        && matches!(tokens[i - 1].kind, TokenKind::Colon)
+        && matches!(
+            &tokens[i - 2].kind,
+            TokenKind::Ident { name, .. } if matches!(name.as_str(), "module" | "assembly" | "inner")
+        )
+    {
+        i -= 2;
+    }
+    i >= 1 && matches!(tokens[i - 1].kind, TokenKind::LBracket)
 }
 
 fn push_hole_char(expr_buf: &mut String, fmt_buf: &mut Option<String>, c: char) {

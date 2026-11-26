@@ -1340,3 +1340,891 @@ fn flt() {
     }
     let _ = roundtrip_and_check(filter_src, &fh, false);
 }
+
+#[test]
+fn github_10_repos_regressions_all_9_bugs() {
+    // Bug 1: Multi-line inner `/*! ... */` and outer `/** ... */` block doc comments
+    let doc_src = r#"/*!
+First line with `backticks` and (parens).
+
+Second paragraph.
+*/
+/**
+Outer multi-line doc with `code`.
+
+More text.
+*/
+pub fn documented() -> i32 {
+    1
+}
+"#;
+    let (_doc_rsh, doc_rust) = roundtrip_and_check(doc_src, &TypeHintMap::default(), false);
+    assert!(doc_rust.contains("//! First line with `backticks`"));
+    assert!(doc_rust.contains("//! Second paragraph."));
+    assert!(doc_rust.contains("/// Outer multi-line doc with `code`."));
+    assert!(doc_rust.contains("/// More text."));
+
+    // Bug 2: `unsafe { ... }` expression used as method-call / postfix receiver
+    let unsafe_recv_src = r#"
+struct Rec;
+impl Rec {
+    fn record(&mut self, v: usize) -> usize { v }
+}
+fn call_unsafe_recv(mut r: Rec) -> usize {
+    let p: *mut Rec = &mut r;
+    unsafe { &mut *p }.record(42)
+}
+fn stmt_unsafe_recv(mut r: Rec) {
+    let p: *mut Rec = &mut r;
+    unsafe { &mut *p }.record(7);
+}
+"#;
+    let (_ur_rsh, ur_rust) = roundtrip_and_check(unsafe_recv_src, &TypeHintMap::default(), false);
+    assert!(ur_rust.contains(".record(42)"));
+    assert!(ur_rust.contains(".record(7);"));
+
+    // Bug 3: Rust lifetimes and raw tokens inside custom attribute arguments
+    let attr_src = r#"
+#[my_attr("{}", { struct Msg<'a>(&'a String, &'a Option<usize>); Msg(&s, &n) })]
+pub struct AttributedWithLifetimes;
+"#;
+    let (_attr_rsh, attr_rust) = roundtrip_and_check(attr_src, &TypeHintMap::default(), false);
+    assert!(
+        attr_rust.contains("struct Msg") && attr_rust.contains("'a"),
+        "got:\n{attr_rust}"
+    );
+
+    // Bug 5: `alloc::string` module paths, `hashbrown::HashMap` imports, and `string` pattern bindings
+    let alias_src = r#"
+use alloc::string::{String, ToString};
+use alloc::string::String as AllocString;
+use alloc::string;
+use hashbrown::HashMap;
+
+enum Token {
+    Text(String),
+}
+
+fn use_aliases(tok: Token, m: HashMap<i32, i32>) -> alloc::string::String {
+    let _ = m;
+    let mut out: alloc::string::String = alloc::string::ToString::to_string(&42);
+    match tok {
+        Token::Text(string) => out.push_str(&string),
+    }
+    out
+}
+"#;
+    let (_al_rsh, al_rust) = roundtrip_and_check(alias_src, &TypeHintMap::default(), false);
+    assert!(
+        al_rust.contains("use alloc::string::{String, ToString};"),
+        "got:\n{al_rust}"
+    );
+    assert!(
+        al_rust.contains("use alloc::string::String as AllocString;"),
+        "got:\n{al_rust}"
+    );
+    assert!(al_rust.contains("use alloc::string;"), "got:\n{al_rust}");
+    assert!(
+        al_rust.contains("use hashbrown::HashMap;"),
+        "got:\n{al_rust}"
+    );
+    assert!(
+        al_rust.contains("alloc::string::ToString::to_string"),
+        "got:\n{al_rust}"
+    );
+    assert!(
+        al_rust.contains("-> alloc::string::String"),
+        "got:\n{al_rust}"
+    );
+    assert!(
+        al_rust.contains("Token::Text(string) =>"),
+        "got:\n{al_rust}"
+    );
+
+    // Bug 6: `#[cfg(...)]` on tail return/break expression hoisted outside `return` / `break`
+    let cfg_tail_src = r#"
+fn cfg_tail_expr(x: i32) -> bool {
+    #[cfg(not(feature = "alt"))]
+    match x {
+        0 => true,
+        _ => false,
+    }
+    #[cfg(feature = "alt")]
+    x.is_positive()
+}
+fn cfg_tail_unsafe(b: &[u8]) -> &[u8] {
+    #[cfg(debug_assertions)]
+    { &b[0..1] }
+    #[cfg(not(debug_assertions))]
+    unsafe { b.get_unchecked(0..1) }
+}
+"#;
+    let (_cfg_rsh, cfg_rust) = roundtrip_and_check(cfg_tail_src, &TypeHintMap::default(), false);
+    assert!(
+        !cfg_rust.contains("return { #[cfg("),
+        "cfg must be hoisted outside return:\n{cfg_rust}"
+    );
+    assert!(
+        cfg_rust.contains("#[cfg(feature = \"alt\")]\n    return x.is_positive();"),
+        "got:\n{cfg_rust}"
+    );
+
+    // Bug 7: Shorthand `mut` binding in struct destructuring pattern
+    let mut_pat_src = r#"
+enum State {
+    Linked { next: Option<i32> },
+}
+fn drain(state: &mut State) -> i32 {
+    match state {
+        State::Linked { mut next } => {
+            let mut count: i32 = 0;
+            while let Some(v) = next {
+                next = if v > 0 { Some(v - 1) } else { None };
+                count += 1;
+            }
+            count
+        }
+    }
+}
+"#;
+    let (_mp_rsh, mp_rust) = roundtrip_and_check(mut_pat_src, &TypeHintMap::default(), false);
+    assert!(
+        mp_rust.contains("State::Linked { mut next } =>"),
+        "got:\n{mp_rust}"
+    );
+
+    // Bug 8: `#![deny(warnings)]` and `break 'lbl ('__blk: { ... })` parenthesization
+    let deny_src = r#"#![deny(warnings)]
+pub fn check_deny(x: i32) -> i32 {
+    'outer: loop {
+        if x > 0 {
+            break 'outer {
+                let y: i32 = x + 1;
+                y
+            };
+        }
+        return 0;
+    }
+}
+"#;
+    let (_dn_rsh, dn_rust) = roundtrip_and_check(deny_src, &TypeHintMap::default(), false);
+    assert!(
+        dn_rust.contains("#![allow(unused_parens, unused_braces, unreachable_code)]"),
+        "got:\n{dn_rust}"
+    );
+    assert!(
+        dn_rust.contains("break 'outer ('__blk_val:"),
+        "got:\n{dn_rust}"
+    );
+
+    // Bug 9: `ref` pattern binding with rust-analyzer hint `&[u8; 15]` must not double-wrap `&`
+    let ref_pat_src = r#"struct InlineExt([u8; 15], u8);
+impl InlineExt {
+    fn as_bytes(&self) -> &[u8] {
+        let InlineExt(ref data, len) = self;
+        &data[..*len as usize]
+    }
+}
+"#;
+    let mut ref_hints = TypeHintMap::default();
+    let line4 = ref_pat_src.lines().nth(3).unwrap();
+    let data_end = (line4.find("data").unwrap() + 4) as u32;
+    let len_end = (line4.find("len").unwrap() + 3) as u32;
+    ref_hints.insert(4, data_end, "&[u8; 15]".to_string());
+    ref_hints.insert(4, len_end, "&u8".to_string());
+    let (_rp_rsh, rp_rust) = roundtrip_and_check(ref_pat_src, &ref_hints, false);
+    assert!(
+        rp_rust.contains("let _: &&[u8; 15] = &data;"),
+        "got:\n{rp_rust}"
+    );
+    assert!(!rp_rust.contains("&&&[u8; 15]"), "got:\n{rp_rust}");
+
+    // Stage C extra regressions (ripgrep, thiserror, minijinja, rayon, bytes, anyhow):
+    // 1. Trait AssocType and AssocConst doc comments preserved (#![deny(missing_docs)])
+    // 2. Closure & unsafe block macro tail (`quote!{ ... }`) treated as return value
+    // 3. `#[cfg(...)]` on array/tuple/call elements emitted directly without `{ ... }`
+    // 4. `void` fn tail call emits `return ...;` to preserve `()` inference (e.g. `.collect()`)
+    // 5. Range operand inside binary expression parenthesized (`r == (start..=end)`)
+    // 6. `(&mut a[..]).chain_mut(...)` parsed as expression, not UFCS array type `<&mut [a; ..]>`
+    // 7. `let size = layout.size() + 1;` does not mis-infer `i32` from unsuffixed literal
+    // 8. `impl Fn() -> !` skips unstable `Fn() -> !` bound in `__rsharp_impl_check`
+    // 9. Renamed `use std::error::Error as StdError;` rejects shadowed `Box<dyn Error>` hint
+    let stage_c_src = r#"
+use std::error::Error as StdError;
+use anyhow::Error;
+
+pub trait Matcher {
+    /// Captures type doc.
+    type Captures;
+    /// Default limit doc.
+    const LIMIT: usize = 1;
+}
+
+fn macro_closure_and_unsafe(opt: Option<i32>) -> Option<i32> {
+    let a: Option<i32> = opt.map(|x: i32| {
+        id_mac! { x }
+    });
+    let b: i32 = unsafe { id_mac! { 1 } };
+    let _ = b;
+    a
+}
+
+static CFG_ITEMS: &[(&str, &str)] = &[
+    #[cfg(feature = "a")]
+    ("a", "A"),
+    ("b", "B"),
+];
+
+fn cfg_tuple_and_call() {
+    let t: (i32,) = (#[cfg(not(test))] 1,);
+    let v: Vec<i32> = vec![#[cfg(not(test))] 1];
+    let _ = (t, v);
+    take_arg(#[cfg(not(test))] 1);
+}
+
+fn unit_tail_collect(items: std::vec::IntoIter<()>) {
+    items.collect()
+}
+
+fn range_cmp(r: std::ops::RangeInclusive<i32>, s: i32, e: i32) -> bool {
+    r == (s..=e) && (s..=e) == r
+}
+
+fn mut_slice_method(mut a: [u8; 4]) -> usize {
+    (&mut a[..]).len()
+}
+
+fn unsuffixed_binary(layout_size: usize) {
+    let s1 = unknown_fn() + 1;
+    let s2 = 1 + unknown_fn();
+    let s3 = (1) + 2usize;
+    let s4 = 1.0 + unknown_fn();
+    let s5 = layout_size + 1;
+    let _ = (s1, s2, s3, s4, s5);
+}
+
+fn shadowed_dyn_and_never_fn() {
+    let boxed = Box::<dyn StdError>::from("err");
+    let f = || -> ! { panic!() };
+    let _ = (boxed, f);
+}
+"#;
+    let mut sc_hints = TypeHintMap::default();
+    for (idx, line) in stage_c_src.lines().enumerate() {
+        let l1 = (idx + 1) as u32;
+        if let Some(pos) = line.find("let boxed =") {
+            sc_hints.insert(l1, (pos + 9) as u32, "Box<dyn Error>".to_string());
+        } else if let Some(pos) = line.find("let f =") {
+            sc_hints.insert(l1, (pos + 5) as u32, "impl Fn() -> !".to_string());
+        }
+    }
+    let (sc_rsh, sc_rust) = roundtrip_and_check(stage_c_src, &sc_hints, false);
+    assert!(
+        sc_rust.contains("/// Captures type doc.\n    type Captures;"),
+        "got:\n{sc_rust}"
+    );
+    assert!(
+        sc_rust.contains("/// Default limit doc.\n    const LIMIT: usize = 1;"),
+        "got:\n{sc_rust}"
+    );
+    assert!(sc_rust.contains("id_mac!{ x }\n"), "got:\n{sc_rust}");
+    assert!(!sc_rust.contains("id_mac!{ x };"), "got:\n{sc_rust}");
+    assert!(
+        sc_rust.contains("#[cfg(feature = \"a\")] (\"a\", \"A\")"),
+        "got:\n{sc_rust}"
+    );
+    assert!(
+        !sc_rust.contains("{ #[cfg(feature = \"a\")]"),
+        "got:\n{sc_rust}"
+    );
+    assert!(
+        sc_rust.contains("return items.collect();"),
+        "got:\n{sc_rust}"
+    );
+    assert!(
+        sc_rust.contains("(r == (s..=e))") && sc_rust.contains("((s..=e) == r)"),
+        "got:\n{sc_rust}"
+    );
+    assert!(sc_rust.contains("(&mut a[..]).len()"), "got:\n{sc_rust}");
+    assert!(
+        sc_rsh.contains("rust { let s1 = unknown_fn () + 1 ; }"),
+        "got:\n{sc_rsh}"
+    );
+    assert!(
+        sc_rsh.contains("rust { let s2 = 1 + unknown_fn () ; }"),
+        "got:\n{sc_rsh}"
+    );
+    assert!(
+        sc_rsh.contains("nuint s3 = ((1) + 2usize);"),
+        "got:\n{sc_rsh}"
+    );
+    assert!(
+        sc_rsh.contains("rust { let s4 = 1.0 + unknown_fn () ; }"),
+        "got:\n{sc_rsh}"
+    );
+    assert!(
+        sc_rsh.contains("nuint s5 = (layout_size + 1);"),
+        "got:\n{sc_rsh}"
+    );
+    assert!(sc_rsh.contains("rust { let boxed ="), "got:\n{sc_rsh}");
+    assert!(!sc_rust.contains("Fn() -> !"), "got:\n{sc_rust}");
+
+    // Final Stage C wave regressions (thiserror r#field, ripgrep self:: + static dyn ref,
+    // ratatui/minijinja List shadowing + None::<T>.method() + (a.powf(b)).into()):
+    let wave2_src = r#"
+pub struct NotSource {
+    r#source: char,
+    destination: char,
+}
+
+pub struct List<'a> {
+    pub items: Vec<&'a str>,
+}
+
+struct Extractor;
+struct Literal;
+impl Literal {
+    fn exact(v: Vec<u8>) -> Self { let _ = v; Literal }
+}
+impl Extractor {
+    fn extract(&self) -> Literal {
+        self::Literal::exact(vec![])
+    }
+}
+
+fn turbofish_none_and_paren_call(a: f64, b: f64) -> f64 {
+    let _ = None::<&i32>.is_none();
+    (a.powf(b)).abs()
+}
+
+fn static_dyn_ref_hint(read_from: &mut dyn std::io::Read) {
+    let dec = wrap(read_from);
+    let _ = dec;
+}
+"#;
+    let mut w2_hints = TypeHintMap::default();
+    for (idx, line) in wave2_src.lines().enumerate() {
+        if let Some(pos) = line.find("let dec =") {
+            w2_hints.insert(
+                (idx + 1) as u32,
+                (pos + 7) as u32,
+                "Wrapper<&mut (dyn std::io::Read + 'static)>".to_string(),
+            );
+        }
+    }
+    let (w2_rsh, w2_rust) = roundtrip_and_check(wave2_src, &w2_hints, false);
+    assert!(w2_rust.contains("r#source: char,"), "got:\n{w2_rust}");
+    assert!(
+        w2_rust.contains("pub items: Vec<&'a str>,"),
+        "got:\n{w2_rust}"
+    );
+    assert!(w2_rust.contains("self::Literal::exact("), "got:\n{w2_rust}");
+    assert!(
+        w2_rust.contains("(None::<&i32>).is_none()"),
+        "got:\n{w2_rust}"
+    );
+    assert!(w2_rust.contains("a.powf(b).abs()"), "got:\n{w2_rust}");
+    assert!(
+        w2_rsh.contains("rust { let dec = wrap (read_from) ; }"),
+        "got:\n{w2_rsh}"
+    );
+
+    // Imported `List` shadowing `Vec` alias in another module (`ratatui-widgets/src/list/rendering.rs`)
+    let imported_list_src = r#"
+use crate::list::{List, ListState};
+impl List<'_> {
+    fn count(&self) -> usize {
+        let items: Vec<i32> = Vec::new();
+        items.len()
+    }
+}
+"#;
+    let (_il_rsh, il_rust) = roundtrip_and_check(imported_list_src, &TypeHintMap::default(), false);
+    assert!(il_rust.contains("impl List<'_>"), "got:\n{il_rust}");
+    assert!(
+        il_rust.contains("let items: Vec<i32> = Vec::new();"),
+        "got:\n{il_rust}"
+    );
+
+    // Final minijinja + ratatui regressions:
+    // 1. `pub unsafe fn borrow_mut() -> (&Owner, &mut Dep)` (unsafe fn returning tuple, NOT unsafe fn ptr)
+    // 2. `List::new()` in `mod tests` when `struct List` is in scope
+    // 3. Packed struct aligned field copy `&{ val.0 }`
+    // 4. Local macro expanding to `continue;` inside value-position `if` / `{ ... }`
+    // 5. Inactive `#[cfg]` unsuffixed numeric literal falls back when RA hints are present
+    let wave3_src = r#"
+#[repr(packed)]
+struct Packed(u128);
+
+pub struct List<'a>(&'a str);
+impl<'a> List<'a> {
+    pub fn new(s: &'a str) -> Self { List(s) }
+}
+mod tests {
+    use super::*;
+    fn make() -> List<'static> { List::new("a") }
+}
+
+pub unsafe fn borrow_mut<'a>(a: &'a i32, b: &'a mut i32) -> (&'a i32, &'a mut i32) {
+    (a, b)
+}
+
+fn packed_copy(p: Packed) -> u128 {
+    let r: &u128 = &{ p.0 };
+    *r
+}
+
+fn loop_jump_macro_test(mut n: i32) -> i32 {
+    macro_rules! step {
+        () => {{
+            n -= 1;
+            continue;
+        }};
+    }
+    loop {
+        let v: i32 = if n > 0 {
+            let x: i32 = n;
+            let _ = x;
+            step!()
+        } else {
+            break n
+        };
+        let _ = match v {
+            0 => {
+                let y: i32 = 1;
+                let _ = y;
+                step!();
+            }
+            _ => {}
+        };
+    }
+}
+
+fn cfg_inactive_int(active: i32) -> usize {
+    let a = active;
+    let _ = a;
+    #[cfg(not(feature = "fast"))]
+    {
+        let mut start = 0;
+        start += 1;
+        return start;
+    }
+    0
+}
+"#;
+    let mut w3_hints = TypeHintMap::default();
+    for (idx, line) in wave3_src.lines().enumerate() {
+        if let Some(pos) = line.find("let a = active;") {
+            w3_hints.insert((idx + 1) as u32, (pos + 5) as u32, "i32".to_string());
+        }
+    }
+    let (w3_rsh, w3_rust) = roundtrip_and_check(wave3_src, &w3_hints, false);
+    assert!(
+        w3_rust.contains(
+            "pub unsafe fn borrow_mut<'a>(a: &'a i32, b: &'a mut i32) -> (&'a i32, &'a mut i32)"
+        ),
+        "got:\n{w3_rust}"
+    );
+    assert!(w3_rust.contains("List::new(\"a\")"), "got:\n{w3_rust}");
+    assert!(w3_rust.contains("&{ p . 0 }"), "got:\n{w3_rust}");
+    assert!(!w3_rust.contains("'__if_val:"), "got:\n{w3_rust}");
+    assert!(
+        w3_rust.contains("0 => { { let y : i32 = 1 ; let _ = y ; step ! () ; } }"),
+        "got:\n{w3_rust}"
+    );
+    assert!(
+        w3_rsh.contains("rust { let mut start = 0 ; }"),
+        "got:\n{w3_rsh}"
+    );
+
+    // Non-std `Error` import (e.g. `use minijinja::Error;`) must not treat `dyn Error` as in-scope trait
+    let non_std_err_src = r#"
+use minijinja::Error;
+fn inspect(err: &Error) {
+    let source = std::error::Error::source(err).unwrap();
+    let _ = source;
+}
+"#;
+    let mut nse_hints = TypeHintMap::default();
+    let l4 = non_std_err_src.lines().nth(3).unwrap();
+    nse_hints.insert(
+        4,
+        (l4.find("source").unwrap() + 6) as u32,
+        "&dyn Error".to_string(),
+    );
+    let (nse_rsh, _) = roundtrip_and_check(non_std_err_src, &nse_hints, false);
+    assert!(nse_rsh.contains("rust { let source ="), "got:\n{nse_rsh}");
+
+    // Mixed `Foo<'_, 'static>` RA hint relaxes `'static` to `'_` (`minijinja-py/src/environment.rs`)
+    let mixed_lt_src = "fn make(src: &str) {\n    let tmpl = parse(src);\n    let _ = tmpl;\n}\n";
+    let mut mlt_hints = TypeHintMap::default();
+    mlt_hints.insert(2, 12, "minijinja::Template<'_, 'static>".to_string());
+    let (_mlt_rsh, mlt_rust) = roundtrip_and_check(mixed_lt_src, &mlt_hints, false);
+    assert!(
+        mlt_rust.contains("let tmpl: minijinja::Template<'_, '_> ="),
+        "got:\n{mlt_rust}"
+    );
+}
+
+#[test]
+fn ra_oracle_retries_on_content_modified_error() {
+    let mut stream = Vec::new();
+    stream.extend_from_slice(&frame_lsp(
+        &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+    ));
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "method": "experimental/serverStatus",
+        "params": { "quiescent": true }
+    })));
+    // First inlayHint attempt returns LSP -32801 ContentModified
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {"code": -32801, "message": "content modified"}
+    })));
+    // Retry attempt (id 3) succeeds
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": [
+            {"kind": 1, "position": {"line": 0, "character": 5}, "label": ": i32"}
+        ]
+    })));
+    stream.extend_from_slice(&frame_lsp(
+        &json!({"jsonrpc": "2.0", "id": 4, "result": null}),
+    ));
+
+    let mut oracle = RustAnalyzerOracle::from_io(
+        Box::new(Cursor::new(stream)),
+        Box::new(Vec::<u8>::new()),
+        Path::new("."),
+    )
+    .expect("from_io init");
+    let hints = oracle
+        .type_hints_for_file(Path::new("retry.rs"), "let x = 1;")
+        .expect("should retry -32801 and succeed");
+    assert_eq!(hints.get(1, 5), Some("i32"));
+    oracle.close();
+}
+
+#[test]
+fn github_10_repos_full_branch_coverage() {
+    // 1. Parser: RawMacroBody '[' and '{' attribute args, nested parens in starts_fn_ptr_type,
+    //    and non-range Type::Array in is_unambiguous_inherent_qself_type.
+    let parser_rsh = r#"
+[my_attr['a]]
+[my_attr{'a}]
+void attr_delims() {}
+
+unsafe ((int, int)) -> int make_nested_fn_ptr(unsafe ((int, int)) -> int f) {
+    return f;
+}
+
+void qself_arrays(read int[2] a) {
+    _ = (int[2]).default();
+    _ = (a[0]).abs();
+}
+"#;
+    let parser_rust = transpile_to_rust(
+        parser_rsh,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("parser branch coverage rsharp should transpile");
+    assert!(
+        parser_rust.contains("#[my_attr['a]]"),
+        "got:\n{parser_rust}"
+    );
+    assert!(
+        parser_rust.contains("#[my_attr{'a}]"),
+        "got:\n{parser_rust}"
+    );
+    assert!(
+        parser_rust.contains("unsafe fn((i32, i32)) -> i32"),
+        "got:\n{parser_rust}"
+    );
+    assert!(
+        parser_rust.contains("<[i32; 2]>::default()"),
+        "got:\n{parser_rust}"
+    );
+    assert!(parser_rust.contains("a[0].abs()"), "got:\n{parser_rust}");
+
+    // 2. Codegen: non-std-alias enum variant in `using E.*`, attributed trailing return in
+    //    value block, `bound_contains_never` (lifetime, fn params, angle Type/AssocBinding/other),
+    //    and `is_string_module_expr` (Member true/false, Path true/false, Ident false).
+    let codegen_rsh = r#"
+enum MixedKind { Other, List }
+using MixedKind.*;
+
+void codegen_branches(int x) {
+    _ = (int n) => {
+        [allow(unused)]
+        return n;
+    };
+    impl Clone + maybe Sized + life static a = x;
+    impl Fn(int) -> never b = make_fn();
+    impl From<int> c = make_from();
+    impl Iterator<Item = int> d = make_iter();
+    impl HasLife<life static> e = make_life();
+    _ = std.string.ToString.to_string(read x);
+    _ = std.string.string.new();
+    _ = std.fmt.string;
+    _ = std::string.string;
+    _ = std::fmt.string;
+    _ = (a, b, c, d, e, Other, List);
+}
+"#;
+    let codegen_rust = transpile_to_rust(
+        codegen_rsh,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("codegen branch coverage rsharp should transpile");
+    assert!(
+        codegen_rust.contains("#[allow(unused)]\n        n"),
+        "got:\n{codegen_rust}"
+    );
+    assert!(
+        !codegen_rust.contains("Fn(i32) -> !"),
+        "got:\n{codegen_rust}"
+    );
+    assert!(
+        codegen_rust.contains("std::string::ToString::to_string"),
+        "got:\n{codegen_rust}"
+    );
+    assert!(
+        codegen_rust.contains("std::string::String::new"),
+        "got:\n{codegen_rust}"
+    );
+    assert!(
+        codegen_rust.contains("std::fmt::string"),
+        "got:\n{codegen_rust}"
+    );
+
+    // 3. from_rust: BlockTail::Break with outer attr, Pat::Struct untyped `mut` fallback,
+    //    Pat::Ident `@` subpat with `ref`/`ref mut` RA hints, strip_leading_borrow_prefix
+    //    (`read `, `write `, `read<static> `, `read<int>` no space, non-matching prefix),
+    //    binary `(Some(lt), None)` with non-unsuffixed LHS, and loop-jump call/method args.
+    let from_rust_src = r#"
+struct reader;
+
+fn labeled_break_attr(c: bool) -> i32 {
+    let v: i32 = if c {
+        let tmp: i32 = 1;
+        let _ = tmp;
+        #[allow(unused)]
+        42
+    } else {
+        0
+    };
+    v
+}
+
+fn unknown_struct_mut_local(u: UnknownStruct) {
+    let UnknownStruct { mut a, b } = u;
+    let _ = (a, b);
+}
+
+fn by_ref_at_subpats(v: i32, s: &'static str, r: reader, m: MyCustom) {
+    match v {
+        ref x @ 1..=5 => { let _ = x; }
+        _ => {}
+    }
+    match v {
+        ref mut y @ 1..=5 => { let _ = y; }
+        _ => {}
+    }
+    match s {
+        ref z @ _ => { let _ = z; }
+    }
+    match r {
+        ref w @ _ => { let _ = w; }
+    }
+    match m {
+        ref q @ _ => { let _ = q; }
+    }
+}
+
+fn binary_known_lhs_unknown_rhs(x: i32) {
+    let r = x + unknown_rhs();
+    let _ = r;
+}
+
+fn loop_jump_call_and_method_args(mut n: i32) {
+    macro_rules! bail {
+        () => { continue; };
+    }
+    loop {
+        let _: i32 = if n > 0 {
+            let t: i32 = 1;
+            let _ = t;
+            foo(1, bail!())
+        } else {
+            0
+        };
+        let _: i32 = if n > 0 {
+            let t: i32 = 1;
+            let _ = t;
+            foo(1, 2)
+        } else {
+            let t: i32 = 2;
+            let _ = t;
+            n.bar(1, bail!())
+        };
+    }
+}
+"#;
+    let mut fr_hints = TypeHintMap::default();
+    for (idx, line) in from_rust_src.lines().enumerate() {
+        let l1 = (idx + 1) as u32;
+        if let Some(pos) = line.find("ref x @") {
+            fr_hints.insert(l1, (pos + 5) as u32, "&i32".to_string());
+        } else if let Some(pos) = line.find("ref mut y @") {
+            fr_hints.insert(l1, (pos + 9) as u32, "&mut i32".to_string());
+        } else if let Some(pos) = line.find("ref z @") {
+            fr_hints.insert(l1, (pos + 5) as u32, "&'static str".to_string());
+        } else if let Some(pos) = line.find("ref w @") {
+            fr_hints.insert(l1, (pos + 5) as u32, "reader".to_string());
+        } else if let Some(pos) = line.find("ref q @") {
+            fr_hints.insert(l1, (pos + 5) as u32, "MyCustom".to_string());
+        }
+    }
+    let (fr_rsh, fr_rust) = roundtrip_and_check(from_rust_src, &fr_hints, false);
+    assert!(fr_rust.contains("#[allow(unused)]\n"), "got:\n{fr_rust}");
+    assert!(fr_rsh.contains("borrow read int x"), "got:\n{fr_rsh}");
+    assert!(fr_rsh.contains("borrow write int y"), "got:\n{fr_rsh}");
+    assert!(fr_rsh.contains("borrow read str z"), "got:\n{fr_rsh}");
+    assert!(fr_rsh.contains("borrow read reader w"), "got:\n{fr_rsh}");
+    assert!(fr_rsh.contains("borrow read MyCustom q"), "got:\n{fr_rsh}");
+    assert!(
+        fr_rsh.contains("int r = (x + unknown_rhs());"),
+        "got:\n{fr_rsh}"
+    );
+    let loop_fn_rust = fr_rust
+        .split("fn loop_jump_call_and_method_args")
+        .nth(1)
+        .expect("loop fn present");
+    assert!(!loop_fn_rust.contains("'__if_val:"), "got:\n{loop_fn_rust}");
+
+    // Also test strict mode on `let UnknownStruct { mut a, b } = u;` to hit untyped `mut` output.
+    let strict_struct = "struct S { a: i32 }\nfn f(u: UnknownStruct) { let UnknownStruct { mut a, b } = u; let _ = (a, b); }\n";
+    let strict_rsh = convert_from_rust_with_hints(
+        strict_struct,
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+        &TypeHintMap::default(),
+        true,
+    )
+    .expect("strict unknown struct local should convert");
+    assert!(strict_rsh.contains("mut a, b"), "got:\n{strict_rsh}");
+
+    // 4. ra_oracle: workspace scan for optional deps, cfg-gated mods, `#![no_std]`, and hint
+    //    filtering (`hint_uses_cfg_gated_item`, `hint_uses_unqualified_alloc_type`, `extract_mod_decl_name`).
+    let ws = std::env::temp_dir().join(format!("rsharp_ra_cfg_scan_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::create_dir_all(ws.join(".hidden")).unwrap();
+    std::fs::create_dir_all(ws.join("target")).unwrap();
+    std::fs::create_dir_all(ws.join("node_modules")).unwrap();
+    std::fs::write(ws.join("README.md"), "ignore me\n").unwrap();
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        concat!(
+            "[package]\nname = \"nostd_demo\"\nversion = \"0.1.0\"\n",
+            "# optional comment without true\n",
+            "# optional true without equals\n",
+            "bad.dep = { optional = true }\n",
+            "serde-json = { version = \"1\", optional = true }\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("src").join("lib.rs"),
+        concat!(
+            "#![no_std]\n",
+            "// comment line\n\n",
+            "#[cfg(feature = \"fuel\")]\n",
+            "#[allow(dead_code)]\n",
+            "pub(crate) mod fuel;\n",
+            "#[cfg(unix)]\n",
+            "mod unix_mod;\n",
+            "#[cfg(feature = \"bad\")]\n",
+            "pub const NOT_A_MOD: i32 = 1;\n",
+            "#[cfg(feature = \"bad\")]\n",
+            "mod bad-mod;\n",
+            "#[cfg(feature = \"bad\")]\n",
+            "fn no_semi() {}\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(ws.join("src").join("other.rs"), "pub fn ok() {}\n").unwrap();
+
+    let mut stream = Vec::new();
+    stream.extend_from_slice(&frame_lsp(
+        &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+    ));
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "method": "experimental/serverStatus",
+        "params": { "quiescent": true }
+    })));
+    // Return hints exercising every filter path in `query_inlay_hints`:
+    // - pos 0: bare `serde_json::Value` (optional dep at pos 0 -> masked)
+    // - pos 1: `Option<serde_json::Value>` (optional dep after `<` -> masked)
+    // - pos 2: `my_serde_json::Value` (substring with `_` prefix -> NOT masked)
+    // - pos 3: `crate::fuel::Fuel` (cfg-gated mod -> masked)
+    // - pos 4: unverified `String` in no_std (no data -> `_rsharp_no_edit: true` -> masked)
+    // - pos 5: unverified `Option<Vec<u8>>` in no_std (masked)
+    // - pos 6: unverified `Box<u8>` in no_std (masked)
+    // - pos 7: unverified `alloc::string::String` (qualified `::` -> kept)
+    // - pos 8: unverified `MyString` + `StringBuf` (alnum boundary -> kept)
+    // - pos 9: verified `String` via textEdits (verified == true -> kept)
+    // - pos 10: unverified `i32` (trivial primitive -> kept)
+    stream.extend_from_slice(&frame_lsp(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": [
+            {"kind": 1, "position": {"line": 0, "character": 1}, "label": ": serde_json::Value"},
+            {"kind": 1, "position": {"line": 0, "character": 2}, "label": ": Option<serde_json::Value>"},
+            {"kind": 1, "position": {"line": 0, "character": 3}, "label": ": my_serde_json::Value"},
+            {"kind": 1, "position": {"line": 0, "character": 4}, "label": ": crate::fuel::Fuel"},
+            {"kind": 1, "position": {"line": 0, "character": 5}, "label": ": String"},
+            {"kind": 1, "position": {"line": 0, "character": 6}, "label": ": Option<Vec<u8>>"},
+            {"kind": 1, "position": {"line": 0, "character": 7}, "label": ": Box<u8>"},
+            {"kind": 1, "position": {"line": 0, "character": 8}, "label": ": alloc::string::String"},
+            {"kind": 1, "position": {"line": 0, "character": 9}, "label": ": (MyString, StringBuf)"},
+            {"kind": 1, "position": {"line": 0, "character": 10}, "label": ": String", "textEdits": [{"newText": ": String"}]},
+            {"kind": 1, "position": {"line": 0, "character": 11}, "label": ": i32"}
+        ]
+    })));
+    stream.extend_from_slice(&frame_lsp(
+        &json!({"jsonrpc": "2.0", "id": 3, "result": null}),
+    ));
+
+    let mut oracle = RustAnalyzerOracle::from_io(
+        Box::new(Cursor::new(stream)),
+        Box::new(Vec::<u8>::new()),
+        &ws,
+    )
+    .expect("from_io with Cargo.toml workspace");
+    let hints = oracle
+        .type_hints_for_file(&ws.join("src").join("lib.rs"), "fn f() {}")
+        .expect("hints should filter cfg-gated and no_std alloc hints");
+    assert_eq!(hints.get(1, 1), Some("{unknown}"));
+    assert_eq!(hints.get(1, 2), Some("{unknown}"));
+    assert_eq!(hints.get(1, 3), Some("my_serde_json::Value"));
+    assert_eq!(hints.get(1, 4), Some("{unknown}"));
+    assert_eq!(hints.get(1, 5), Some("{unknown}"));
+    assert_eq!(hints.get(1, 6), Some("{unknown}"));
+    assert_eq!(hints.get(1, 7), Some("{unknown}"));
+    assert_eq!(hints.get(1, 8), Some("alloc::string::String"));
+    assert_eq!(hints.get(1, 9), Some("(MyString, StringBuf)"));
+    assert_eq!(hints.get(1, 10), Some("String"));
+    assert_eq!(hints.get(1, 11), Some("i32"));
+    oracle.close();
+    let _ = std::fs::remove_dir_all(&ws);
+}

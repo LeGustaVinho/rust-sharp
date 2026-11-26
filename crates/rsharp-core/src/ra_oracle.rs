@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -110,6 +110,9 @@ pub struct RustAnalyzerOracle {
     writer: Box<dyn Write>,
     child: Option<Child>,
     next_id: i64,
+    optional_deps: HashSet<String>,
+    cfg_gated_mods: HashSet<String>,
+    is_no_std: bool,
 }
 
 impl RustAnalyzerOracle {
@@ -140,6 +143,9 @@ impl RustAnalyzerOracle {
             writer: Box::new(BufWriter::new(stdin)),
             child: Some(child),
             next_id: 1,
+            optional_deps: HashSet::new(),
+            cfg_gated_mods: HashSet::new(),
+            is_no_std: false,
         };
         oracle.initialize(workspace_root)?;
         Ok(oracle)
@@ -156,12 +162,23 @@ impl RustAnalyzerOracle {
             writer: Box::new(writer),
             child: None,
             next_id: 1,
+            optional_deps: HashSet::new(),
+            cfg_gated_mods: HashSet::new(),
+            is_no_std: false,
         };
         oracle.initialize(workspace_root)?;
         Ok(oracle)
     }
 
     fn initialize(&mut self, workspace_root: &Path) -> Result<()> {
+        if workspace_root.join("Cargo.toml").exists() {
+            collect_workspace_cfg_gated_names(
+                workspace_root,
+                &mut self.optional_deps,
+                &mut self.cfg_gated_mods,
+                &mut self.is_no_std,
+            );
+        }
         let root_uri = path_to_file_uri(workspace_root);
         let ws_name = workspace_root
             .file_name()
@@ -270,9 +287,9 @@ impl RustAnalyzerOracle {
             .strip_suffix('\r')
             .unwrap_or(&text[last_line_start..]);
         let end_char = last_line.encode_utf16().count() as u32;
-        let req_id = self.send_request(
+        let mut resp = self.request_with_retry(
             "textDocument/inlayHint",
-            json!({
+            &json!({
                 "textDocument": { "uri": uri },
                 "range": {
                     "start": { "line": 0, "character": 0 },
@@ -280,7 +297,6 @@ impl RustAnalyzerOracle {
                 }
             }),
         )?;
-        let mut resp = self.read_response(req_id)?;
         if let Some(items) = resp.as_array_mut() {
             for item in items.iter_mut() {
                 if item.get("kind").and_then(Value::as_u64) != Some(1) {
@@ -298,10 +314,14 @@ impl RustAnalyzerOracle {
                     mark_no_edit_if_empty(item);
                     continue;
                 }
-                let res_id = self.send_request("inlayHint/resolve", item.clone())?;
-                if let Ok(mut resolved) = self.read_response(res_id) {
-                    mark_no_edit_if_empty(&mut resolved);
-                    *item = resolved;
+                match self.request_with_retry("inlayHint/resolve", &item.clone()) {
+                    Ok(mut resolved) => {
+                        mark_no_edit_if_empty(&mut resolved);
+                        *item = resolved;
+                    }
+                    Err(_) => {
+                        mark_no_edit_if_empty(item);
+                    }
                 }
             }
         }
@@ -313,7 +333,18 @@ impl RustAnalyzerOracle {
             }),
         )?;
 
-        Ok(parse_inlay_hint_response(&resp))
+        let mut hints = parse_inlay_hint_response(&resp);
+        if !self.optional_deps.is_empty() || !self.cfg_gated_mods.is_empty() || self.is_no_std {
+            for (ty, verified) in hints.by_end.values_mut() {
+                if hint_uses_cfg_gated_item(ty, &self.optional_deps, &self.cfg_gated_mods)
+                    || (self.is_no_std && !*verified && hint_uses_unqualified_alloc_type(ty))
+                {
+                    *ty = "{unknown}".to_string();
+                    *verified = false;
+                }
+            }
+        }
+        Ok(hints)
     }
 
     /// Gracefully shuts down the `rust-analyzer` server process.
@@ -364,7 +395,41 @@ impl RustAnalyzerOracle {
         Ok(false)
     }
 
+    fn request_with_retry(&mut self, method: &str, params: &Value) -> Result<Value> {
+        const MAX_RETRIES: usize = 5;
+        let mut attempt = 0usize;
+        loop {
+            let id = self.send_request(method, params.clone())?;
+            match self.read_response_raw(id)? {
+                Ok(val) => return Ok(val),
+                Err(err)
+                    if attempt < MAX_RETRIES
+                        && err.get("code").and_then(Value::as_i64) == Some(-32801) =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20 * attempt as u64));
+                }
+                Err(err) => {
+                    return Err(RSharpError::from_rust(format!(
+                        "rust-analyzer LSP error: {}",
+                        err
+                    )));
+                }
+            }
+        }
+    }
+
     fn read_response(&mut self, expected_id: i64) -> Result<Value> {
+        match self.read_response_raw(expected_id)? {
+            Ok(val) => Ok(val),
+            Err(err) => Err(RSharpError::from_rust(format!(
+                "rust-analyzer LSP error: {}",
+                err
+            ))),
+        }
+    }
+
+    fn read_response_raw(&mut self, expected_id: i64) -> Result<std::result::Result<Value, Value>> {
         loop {
             let msg = read_lsp_message(&mut *self.reader)?;
             if self.try_reply_server_request(&msg)? {
@@ -372,12 +437,9 @@ impl RustAnalyzerOracle {
             }
             if msg.get("id").and_then(Value::as_i64) == Some(expected_id) {
                 if let Some(err) = msg.get("error") {
-                    return Err(RSharpError::from_rust(format!(
-                        "rust-analyzer LSP error: {}",
-                        err
-                    )));
+                    return Ok(Err(err.clone()));
                 }
-                return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+                return Ok(Ok(msg.get("result").cloned().unwrap_or(Value::Null)));
             }
         }
     }
@@ -547,4 +609,132 @@ pub fn parse_inlay_hint_response(result: &Value) -> TypeHintMap {
         }
     }
     map
+}
+
+fn collect_workspace_cfg_gated_names(
+    root: &Path,
+    optional_deps: &mut HashSet<String>,
+    cfg_gated_mods: &mut HashSet<String>,
+    is_no_std: &mut bool,
+) {
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let os_name = entry.file_name();
+        let name = os_name.to_string_lossy();
+        let name = name.as_ref();
+        if path.is_dir() {
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            collect_workspace_cfg_gated_names(&path, optional_deps, cfg_gated_mods, is_no_std);
+        } else if name == "Cargo.toml"
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            for line in content.lines() {
+                if line.contains("optional")
+                    && line.contains("true")
+                    && let Some((key, _)) = line.split_once('=')
+                {
+                    let dep = key.trim().replace('-', "_");
+                    if !dep.is_empty() && dep.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        optional_deps.insert(dep);
+                    }
+                }
+            }
+        } else if name.ends_with(".rs")
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            if name == "lib.rs" && content.contains("no_std") {
+                *is_no_std = true;
+            }
+            let mut saw_cfg = false;
+            for line in content.lines() {
+                let t = line.trim();
+                if t.is_empty() || t.starts_with("//") {
+                    continue;
+                }
+                if t.starts_with("#[cfg(") {
+                    saw_cfg = true;
+                    continue;
+                }
+                if t.starts_with("#[") {
+                    continue;
+                }
+                if saw_cfg
+                    && let Some(rest) = t.strip_suffix(';')
+                    && let Some(mod_name) = extract_mod_decl_name(rest)
+                {
+                    cfg_gated_mods.insert(mod_name.to_string());
+                }
+                saw_cfg = false;
+            }
+        }
+    }
+}
+
+fn extract_mod_decl_name(decl: &str) -> Option<&str> {
+    let after_mod = if let Some(r) = decl.strip_prefix("mod ") {
+        r
+    } else if let Some((_, r)) = decl.split_once(" mod ") {
+        r
+    } else {
+        return None;
+    };
+    let name = after_mod.trim();
+    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn hint_uses_cfg_gated_item(
+    ty: &str,
+    optional_deps: &HashSet<String>,
+    cfg_gated_mods: &HashSet<String>,
+) -> bool {
+    for dep in optional_deps {
+        let needle = format!("{}::", dep);
+        if let Some(pos) = ty.find(&needle)
+            && (pos == 0
+                || !ty[..pos]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_'))
+        {
+            return true;
+        }
+    }
+    for m in cfg_gated_mods {
+        if ty.contains(&format!("::{}::", m)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn hint_uses_unqualified_alloc_type(ty: &str) -> bool {
+    for ident in ["String", "Vec", "Box"] {
+        let mut search = ty;
+        while let Some(pos) = search.find(ident) {
+            let before = &search[..pos];
+            let after = &search[pos + ident.len()..];
+            let left_ok = before.is_empty()
+                || (!before.ends_with("::")
+                    && !before
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_'));
+            let right_ok = after
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            if left_ok && right_ok {
+                return true;
+            }
+            search = &search[pos + ident.len()..];
+        }
+    }
+    false
 }

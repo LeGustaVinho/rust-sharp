@@ -265,6 +265,8 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     let _ = std::fs::remove_dir_all(&base);
     let proj = base.join("mini_crate");
     std::fs::create_dir_all(proj.join("src").join("bin")).unwrap();
+    std::fs::create_dir_all(proj.join("src").join("vendor")).unwrap();
+    std::fs::create_dir_all(proj.join("vendor")).unwrap();
     std::fs::create_dir_all(proj.join("target")).unwrap();
     std::fs::create_dir_all(proj.join(".hidden")).unwrap();
     std::fs::write(
@@ -278,11 +280,17 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     )
     .unwrap();
     std::fs::write(
+        proj.join("src").join("vendor").join("vendored.rs"),
+        "pub fn helper() -> i32 { 1 }\n",
+    )
+    .unwrap();
+    std::fs::write(
         proj.join("src").join("bin").join("tool.rs"),
         "fn main() { let v = mini_crate::double(21); println!(\"{}\", v); }\n",
     )
     .unwrap();
-    // Ignored directories must be skipped
+    // Ignored directories must be skipped (including top-level `vendor/`, unlike `src/vendor/`)
+    std::fs::write(proj.join("vendor").join("ignored.rs"), "invalid {{{").unwrap();
     std::fs::write(proj.join("target").join("ignored.rs"), "invalid {{{").unwrap();
     std::fs::write(proj.join(".hidden").join("ignored.rs"), "invalid {{{").unwrap();
 
@@ -339,8 +347,16 @@ fn test_cli_from_rust_project_and_workspace_mode() {
         "--verify",
     ]));
     assert_eq!(ok.exit_code, 0, "stderr: {}", ok.stderr);
-    assert!(ok.stdout.contains("Converted 2/2 files cleanly"));
+    assert!(ok.stdout.contains("Converted 3/3 files cleanly"));
     assert!(out_dir.join("src").join("lib.rsharp").is_file());
+    assert!(
+        out_dir
+            .join("src")
+            .join("vendor")
+            .join("vendored.rsharp")
+            .is_file()
+    );
+    assert!(!out_dir.join("vendor").exists());
     assert!(
         out_dir
             .join("src")
@@ -389,7 +405,7 @@ fn test_cli_from_rust_project_and_workspace_mode() {
         &blocking_file.to_string_lossy(),
     ]));
     assert_eq!(write_err.exit_code, 1);
-    assert!(write_err.stderr.contains("with 2 error(s)"));
+    assert!(write_err.stderr.contains("with 3 error(s)"));
 
     // Oracle open failure via isolated child process env override
     let bin = env!("CARGO_BIN_EXE_rsharp");
