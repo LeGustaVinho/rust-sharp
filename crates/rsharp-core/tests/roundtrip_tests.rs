@@ -314,6 +314,24 @@ fn from_rust_uses_rustc_type_probe_for_complex_inferred_types() {
 }
 
 #[test]
+fn standalone_probes_preserve_types_and_opaque_parameter_diagnostics() {
+    use rsharp_core::rustc_runner::{probe_closure_param_type, probe_local_type};
+    let source = "fn main() { let mut n = 1i16; let m = Some(n).map(|v| v + 1); let _ = m.map(|mut v| { v += 2; v }); }";
+    assert_eq!(probe_local_type(source, "n", 1).unwrap(), "i16");
+    assert_eq!(probe_local_type(source, "m", 2).unwrap(), "Option<i16>");
+    assert_eq!(probe_closure_param_type(source, "v", 3).unwrap(), "i16");
+    let simple = source.replace("|mut v| { v += 2; v }", "|w| w");
+    assert_eq!(probe_closure_param_type(&simple, "v", 4).unwrap(), "i16");
+
+    let opaque = "fn f() { let _: i32 = Some(|| 1).map(|v| v()).unwrap(); }";
+    let err = convert_from_rust(opaque, FromRustOptions::default()).unwrap_err();
+    assert!(
+        err.to_string().contains("unparseable closure param type"),
+        "{err}"
+    );
+}
+
+#[test]
 fn from_rust_reports_unresolved_type_when_unresolvable() {
     let rust_src = r#"
         fn demo() {

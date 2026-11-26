@@ -11,7 +11,7 @@ use syn::{
 
 use crate::error::{RSharpError, Result};
 use crate::ra_oracle::TypeHintMap;
-use crate::rustc_runner;
+use crate::rustc_runner::probes::TypeProbes;
 use crate::token::Keyword;
 
 const INDENT: &str = "    ";
@@ -51,12 +51,8 @@ pub fn convert_from_rust_with_hints(
 ) -> Result<String> {
     let parsed: syn::File = syn::parse_file(rust_source)
         .map_err(|e| RSharpError::from_rust(format!("Invalid Rust syntax: {}", e)))?;
-    let mut conv = RustToRSharp::new(
-        rust_source.to_string(),
-        options,
-        Rc::new(hints.clone()),
-        strict_unnameable,
-    );
+    let probes = TypeProbes::new(rust_source, &parsed);
+    let mut conv = RustToRSharp::new(rust_source, options, hints, strict_unnameable, &probes);
     conv.collect_signatures(&parsed.items);
     conv.emit_file(&parsed);
     if let Some(err) = conv.first_err.borrow_mut().take() {
@@ -79,11 +75,11 @@ enum HintLookup {
     Unnameable,
 }
 
-struct RustToRSharp {
-    raw_source: String,
-    source_lines: Rc<Vec<String>>,
+struct RustToRSharp<'a> {
+    probes: &'a TypeProbes<'a>,
+    source_lines: Rc<Vec<&'a str>>,
     options: FromRustOptions,
-    type_hints: Rc<TypeHintMap>,
+    type_hints: &'a TypeHintMap,
     strict_unnameable: bool,
     out: String,
     indent: usize,
@@ -95,25 +91,29 @@ struct RustToRSharp {
     shadowed_std_aliases: HashSet<String>,
     scopes: Vec<HashMap<String, String>>,
     declared_in_fn: HashSet<String>,
-    probe_counter: Rc<Cell<usize>>,
     rustc_probe_aborted: Rc<Cell<bool>>,
     first_err: Rc<RefCell<Option<RSharpError>>>,
 }
 
-impl RustToRSharp {
+impl<'a> RustToRSharp<'a> {
     fn new(
-        raw_source: String,
+        raw_source: &'a str,
         options: FromRustOptions,
-        type_hints: Rc<TypeHintMap>,
+        type_hints: &'a TypeHintMap,
         strict_unnameable: bool,
+        probes: &'a TypeProbes<'a>,
     ) -> Self {
         let mut known_path_roots = HashSet::new();
         for root in ["std", "core", "alloc", "crate", "super", "self", "Self"] {
             known_path_roots.insert(root.to_string());
         }
-        let source_lines: Vec<String> = raw_source.lines().map(str::to_string).collect();
+        let source_lines = if type_hints.is_empty() {
+            Vec::new()
+        } else {
+            raw_source.lines().collect()
+        };
         Self {
-            raw_source,
+            probes,
             source_lines: Rc::new(source_lines),
             options,
             type_hints,
@@ -128,7 +128,6 @@ impl RustToRSharp {
             shadowed_std_aliases: HashSet::new(),
             scopes: vec![HashMap::new()],
             declared_in_fn: HashSet::new(),
-            probe_counter: Rc::new(Cell::new(0)),
             rustc_probe_aborted: Rc::new(Cell::new(false)),
             first_err: Rc::new(RefCell::new(None)),
         }
@@ -136,10 +135,10 @@ impl RustToRSharp {
 
     fn child(&self) -> Self {
         Self {
-            raw_source: self.raw_source.clone(),
+            probes: self.probes,
             source_lines: Rc::clone(&self.source_lines),
             options: self.options,
-            type_hints: Rc::clone(&self.type_hints),
+            type_hints: self.type_hints,
             strict_unnameable: self.strict_unnameable,
             out: String::new(),
             indent: self.indent + 1,
@@ -151,7 +150,6 @@ impl RustToRSharp {
             shadowed_std_aliases: self.shadowed_std_aliases.clone(),
             scopes: self.scopes.clone(),
             declared_in_fn: HashSet::new(),
-            probe_counter: Rc::clone(&self.probe_counter),
             rustc_probe_aborted: Rc::clone(&self.rustc_probe_aborted),
             first_err: Rc::clone(&self.first_err),
         }
@@ -2071,7 +2069,7 @@ impl RustToRSharp {
                         } else if self.options.use_rustc_inference
                             && !self.rustc_probe_aborted.get()
                         {
-                            match self.probe_type_via_rustc(&name) {
+                            match self.probe_type_via_rustc(unwrapped_pat, &name, false) {
                                 Ok(t) => t,
                                 Err(e) => {
                                     self.rustc_probe_aborted.set(true);
@@ -2170,37 +2168,17 @@ impl RustToRSharp {
         }
     }
 
-    fn next_probe_id(&self) -> usize {
-        let next = self.probe_counter.get() + 1;
-        self.probe_counter.set(next);
-        next
-    }
-
-    fn probe_type_via_rustc(&self, var_name: &str) -> Result<String> {
-        let rust_ty =
-            rustc_runner::probe_local_type(&self.raw_source, var_name, self.next_probe_id())?;
+    fn probe_type_via_rustc(&self, pat: &Pat, name: &str, closure: bool) -> Result<String> {
+        let rust_ty = self.probes.infer(pat, name, closure)?;
         let parsed_ty: Type = syn::parse_str(&rust_ty).map_err(|_| {
+            let kind = if closure {
+                "closure param type"
+            } else {
+                "type"
+            };
             RSharpError::unresolved_type(
-                var_name,
-                format!("rustc reported unparseable type '{}'", rust_ty),
-            )
-        })?;
-        Ok(strip_non_static_lifetimes(&self.fmt_type(&parsed_ty)))
-    }
-
-    fn probe_closure_param_via_rustc(&self, param_name: &str) -> Result<String> {
-        let rust_ty = rustc_runner::probe_closure_param_type(
-            &self.raw_source,
-            param_name,
-            self.next_probe_id(),
-        )?;
-        let parsed_ty: Type = syn::parse_str(&rust_ty).map_err(|_| {
-            RSharpError::unresolved_type(
-                param_name,
-                format!(
-                    "rustc reported unparseable closure param type '{}'",
-                    rust_ty
-                ),
+                name,
+                format!("rustc reported unparseable {kind} '{rust_ty}'"),
             )
         })?;
         Ok(strip_non_static_lifetimes(&self.fmt_type(&parsed_ty)))
@@ -3386,7 +3364,7 @@ impl RustToRSharp {
                         }
                         let (is_mut, pname) = extract_param_pat(inp);
                         if self.options.use_rustc_inference && !self.rustc_probe_aborted.get() {
-                            match self.probe_closure_param_via_rustc(&pname) {
+                            match self.probe_type_via_rustc(inp, &pname, true) {
                                 Ok(inferred) => {
                                     let mk = if is_mut { "mut " } else { "" };
                                     ps.push(format!("{}{} {}", mk, inferred, escape_ident(&pname)));

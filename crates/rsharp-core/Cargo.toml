@@ -6,7 +6,7 @@ license.workspace = true
 description = "Lexer, parser, AST, R#->Rust transpiler, and Rust->R# converter."
 
 [dependencies]
-syn = { version = "2", features = ["full", "extra-traits"] }
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 prettyplease = "0.2"

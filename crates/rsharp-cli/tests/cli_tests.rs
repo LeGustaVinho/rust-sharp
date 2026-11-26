@@ -14,6 +14,25 @@ fn temp_file(name: &str) -> PathBuf {
 }
 
 #[test]
+fn standalone_inference_reports_a_missing_compiler() {
+    let file = temp_file("missing_rustc.rs");
+    for src in [
+        "fn f() { let n = std::hint::black_box(42); }",
+        "fn f() { let n = std::hint::black_box(42); let m = std::hint::black_box(n); }",
+    ] {
+        std::fs::write(&file, src).unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_rsharp"))
+            .arg("from-rust")
+            .arg(&file)
+            .env("PATH", file.parent().unwrap())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Failed to invoke rustc"));
+    }
+}
+
+#[test]
 fn test_cli_help_and_unknown_commands() {
     for flag in [vec![], args(&["--help"]), args(&["-h"]), args(&["help"])] {
         let out = run_cli(&flag);

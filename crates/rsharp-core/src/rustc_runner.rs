@@ -1,3 +1,5 @@
+pub(crate) mod probes;
+
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -52,7 +54,12 @@ fn write_temp_file(path: &Path, content: &str) -> Result<()> {
         .map_err(|e| RSharpError::io(format!("Failed to write temp Rust file: {}", e)))
 }
 
+#[cfg(test)]
+thread_local! { static COMPILATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 fn run_rustc_cmd(rustc_bin: &OsStr, args: &[&OsStr]) -> Result<Output> {
+    #[cfg(test)]
+    COMPILATIONS.set(COMPILATIONS.get() + 1);
     Command::new(rustc_bin)
         .args(args)
         .output()
@@ -172,10 +179,9 @@ fn check_rust_source_json_in(
     args.push(rs_path.as_os_str());
     args.push(OsStr::new("-o"));
     args.push(meta_path.as_os_str());
-    let output = run_rustc_cmd(rustc_bin, &args)?;
-
+    let output = run_rustc_cmd(rustc_bin, &args);
     let _ = std::fs::remove_dir_all(&dir);
-
+    let output = output?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     Ok(RustcJsonOutput {
         success: output.status.success(),
@@ -435,6 +441,12 @@ mod tests {
         assert!(compile_rust_to_bin_in(&dir, bad_rustc, "fn main() {}", &dummy_bin).is_err());
         assert!(check_rust_source_in(&dir, bad_rustc, "fn f() {}", true).is_err());
         assert!(check_rust_source_json_in(&dir, bad_rustc, "fn f() {}", true).is_err());
+        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("rsharp_check_json_")
+        }));
         assert!(run_type_probe_in(&dir, bad_rustc, "fn f() {}", "fn f() {}", "x", "M").is_err());
         assert!(run_binary_cmd(&dir.join("missing_binary_xyz")).is_err());
         assert!(compile_and_run_rust_in(&dir, OsStr::new("rustc"), "fn main( {").is_err());
