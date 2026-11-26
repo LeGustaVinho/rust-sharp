@@ -91,13 +91,13 @@ pub fn server_capabilities() -> ServerCapabilities {
             trigger_characters: Some(vec![".".to_string()]),
             ..CompletionOptions::default()
         }),
-        semantic_tokens_provider: Some(
-            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
                 legend: legend(),
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 ..SemanticTokensOptions::default()
-            }),
-        ),
+            },
+        )),
         ..ServerCapabilities::default()
     }
 }
@@ -171,9 +171,9 @@ impl ServerState {
         let offset = doc.lines.position_to_offset(&doc.text, pos);
 
         // 1. Resolve in current document (scoped or receiver member).
-        if let Some(sym) = doc
-            .index
-            .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
+        if let Some(sym) =
+            doc.index
+                .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
         {
             return Some(hover_for_symbol(sym, cursor.range));
         }
@@ -223,9 +223,9 @@ impl ServerState {
         }
         let offset = doc.lines.position_to_offset(&doc.text, pos);
 
-        if let Some(sym) = doc
-            .index
-            .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
+        if let Some(sym) =
+            doc.index
+                .resolve_symbol(&cursor.name, offset, cursor.receiver.as_deref())
         {
             let range = doc.lines.span_to_range(&doc.text, sym.selection_span);
             return Some(GotoDefinitionResponse::Scalar(Location::new(

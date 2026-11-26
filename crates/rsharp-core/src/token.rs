@@ -253,6 +253,11 @@ pub enum TokenKind {
     Shebang(String),
     /// Verbatim inline `rust { ... }` block payload.
     RustBlock(String),
+    /// Verbatim balanced raw Rust token payload for `macro name { ... }` and `foo!(...)` / `[...]` / `{...}`.
+    RawMacroBody {
+        delim: char,
+        body: String,
+    },
     // Punctuation & operators
     LParen,
     RParen,

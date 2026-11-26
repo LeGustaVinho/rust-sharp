@@ -15,7 +15,9 @@ use lsp_types::{
 use serde_json::{Value, json};
 
 use rsharp_lsp::analysis::DocumentIndex;
-use rsharp_lsp::diagnostics::{parse_rustc_json_diagnostics, semantic_diagnostics, syntax_diagnostics};
+use rsharp_lsp::diagnostics::{
+    parse_rustc_json_diagnostics, semantic_diagnostics, syntax_diagnostics,
+};
 use rsharp_lsp::position::LineIndex;
 use rsharp_lsp::run_connection;
 
@@ -140,7 +142,11 @@ fn lsp_full_workflow_on_examples_and_ide_features() {
         );
         let diags = h.recv_diagnostics();
         assert_eq!(diags.uri, *uri);
-        assert!(diags.diagnostics.is_empty(), "unexpected diagnostics: {:?}", diags.diagnostics);
+        assert!(
+            diags.diagnostics.is_empty(),
+            "unexpected diagnostics: {:?}",
+            diags.diagnostics
+        );
     }
 
     // 1. Document Outline (`documentSymbol`) on accounts.rsharp
@@ -199,9 +205,19 @@ fn lsp_full_workflow_on_examples_and_ide_features() {
     let hover_cases = [
         (&uri_acc, &accounts_src, "Account alice", "struct Account"),
         (&uri_acc, &accounts_src, "Deposit(50)", "Deposit"),
-        (&uri_acc, &accounts_src, "read slice<Account>", "Immutable borrow"),
+        (
+            &uri_acc,
+            &accounts_src,
+            "read slice<Account>",
+            "Immutable borrow",
+        ),
         (&uri_acc, &accounts_src, "PrintLine(accounts", "PrintLine"),
-        (&uri_acc, &accounts_src, "long total", "64-bit signed integer"),
+        (
+            &uri_acc,
+            &accounts_src,
+            "long total",
+            "64-bit signed integer",
+        ),
         (&uri_mat, &matrices_src, "ToString()", "ToString"),
         (&uri_int, &interop_src, "DescribeDyn(read", "DescribeDyn"),
     ];
@@ -478,7 +494,10 @@ fn lsp_diagnostics_live_syntax_and_save_rustc_and_config_toggle() {
     let first = &save_diags.diagnostics[0];
     assert_eq!(first.severity, Some(DiagnosticSeverity::ERROR));
     assert_eq!(first.source.as_deref(), Some("rsharp (rustc)"));
-    assert_eq!(first.code, Some(NumberOrString::String("E0308".to_string())));
+    assert_eq!(
+        first.code,
+        Some(NumberOrString::String("E0308".to_string()))
+    );
     assert_eq!(first.range.start.line, 2);
 
     // 4. Disable `checkOnSave` via configuration -> save skips rustc
@@ -694,7 +713,13 @@ void Caller()
         })
         .unwrap(),
     );
-    assert!(hover_cross.result.unwrap().to_string().contains("Exported helper"));
+    assert!(
+        hover_cross
+            .result
+            .unwrap()
+            .to_string()
+            .contains("Exported helper")
+    );
 
     let def_cross = h.request(
         "textDocument/definition",
@@ -825,7 +850,9 @@ fn diagnostics_unit_edge_cases() {
     assert_eq!(no_item[0].range.start.line, 0);
 
     // `semantic_diagnostics` returns empty when transpilation itself fails
-    assert!(semantic_diagnostics("var bad = 1;", &LineIndex::new("var bad = 1;"), &doc_idx).is_empty());
+    assert!(
+        semantic_diagnostics("var bad = 1;", &LineIndex::new("var bad = 1;"), &doc_idx).is_empty()
+    );
 }
 
 #[test]
@@ -856,7 +883,10 @@ fn lsp_exhaustive_edge_cases_and_malformed_recovery() {
     // Send an unexpected Response message and malformed notifications, then close without shutdown.
     cli_eof
         .sender
-        .send(Message::Response(Response::new_ok(RequestId::from(99), Value::Null)))
+        .send(Message::Response(Response::new_ok(
+            RequestId::from(99),
+            Value::Null,
+        )))
         .unwrap();
     for m in [
         "textDocument/didOpen",

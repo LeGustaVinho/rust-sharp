@@ -95,6 +95,26 @@ impl<'a> Lexer<'a> {
             }
             let tok = self.next_token()?;
             tokens.push(tok);
+            if should_lex_raw_macro_body(&tokens)
+                && let Some((open, close)) = self.peek_macro_delim()
+            {
+                let (line, col, start) = self.skip_ascii_ws_pos();
+                let raw = self.lex_balanced_rust_group(
+                    open,
+                    close,
+                    line,
+                    col,
+                    start,
+                    "Unterminated macro delimiter group",
+                )?;
+                tokens.push(Token::new(
+                    TokenKind::RawMacroBody {
+                        delim: open,
+                        body: raw.trim().to_string(),
+                    },
+                    self.span_from(line, col, start),
+                ));
+            }
         }
     }
 
@@ -349,7 +369,14 @@ impl<'a> Lexer<'a> {
             }
             let text = &self.src[start..self.pos];
             if text == "rust" && self.is_followed_by_lbrace() {
-                let raw = self.lex_balanced_rust_block(line, col, start)?;
+                let raw = self.lex_balanced_rust_group(
+                    '{',
+                    '}',
+                    line,
+                    col,
+                    start,
+                    "Unterminated 'rust { ... }' block",
+                )?;
                 return Ok(Token::new(
                     TokenKind::RustBlock(raw),
                     self.span_from(line, col, start),
@@ -480,7 +507,39 @@ impl<'a> Lexer<'a> {
         false
     }
 
-    fn lex_balanced_rust_block(&mut self, line: usize, col: usize, start: usize) -> Result<String> {
+    fn peek_macro_delim(&self) -> Option<(char, char)> {
+        let mut idx = self.pos;
+        while idx < self.bytes.len() && self.bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        match self.bytes.get(idx).copied() {
+            Some(b'(') => Some(('(', ')')),
+            Some(b'[') => Some(('[', ']')),
+            Some(b'{') => Some(('{', '}')),
+            _ => None,
+        }
+    }
+
+    fn skip_ascii_ws_pos(&mut self) -> (usize, usize, usize) {
+        while let Some(c) = self.peek() {
+            if c.is_ascii_whitespace() {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        (self.line, self.col, self.pos)
+    }
+
+    fn lex_balanced_rust_group(
+        &mut self,
+        open: char,
+        close: char,
+        line: usize,
+        col: usize,
+        start: usize,
+        err_msg: &str,
+    ) -> Result<String> {
         while let Some(c) = self.peek() {
             if c.is_whitespace() {
                 self.bump();
@@ -488,52 +547,49 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        self.bump(); // '{'
+        self.bump(); // opening delimiter
         let body_start = self.pos;
         let mut depth = 1usize;
         loop {
             let Some(c) = self.peek() else {
-                return Err(RSharpError::lex(
-                    self.span_from(line, col, start),
-                    "Unterminated 'rust { ... }' block",
-                ));
+                return Err(RSharpError::lex(self.span_from(line, col, start), err_msg));
             };
-            match c {
-                '{' => {
+            if c == open {
+                self.bump();
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    let content = self.src[body_start..self.pos].to_string();
                     self.bump();
-                    depth += 1;
+                    return Ok(content);
                 }
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        let content = self.src[body_start..self.pos].to_string();
-                        self.bump();
-                        return Ok(content);
+                self.bump();
+            } else {
+                match c {
+                    '"' => {
+                        self.lex_string(self.line, self.col, self.pos)?;
                     }
-                    self.bump();
-                }
-                '"' => {
-                    self.lex_string(self.line, self.col, self.pos)?;
-                }
-                'r' if self.starts_rust_raw_str() => {
-                    self.skip_rust_raw_str(line, col, start)?;
-                }
-                '\'' => {
-                    self.skip_rust_char_or_lifetime();
-                }
-                '/' if self.peek_at(1) == Some('/') => {
-                    while let Some(nc) = self.peek() {
-                        if nc == '\n' {
-                            break;
+                    'r' if self.starts_rust_raw_str() => {
+                        self.skip_rust_raw_str(line, col, start)?;
+                    }
+                    '\'' => {
+                        self.skip_rust_char_or_lifetime();
+                    }
+                    '/' if self.peek_at(1) == Some('/') => {
+                        while let Some(nc) = self.peek() {
+                            if nc == '\n' {
+                                break;
+                            }
+                            self.bump();
                         }
+                    }
+                    '/' if self.peek_at(1) == Some('*') => {
+                        self.skip_block_comment()?;
+                    }
+                    _ => {
                         self.bump();
                     }
-                }
-                '/' if self.peek_at(1) == Some('*') => {
-                    self.skip_block_comment()?;
-                }
-                _ => {
-                    self.bump();
                 }
             }
         }
@@ -630,7 +686,7 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
-            } else if !matches!(self.peek_at(1), Some('.'))
+            } else if !matches!(self.peek_at(1), Some('.' | '@'))
                 && !self.peek_at(1).is_some_and(is_ident_start)
             {
                 is_float = true;
@@ -1075,6 +1131,24 @@ fn clean_block_doc(raw: &str) -> Vec<String> {
     } else {
         lines[start..end].to_vec()
     }
+}
+
+fn should_lex_raw_macro_body(tokens: &[Token]) -> bool {
+    let n = tokens.len();
+    if n >= 2
+        && matches!(tokens[n - 2].kind, TokenKind::Kw(Keyword::Macro))
+        && matches!(tokens[n - 1].kind, TokenKind::Ident { .. })
+    {
+        return true;
+    }
+    if n >= 2
+        && matches!(tokens[n - 2].kind, TokenKind::Ident { .. })
+        && matches!(tokens[n - 1].kind, TokenKind::Bang)
+        && !(n >= 3 && matches!(tokens[n - 3].kind, TokenKind::Kw(Keyword::Break)))
+    {
+        return true;
+    }
+    false
 }
 
 fn is_ident_start(c: char) -> bool {

@@ -549,6 +549,7 @@ pub enum StmtKind {
     },
     Destructure {
         pat: Pattern,
+        explicit_ty: Option<Type>,
         init: Expr,
     },
     DestructureAssign {
@@ -834,6 +835,9 @@ pub enum Expr {
         type_args: Vec<GenericArg>,
         args: Vec<Expr>,
     },
+    /// Explicitly parenthesized expression preserved when needed to disambiguate
+    /// field calls like `(t.run)(args)` from method calls `t.run(args)`.
+    Group(Box<Expr>),
     Member {
         object: Box<Expr>,
         field: String,

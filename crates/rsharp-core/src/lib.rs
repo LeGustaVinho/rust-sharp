@@ -4,6 +4,7 @@ pub mod error;
 pub mod from_rust;
 pub mod lexer;
 pub mod parser;
+pub mod ra_oracle;
 pub mod rustc_runner;
 pub mod token;
 
@@ -11,7 +12,8 @@ use std::path::Path;
 
 pub use codegen_rust::{PreludeMode, TranspileOptions};
 pub use error::{RSharpError, Result, Span};
-pub use from_rust::FromRustOptions;
+pub use from_rust::{FromRustOptions, convert_from_rust_with_hints};
+pub use ra_oracle::{RustAnalyzerOracle, TypeHintMap, find_cargo_workspace_root};
 pub use rustc_runner::{RunOutput, RustcJsonOutput};
 
 /// Transpiles R# (`.rsharp`) source code directly to Rust source code.

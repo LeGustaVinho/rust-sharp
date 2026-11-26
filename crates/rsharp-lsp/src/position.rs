@@ -84,11 +84,7 @@ fn is_ident_char(ch: char) -> bool {
 }
 
 /// Extracts the identifier and optional `.` receiver around `pos`.
-pub fn ident_at_position(
-    source: &str,
-    lines: &LineIndex,
-    pos: Position,
-) -> Option<IdentAtCursor> {
+pub fn ident_at_position(source: &str, lines: &LineIndex, pos: Position) -> Option<IdentAtCursor> {
     let offset = lines.position_to_offset(source, pos);
 
     // Find start of identifier (walking backwards from offset).

@@ -388,101 +388,526 @@ pub const BUILTINS: &[BuiltinEntry] = &[
         doc: "Precise capture bound on `impl Trait` (`impl Display + capture<life a, T>`).",
     },
     // Primitive types (R# aliases + native Rust primitives)
-    BuiltinEntry { name: "sbyte", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: i8)", doc: "8-bit signed integer (`i8`)." },
-    BuiltinEntry { name: "byte", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: u8)", doc: "8-bit unsigned integer (`u8`)." },
-    BuiltinEntry { name: "short", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: i16)", doc: "16-bit signed integer (`i16`)." },
-    BuiltinEntry { name: "ushort", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: u16)", doc: "16-bit unsigned integer (`u16`)." },
-    BuiltinEntry { name: "int", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: i32)", doc: "32-bit signed integer (`i32`)." },
-    BuiltinEntry { name: "uint", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: u32)", doc: "32-bit unsigned integer (`u32`)." },
-    BuiltinEntry { name: "long", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: i64)", doc: "64-bit signed integer (`i64`)." },
-    BuiltinEntry { name: "ulong", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: u64)", doc: "64-bit unsigned integer (`u64`)." },
-    BuiltinEntry { name: "int128", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: i128)", doc: "128-bit signed integer (`i128`)." },
-    BuiltinEntry { name: "uint128", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: u128)", doc: "128-bit unsigned integer (`u128`)." },
-    BuiltinEntry { name: "nint", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: isize)", doc: "Pointer-sized signed integer (`isize`)." },
-    BuiltinEntry { name: "nuint", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: usize)", doc: "Pointer-sized unsigned integer (`usize`)." },
-    BuiltinEntry { name: "float", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: f32)", doc: "32-bit IEEE 754 floating-point number (`f32`)." },
-    BuiltinEntry { name: "double", kind: BuiltinKind::PrimitiveType, detail: "primitive (Rust: f64)", doc: "64-bit IEEE 754 floating-point number (`f64`)." },
-    BuiltinEntry { name: "bool", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "Boolean type (`true` or `false`)." },
-    BuiltinEntry { name: "char", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "Unicode scalar value (4 bytes)." },
-    BuiltinEntry { name: "string", kind: BuiltinKind::PrimitiveType, detail: "owned string (Rust: String)", doc: "UTF-8 heap-allocated growable string (`std::string::String`)." },
-    BuiltinEntry { name: "str", kind: BuiltinKind::PrimitiveType, detail: "string slice (Rust: str)", doc: "UTF-8 string slice (typically used as `read str` -> `&str`)." },
-    BuiltinEntry { name: "void", kind: BuiltinKind::PrimitiveType, detail: "unit type (Rust: ())", doc: "Unit return type with no value (`()`)." },
-    BuiltinEntry { name: "never", kind: BuiltinKind::PrimitiveType, detail: "never type (Rust: !)", doc: "Diverging type for expressions/functions that never return (`!`)." },
-    BuiltinEntry { name: "dynamic", kind: BuiltinKind::PrimitiveType, detail: "type alias (Rust: Box<dyn Any>)", doc: "Runtime dynamically typed boxed value (`ToDynamic` / `AsDynamic<T>`)." },
-    BuiltinEntry { name: "i8", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "8-bit signed integer (R# alias: `sbyte`)." },
-    BuiltinEntry { name: "u8", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "8-bit unsigned integer (R# alias: `byte`)." },
-    BuiltinEntry { name: "i16", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "16-bit signed integer (R# alias: `short`)." },
-    BuiltinEntry { name: "u16", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "16-bit unsigned integer (R# alias: `ushort`)." },
-    BuiltinEntry { name: "i32", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "32-bit signed integer (R# alias: `int`)." },
-    BuiltinEntry { name: "u32", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "32-bit unsigned integer (R# alias: `uint`)." },
-    BuiltinEntry { name: "i64", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "64-bit signed integer (R# alias: `long`)." },
-    BuiltinEntry { name: "u64", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "64-bit unsigned integer (R# alias: `ulong`)." },
-    BuiltinEntry { name: "i128", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "128-bit signed integer (R# alias: `int128`)." },
-    BuiltinEntry { name: "u128", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "128-bit unsigned integer (R# alias: `uint128`)." },
-    BuiltinEntry { name: "isize", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "Pointer-sized signed integer (R# alias: `nint`)." },
-    BuiltinEntry { name: "usize", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "Pointer-sized unsigned integer (R# alias: `nuint`)." },
-    BuiltinEntry { name: "f32", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "32-bit floating-point number (R# alias: `float`)." },
-    BuiltinEntry { name: "f64", kind: BuiltinKind::PrimitiveType, detail: "primitive", doc: "64-bit floating-point number (R# alias: `double`)." },
+    BuiltinEntry {
+        name: "sbyte",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: i8)",
+        doc: "8-bit signed integer (`i8`).",
+    },
+    BuiltinEntry {
+        name: "byte",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: u8)",
+        doc: "8-bit unsigned integer (`u8`).",
+    },
+    BuiltinEntry {
+        name: "short",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: i16)",
+        doc: "16-bit signed integer (`i16`).",
+    },
+    BuiltinEntry {
+        name: "ushort",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: u16)",
+        doc: "16-bit unsigned integer (`u16`).",
+    },
+    BuiltinEntry {
+        name: "int",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: i32)",
+        doc: "32-bit signed integer (`i32`).",
+    },
+    BuiltinEntry {
+        name: "uint",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: u32)",
+        doc: "32-bit unsigned integer (`u32`).",
+    },
+    BuiltinEntry {
+        name: "long",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: i64)",
+        doc: "64-bit signed integer (`i64`).",
+    },
+    BuiltinEntry {
+        name: "ulong",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: u64)",
+        doc: "64-bit unsigned integer (`u64`).",
+    },
+    BuiltinEntry {
+        name: "int128",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: i128)",
+        doc: "128-bit signed integer (`i128`).",
+    },
+    BuiltinEntry {
+        name: "uint128",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: u128)",
+        doc: "128-bit unsigned integer (`u128`).",
+    },
+    BuiltinEntry {
+        name: "nint",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: isize)",
+        doc: "Pointer-sized signed integer (`isize`).",
+    },
+    BuiltinEntry {
+        name: "nuint",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: usize)",
+        doc: "Pointer-sized unsigned integer (`usize`).",
+    },
+    BuiltinEntry {
+        name: "float",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: f32)",
+        doc: "32-bit IEEE 754 floating-point number (`f32`).",
+    },
+    BuiltinEntry {
+        name: "double",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive (Rust: f64)",
+        doc: "64-bit IEEE 754 floating-point number (`f64`).",
+    },
+    BuiltinEntry {
+        name: "bool",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "Boolean type (`true` or `false`).",
+    },
+    BuiltinEntry {
+        name: "char",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "Unicode scalar value (4 bytes).",
+    },
+    BuiltinEntry {
+        name: "string",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "owned string (Rust: String)",
+        doc: "UTF-8 heap-allocated growable string (`std::string::String`).",
+    },
+    BuiltinEntry {
+        name: "str",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "string slice (Rust: str)",
+        doc: "UTF-8 string slice (typically used as `read str` -> `&str`).",
+    },
+    BuiltinEntry {
+        name: "void",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "unit type (Rust: ())",
+        doc: "Unit return type with no value (`()`).",
+    },
+    BuiltinEntry {
+        name: "never",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "never type (Rust: !)",
+        doc: "Diverging type for expressions/functions that never return (`!`).",
+    },
+    BuiltinEntry {
+        name: "dynamic",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "type alias (Rust: Box<dyn Any>)",
+        doc: "Runtime dynamically typed boxed value (`ToDynamic` / `AsDynamic<T>`).",
+    },
+    BuiltinEntry {
+        name: "i8",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "8-bit signed integer (R# alias: `sbyte`).",
+    },
+    BuiltinEntry {
+        name: "u8",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "8-bit unsigned integer (R# alias: `byte`).",
+    },
+    BuiltinEntry {
+        name: "i16",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "16-bit signed integer (R# alias: `short`).",
+    },
+    BuiltinEntry {
+        name: "u16",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "16-bit unsigned integer (R# alias: `ushort`).",
+    },
+    BuiltinEntry {
+        name: "i32",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "32-bit signed integer (R# alias: `int`).",
+    },
+    BuiltinEntry {
+        name: "u32",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "32-bit unsigned integer (R# alias: `uint`).",
+    },
+    BuiltinEntry {
+        name: "i64",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "64-bit signed integer (R# alias: `long`).",
+    },
+    BuiltinEntry {
+        name: "u64",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "64-bit unsigned integer (R# alias: `ulong`).",
+    },
+    BuiltinEntry {
+        name: "i128",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "128-bit signed integer (R# alias: `int128`).",
+    },
+    BuiltinEntry {
+        name: "u128",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "128-bit unsigned integer (R# alias: `uint128`).",
+    },
+    BuiltinEntry {
+        name: "isize",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "Pointer-sized signed integer (R# alias: `nint`).",
+    },
+    BuiltinEntry {
+        name: "usize",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "Pointer-sized unsigned integer (R# alias: `nuint`).",
+    },
+    BuiltinEntry {
+        name: "f32",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "32-bit floating-point number (R# alias: `float`).",
+    },
+    BuiltinEntry {
+        name: "f64",
+        kind: BuiltinKind::PrimitiveType,
+        detail: "primitive",
+        doc: "64-bit floating-point number (R# alias: `double`).",
+    },
     // Prelude & stdlib types
-    BuiltinEntry { name: "List", kind: BuiltinKind::StdType, detail: "pub type List<T> = Vec<T>", doc: "Contiguous growable array type (prelude alias for `Vec<T>`)." },
-    BuiltinEntry { name: "Queue", kind: BuiltinKind::StdType, detail: "pub type Queue<T> = VecDeque<T>", doc: "Double-ended queue (prelude alias for `VecDeque<T>`)." },
-    BuiltinEntry { name: "Dictionary", kind: BuiltinKind::StdType, detail: "pub type Dictionary<K, V> = HashMap<K, V>", doc: "Hash map collection (prelude alias for `HashMap<K, V>`)." },
-    BuiltinEntry { name: "SortedDictionary", kind: BuiltinKind::StdType, detail: "pub type SortedDictionary<K, V> = BTreeMap<K, V>", doc: "Ordered map collection (prelude alias for `BTreeMap<K, V>`)." },
-    BuiltinEntry { name: "SortedSet", kind: BuiltinKind::StdType, detail: "pub type SortedSet<T> = BTreeSet<T>", doc: "Ordered set collection (prelude alias for `BTreeSet<T>`)." },
-    BuiltinEntry { name: "PriorityQueue", kind: BuiltinKind::StdType, detail: "pub type PriorityQueue<T> = BinaryHeap<T>", doc: "Binary max-heap priority queue (prelude alias for `BinaryHeap<T>`)." },
-    BuiltinEntry { name: "HashSet", kind: BuiltinKind::StdType, detail: "std::collections::HashSet<T>", doc: "Hash set collection re-exported in the R# prelude." },
-    BuiltinEntry { name: "LinkedList", kind: BuiltinKind::StdType, detail: "std::collections::LinkedList<T>", doc: "Doubly-linked list re-exported in the R# prelude." },
-    BuiltinEntry { name: "Option", kind: BuiltinKind::StdType, detail: "enum Option<T>", doc: "Optional value (`Some(T)` or `None`). Shorthand syntax: `T?`." },
-    BuiltinEntry { name: "Result", kind: BuiltinKind::StdType, detail: "enum Result<T, E>", doc: "Fallible result (`Ok(T)` or `Err(E)`). Propagate with `try expr`." },
-    BuiltinEntry { name: "Task", kind: BuiltinKind::StdType, detail: "async Task<T>", doc: "C#-style async function return type wrapper (desugars to Rust `async fn -> T`)." },
-    BuiltinEntry { name: "Box", kind: BuiltinKind::StdType, detail: "std::boxed::Box<T>", doc: "Heap-allocated smart pointer." },
-    BuiltinEntry { name: "Rc", kind: BuiltinKind::StdType, detail: "std::rc::Rc<T>", doc: "Single-threaded reference-counted pointer." },
-    BuiltinEntry { name: "Arc", kind: BuiltinKind::StdType, detail: "std::sync::Arc<T>", doc: "Thread-safe atomically reference-counted pointer." },
-    BuiltinEntry { name: "Vec", kind: BuiltinKind::StdType, detail: "std::vec::Vec<T>", doc: "Native Rust growable vector (R# alias: `List<T>`)." },
-    BuiltinEntry { name: "HashMap", kind: BuiltinKind::StdType, detail: "std::collections::HashMap<K, V>", doc: "Native Rust hash map (R# alias: `Dictionary<K, V>`)." },
-    BuiltinEntry { name: "String", kind: BuiltinKind::StdType, detail: "std::string::String", doc: "Native Rust owned string (R# alias: `string`)." },
-    BuiltinEntry { name: "Some", kind: BuiltinKind::StdType, detail: "Option::Some(T)", doc: "Present value variant of `Option<T>`." },
-    BuiltinEntry { name: "None", kind: BuiltinKind::StdType, detail: "Option::None", doc: "Absent value variant of `Option<T>`." },
-    BuiltinEntry { name: "Ok", kind: BuiltinKind::StdType, detail: "Result::Ok(T)", doc: "Success variant of `Result<T, E>`." },
-    BuiltinEntry { name: "Err", kind: BuiltinKind::StdType, detail: "Result::Err(E)", doc: "Error variant of `Result<T, E>`." },
+    BuiltinEntry {
+        name: "List",
+        kind: BuiltinKind::StdType,
+        detail: "pub type List<T> = Vec<T>",
+        doc: "Contiguous growable array type (prelude alias for `Vec<T>`).",
+    },
+    BuiltinEntry {
+        name: "Queue",
+        kind: BuiltinKind::StdType,
+        detail: "pub type Queue<T> = VecDeque<T>",
+        doc: "Double-ended queue (prelude alias for `VecDeque<T>`).",
+    },
+    BuiltinEntry {
+        name: "Dictionary",
+        kind: BuiltinKind::StdType,
+        detail: "pub type Dictionary<K, V> = HashMap<K, V>",
+        doc: "Hash map collection (prelude alias for `HashMap<K, V>`).",
+    },
+    BuiltinEntry {
+        name: "SortedDictionary",
+        kind: BuiltinKind::StdType,
+        detail: "pub type SortedDictionary<K, V> = BTreeMap<K, V>",
+        doc: "Ordered map collection (prelude alias for `BTreeMap<K, V>`).",
+    },
+    BuiltinEntry {
+        name: "SortedSet",
+        kind: BuiltinKind::StdType,
+        detail: "pub type SortedSet<T> = BTreeSet<T>",
+        doc: "Ordered set collection (prelude alias for `BTreeSet<T>`).",
+    },
+    BuiltinEntry {
+        name: "PriorityQueue",
+        kind: BuiltinKind::StdType,
+        detail: "pub type PriorityQueue<T> = BinaryHeap<T>",
+        doc: "Binary max-heap priority queue (prelude alias for `BinaryHeap<T>`).",
+    },
+    BuiltinEntry {
+        name: "HashSet",
+        kind: BuiltinKind::StdType,
+        detail: "std::collections::HashSet<T>",
+        doc: "Hash set collection re-exported in the R# prelude.",
+    },
+    BuiltinEntry {
+        name: "LinkedList",
+        kind: BuiltinKind::StdType,
+        detail: "std::collections::LinkedList<T>",
+        doc: "Doubly-linked list re-exported in the R# prelude.",
+    },
+    BuiltinEntry {
+        name: "Option",
+        kind: BuiltinKind::StdType,
+        detail: "enum Option<T>",
+        doc: "Optional value (`Some(T)` or `None`). Shorthand syntax: `T?`.",
+    },
+    BuiltinEntry {
+        name: "Result",
+        kind: BuiltinKind::StdType,
+        detail: "enum Result<T, E>",
+        doc: "Fallible result (`Ok(T)` or `Err(E)`). Propagate with `try expr`.",
+    },
+    BuiltinEntry {
+        name: "Task",
+        kind: BuiltinKind::StdType,
+        detail: "async Task<T>",
+        doc: "C#-style async function return type wrapper (desugars to Rust `async fn -> T`).",
+    },
+    BuiltinEntry {
+        name: "Box",
+        kind: BuiltinKind::StdType,
+        detail: "std::boxed::Box<T>",
+        doc: "Heap-allocated smart pointer.",
+    },
+    BuiltinEntry {
+        name: "Rc",
+        kind: BuiltinKind::StdType,
+        detail: "std::rc::Rc<T>",
+        doc: "Single-threaded reference-counted pointer.",
+    },
+    BuiltinEntry {
+        name: "Arc",
+        kind: BuiltinKind::StdType,
+        detail: "std::sync::Arc<T>",
+        doc: "Thread-safe atomically reference-counted pointer.",
+    },
+    BuiltinEntry {
+        name: "Vec",
+        kind: BuiltinKind::StdType,
+        detail: "std::vec::Vec<T>",
+        doc: "Native Rust growable vector (R# alias: `List<T>`).",
+    },
+    BuiltinEntry {
+        name: "HashMap",
+        kind: BuiltinKind::StdType,
+        detail: "std::collections::HashMap<K, V>",
+        doc: "Native Rust hash map (R# alias: `Dictionary<K, V>`).",
+    },
+    BuiltinEntry {
+        name: "String",
+        kind: BuiltinKind::StdType,
+        detail: "std::string::String",
+        doc: "Native Rust owned string (R# alias: `string`).",
+    },
+    BuiltinEntry {
+        name: "Some",
+        kind: BuiltinKind::StdType,
+        detail: "Option::Some(T)",
+        doc: "Present value variant of `Option<T>`.",
+    },
+    BuiltinEntry {
+        name: "None",
+        kind: BuiltinKind::StdType,
+        detail: "Option::None",
+        doc: "Absent value variant of `Option<T>`.",
+    },
+    BuiltinEntry {
+        name: "Ok",
+        kind: BuiltinKind::StdType,
+        detail: "Result::Ok(T)",
+        doc: "Success variant of `Result<T, E>`.",
+    },
+    BuiltinEntry {
+        name: "Err",
+        kind: BuiltinKind::StdType,
+        detail: "Result::Err(E)",
+        doc: "Error variant of `Result<T, E>`.",
+    },
     // Prelude functions
-    BuiltinEntry { name: "PrintLine", kind: BuiltinKind::Function, detail: "void PrintLine<T : Display>(T value)", doc: "Prints a displayable value followed by a newline." },
-    BuiltinEntry { name: "Print", kind: BuiltinKind::Function, detail: "void Print<T : Display>(T value)", doc: "Prints a displayable value without a trailing newline." },
-    BuiltinEntry { name: "ToDynamic", kind: BuiltinKind::Function, detail: "dynamic ToDynamic<T : Any + static>(T value)", doc: "Boxes any `'static` value into an R# `dynamic` (`Box<dyn Any>`)." },
-    BuiltinEntry { name: "AsDynamic", kind: BuiltinKind::Function, detail: "read T? AsDynamic<T : Any + static>(read dynamic value)", doc: "Attempts to downcast and borrow a `dynamic` value as `Option<&T>`." },
+    BuiltinEntry {
+        name: "PrintLine",
+        kind: BuiltinKind::Function,
+        detail: "void PrintLine<T : Display>(T value)",
+        doc: "Prints a displayable value followed by a newline.",
+    },
+    BuiltinEntry {
+        name: "Print",
+        kind: BuiltinKind::Function,
+        detail: "void Print<T : Display>(T value)",
+        doc: "Prints a displayable value without a trailing newline.",
+    },
+    BuiltinEntry {
+        name: "ToDynamic",
+        kind: BuiltinKind::Function,
+        detail: "dynamic ToDynamic<T : Any + static>(T value)",
+        doc: "Boxes any `'static` value into an R# `dynamic` (`Box<dyn Any>`).",
+    },
+    BuiltinEntry {
+        name: "AsDynamic",
+        kind: BuiltinKind::Function,
+        detail: "read T? AsDynamic<T : Any + static>(read dynamic value)",
+        doc: "Attempts to downcast and borrow a `dynamic` value as `Option<&T>`.",
+    },
 ];
 
 pub const BUILTIN_MEMBERS: &[MemberBuiltin] = &[
     // List / Vec
-    MemberBuiltin { owner: "List", name: "Add", detail: "void Add(write this, T item)", doc: "Appends an item to the end of the list (`Vec::push`)." },
-    MemberBuiltin { owner: "List", name: "Count", detail: "nuint Count(read this)", doc: "Returns the number of elements in the list (`Vec::len`)." },
-    MemberBuiltin { owner: "List", name: "IsEmpty", detail: "bool IsEmpty(read this)", doc: "Returns `true` if the list contains no elements." },
-    MemberBuiltin { owner: "List", name: "push", detail: "void push(write this, T item)", doc: "Appends an element to the back of the collection." },
-    MemberBuiltin { owner: "List", name: "pop", detail: "T? pop(write this)", doc: "Removes and returns the last element, or `None` if empty." },
-    MemberBuiltin { owner: "List", name: "len", detail: "nuint len(read this)", doc: "Returns the number of elements in the vector." },
+    MemberBuiltin {
+        owner: "List",
+        name: "Add",
+        detail: "void Add(write this, T item)",
+        doc: "Appends an item to the end of the list (`Vec::push`).",
+    },
+    MemberBuiltin {
+        owner: "List",
+        name: "Count",
+        detail: "nuint Count(read this)",
+        doc: "Returns the number of elements in the list (`Vec::len`).",
+    },
+    MemberBuiltin {
+        owner: "List",
+        name: "IsEmpty",
+        detail: "bool IsEmpty(read this)",
+        doc: "Returns `true` if the list contains no elements.",
+    },
+    MemberBuiltin {
+        owner: "List",
+        name: "push",
+        detail: "void push(write this, T item)",
+        doc: "Appends an element to the back of the collection.",
+    },
+    MemberBuiltin {
+        owner: "List",
+        name: "pop",
+        detail: "T? pop(write this)",
+        doc: "Removes and returns the last element, or `None` if empty.",
+    },
+    MemberBuiltin {
+        owner: "List",
+        name: "len",
+        detail: "nuint len(read this)",
+        doc: "Returns the number of elements in the vector.",
+    },
     // Queue / VecDeque
-    MemberBuiltin { owner: "Queue", name: "Enqueue", detail: "void Enqueue(write this, T item)", doc: "Pushes an item to the back of the queue." },
-    MemberBuiltin { owner: "Queue", name: "Dequeue", detail: "T? Dequeue(write this)", doc: "Removes and returns the front item of the queue." },
-    MemberBuiltin { owner: "Queue", name: "Peek", detail: "read T? Peek(read this)", doc: "Returns a shared reference to the front item without removing it." },
-    MemberBuiltin { owner: "Queue", name: "Count", detail: "nuint Count(read this)", doc: "Returns the number of elements in the queue." },
+    MemberBuiltin {
+        owner: "Queue",
+        name: "Enqueue",
+        detail: "void Enqueue(write this, T item)",
+        doc: "Pushes an item to the back of the queue.",
+    },
+    MemberBuiltin {
+        owner: "Queue",
+        name: "Dequeue",
+        detail: "T? Dequeue(write this)",
+        doc: "Removes and returns the front item of the queue.",
+    },
+    MemberBuiltin {
+        owner: "Queue",
+        name: "Peek",
+        detail: "read T? Peek(read this)",
+        doc: "Returns a shared reference to the front item without removing it.",
+    },
+    MemberBuiltin {
+        owner: "Queue",
+        name: "Count",
+        detail: "nuint Count(read this)",
+        doc: "Returns the number of elements in the queue.",
+    },
     // Dictionary / HashMap
-    MemberBuiltin { owner: "Dictionary", name: "Add", detail: "V? Add(write this, K key, V value)", doc: "Inserts a key-value pair, returning any previous value." },
-    MemberBuiltin { owner: "Dictionary", name: "ContainsKey", detail: "bool ContainsKey(read this, read K key)", doc: "Returns `true` if the dictionary contains the specified key." },
-    MemberBuiltin { owner: "Dictionary", name: "Count", detail: "nuint Count(read this)", doc: "Returns the number of entries in the dictionary." },
+    MemberBuiltin {
+        owner: "Dictionary",
+        name: "Add",
+        detail: "V? Add(write this, K key, V value)",
+        doc: "Inserts a key-value pair, returning any previous value.",
+    },
+    MemberBuiltin {
+        owner: "Dictionary",
+        name: "ContainsKey",
+        detail: "bool ContainsKey(read this, read K key)",
+        doc: "Returns `true` if the dictionary contains the specified key.",
+    },
+    MemberBuiltin {
+        owner: "Dictionary",
+        name: "Count",
+        detail: "nuint Count(read this)",
+        doc: "Returns the number of entries in the dictionary.",
+    },
     // string / String / str
-    MemberBuiltin { owner: "string", name: "Length", detail: "nuint Length(read this)", doc: "Returns the byte length of the string." },
-    MemberBuiltin { owner: "string", name: "ToString", detail: "string ToString(read this)", doc: "Clones or converts to an owned `string` (`String`)." },
-    MemberBuiltin { owner: "string", name: "len", detail: "nuint len(read this)", doc: "Returns the byte length of the string." },
-    MemberBuiltin { owner: "string", name: "is_empty", detail: "bool is_empty(read this)", doc: "Returns `true` if the string has a length of zero." },
-    MemberBuiltin { owner: "string", name: "parse", detail: "Result<T, E> parse<T>(read this)", doc: "Parses this string slice into another type implementing `FromStr`." },
+    MemberBuiltin {
+        owner: "string",
+        name: "Length",
+        detail: "nuint Length(read this)",
+        doc: "Returns the byte length of the string.",
+    },
+    MemberBuiltin {
+        owner: "string",
+        name: "ToString",
+        detail: "string ToString(read this)",
+        doc: "Clones or converts to an owned `string` (`String`).",
+    },
+    MemberBuiltin {
+        owner: "string",
+        name: "len",
+        detail: "nuint len(read this)",
+        doc: "Returns the byte length of the string.",
+    },
+    MemberBuiltin {
+        owner: "string",
+        name: "is_empty",
+        detail: "bool is_empty(read this)",
+        doc: "Returns `true` if the string has a length of zero.",
+    },
+    MemberBuiltin {
+        owner: "string",
+        name: "parse",
+        detail: "Result<T, E> parse<T>(read this)",
+        doc: "Parses this string slice into another type implementing `FromStr`.",
+    },
     // Option & Result
-    MemberBuiltin { owner: "Option", name: "unwrap", detail: "T unwrap(take this)", doc: "Returns the contained `Some` value, panicking if `None`." },
-    MemberBuiltin { owner: "Option", name: "unwrap_or", detail: "T unwrap_or(take this, T default)", doc: "Returns the contained `Some` value or a provided default." },
-    MemberBuiltin { owner: "Option", name: "is_some", detail: "bool is_some(read this)", doc: "Returns `true` if the option is a `Some` value." },
-    MemberBuiltin { owner: "Option", name: "is_none", detail: "bool is_none(read this)", doc: "Returns `true` if the option is a `None` value." },
-    MemberBuiltin { owner: "Result", name: "unwrap", detail: "T unwrap(take this)", doc: "Returns the contained `Ok` value, panicking on `Err`." },
-    MemberBuiltin { owner: "Result", name: "is_ok", detail: "bool is_ok(read this)", doc: "Returns `true` if the result is `Ok`." },
-    MemberBuiltin { owner: "Result", name: "is_err", detail: "bool is_err(read this)", doc: "Returns `true` if the result is `Err`." },
+    MemberBuiltin {
+        owner: "Option",
+        name: "unwrap",
+        detail: "T unwrap(take this)",
+        doc: "Returns the contained `Some` value, panicking if `None`.",
+    },
+    MemberBuiltin {
+        owner: "Option",
+        name: "unwrap_or",
+        detail: "T unwrap_or(take this, T default)",
+        doc: "Returns the contained `Some` value or a provided default.",
+    },
+    MemberBuiltin {
+        owner: "Option",
+        name: "is_some",
+        detail: "bool is_some(read this)",
+        doc: "Returns `true` if the option is a `Some` value.",
+    },
+    MemberBuiltin {
+        owner: "Option",
+        name: "is_none",
+        detail: "bool is_none(read this)",
+        doc: "Returns `true` if the option is a `None` value.",
+    },
+    MemberBuiltin {
+        owner: "Result",
+        name: "unwrap",
+        detail: "T unwrap(take this)",
+        doc: "Returns the contained `Ok` value, panicking on `Err`.",
+    },
+    MemberBuiltin {
+        owner: "Result",
+        name: "is_ok",
+        detail: "bool is_ok(read this)",
+        doc: "Returns `true` if the result is `Ok`.",
+    },
+    MemberBuiltin {
+        owner: "Result",
+        name: "is_err",
+        detail: "bool is_err(read this)",
+        doc: "Returns `true` if the result is `Err`.",
+    },
 ];
 
 pub fn find_builtin(name: &str) -> Option<&'static BuiltinEntry> {
@@ -514,7 +939,10 @@ mod tests {
     #[test]
     fn lookup_builtins_and_members() {
         assert_eq!(find_builtin("read").unwrap().kind, BuiltinKind::Keyword);
-        assert_eq!(find_builtin("int").unwrap().kind, BuiltinKind::PrimitiveType);
+        assert_eq!(
+            find_builtin("int").unwrap().kind,
+            BuiltinKind::PrimitiveType
+        );
         assert_eq!(find_builtin("List").unwrap().kind, BuiltinKind::StdType);
         assert_eq!(
             find_builtin("PrintLine").unwrap().kind,
@@ -523,9 +951,21 @@ mod tests {
         assert!(find_builtin("NotABuiltinXYZ").is_none());
 
         assert!(builtin_members_for("Vec").iter().any(|m| m.name == "Add"));
-        assert!(builtin_members_for("VecDeque").iter().any(|m| m.name == "Enqueue"));
-        assert!(builtin_members_for("HashMap").iter().any(|m| m.name == "ContainsKey"));
-        assert!(builtin_members_for("str").iter().any(|m| m.name == "ToString"));
+        assert!(
+            builtin_members_for("VecDeque")
+                .iter()
+                .any(|m| m.name == "Enqueue")
+        );
+        assert!(
+            builtin_members_for("HashMap")
+                .iter()
+                .any(|m| m.name == "ContainsKey")
+        );
+        assert!(
+            builtin_members_for("str")
+                .iter()
+                .any(|m| m.name == "ToString")
+        );
         assert!(builtin_members_for("UnknownType").is_empty());
     }
 }

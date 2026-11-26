@@ -109,7 +109,11 @@ impl DocumentIndex {
             .filter(|sym| {
                 matches!(
                     sym.kind,
-                    DeclKind::Struct | DeclKind::Enum | DeclKind::Union | DeclKind::Trait | DeclKind::Impl
+                    DeclKind::Struct
+                        | DeclKind::Enum
+                        | DeclKind::Union
+                        | DeclKind::Trait
+                        | DeclKind::Impl
                 ) && sym.full_span.start <= offset
                     && offset <= sym.full_span.end
             })
@@ -145,7 +149,11 @@ impl DocumentIndex {
             sym.name == receiver
                 && matches!(
                     sym.kind,
-                    DeclKind::Struct | DeclKind::Enum | DeclKind::Union | DeclKind::Trait | DeclKind::TypeAlias
+                    DeclKind::Struct
+                        | DeclKind::Enum
+                        | DeclKind::Union
+                        | DeclKind::Trait
+                        | DeclKind::TypeAlias
                 )
         }) {
             return Some(receiver.to_string());
@@ -177,7 +185,10 @@ impl DocumentIndex {
                 sym.name == name
                     && sym.scope_start <= offset
                     && offset <= sym.scope_end
-                    && !matches!(sym.kind, DeclKind::Field | DeclKind::EnumMember | DeclKind::Impl)
+                    && !matches!(
+                        sym.kind,
+                        DeclKind::Field | DeclKind::EnumMember | DeclKind::Impl
+                    )
             })
             .min_by_key(|sym| (sym.scope_end - sym.scope_start, sym.selection_span.start))
     }
@@ -188,7 +199,10 @@ impl DocumentIndex {
             .filter(|sym| {
                 sym.scope_start <= offset
                     && offset <= sym.scope_end
-                    && !matches!(sym.kind, DeclKind::Field | DeclKind::EnumMember | DeclKind::Impl)
+                    && !matches!(
+                        sym.kind,
+                        DeclKind::Field | DeclKind::EnumMember | DeclKind::Impl
+                    )
             })
             .collect()
     }
@@ -475,8 +489,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 TokenKind::Kw(Keyword::Enum) => {
-                    if let Some(sym) =
-                        self.scan_enum(end, item_start, docs, scope_start, scope_end)
+                    if let Some(sym) = self.scan_enum(end, item_start, docs, scope_start, scope_end)
                     {
                         self.record(sym.clone());
                         items.push(sym);
@@ -496,14 +509,9 @@ impl<'a> Scanner<'a> {
                     items.push(sym);
                 }
                 TokenKind::Kw(Keyword::Alias | Keyword::Type) => {
-                    if let Some(sym) = self.scan_type_alias(
-                        end,
-                        item_start,
-                        docs,
-                        owner,
-                        scope_start,
-                        scope_end,
-                    ) {
+                    if let Some(sym) =
+                        self.scan_type_alias(end, item_start, docs, owner, scope_start, scope_end)
+                    {
                         self.record(sym.clone());
                         items.push(sym);
                     }
@@ -565,7 +573,9 @@ impl<'a> Scanner<'a> {
             return None;
         }
         let full_name = parts.join(".");
-        let sig_end = self.tokens[self.pos.saturating_sub(1).max(name_start)].span.end;
+        let sig_end = self.tokens[self.pos.saturating_sub(1).max(name_start)]
+            .span
+            .end;
         let mut children = Vec::new();
         let full_end = if self.pos < end && matches!(self.tokens[self.pos].kind, TokenKind::LBrace)
         {
@@ -763,8 +773,7 @@ impl<'a> Scanner<'a> {
                     && let TokenKind::Ident { name, .. } = &self.tokens[end_tok - 1].kind
                 {
                     let name_span = self.tokens[end_tok - 1].span;
-                    let ty_name =
-                        self.extract_base_type_name(ty_start, end_tok - 1, Some(owner));
+                    let ty_name = self.extract_base_type_name(ty_start, end_tok - 1, Some(owner));
                     let field_end = self.tokens[end_tok.min(end.saturating_sub(1))].span.end;
                     let sym = DeclSymbol {
                         name: name.clone(),
@@ -845,22 +854,19 @@ impl<'a> Scanner<'a> {
             self.pos = save_pos;
             if let Some((vname, vspan)) = self.take_ident(close) {
                 if self.pos < close && matches!(self.tokens[self.pos].kind, TokenKind::LParen) {
-                    self.pos = self.find_matching_delim(
-                        self.pos,
-                        &TokenKind::LParen,
-                        &TokenKind::RParen,
-                    ) + 1;
+                    self.pos =
+                        self.find_matching_delim(self.pos, &TokenKind::LParen, &TokenKind::RParen)
+                            + 1;
                 } else if self.pos < close
                     && matches!(self.tokens[self.pos].kind, TokenKind::LBrace)
                 {
-                    self.pos = self.find_matching_delim(
-                        self.pos,
-                        &TokenKind::LBrace,
-                        &TokenKind::RBrace,
-                    ) + 1;
+                    self.pos =
+                        self.find_matching_delim(self.pos, &TokenKind::LBrace, &TokenKind::RBrace)
+                            + 1;
                 }
                 if self.pos < close && matches!(self.tokens[self.pos].kind, TokenKind::Eq) {
-                    while self.pos < close && !matches!(self.tokens[self.pos].kind, TokenKind::Comma)
+                    while self.pos < close
+                        && !matches!(self.tokens[self.pos].kind, TokenKind::Comma)
                     {
                         self.pos += 1;
                     }
@@ -969,7 +975,8 @@ impl<'a> Scanner<'a> {
         let mut for_idx = None;
         let mut where_idx = None;
         while self.pos < end && !matches!(self.tokens[self.pos].kind, TokenKind::LBrace) {
-            if matches!(self.tokens[self.pos].kind, TokenKind::Kw(Keyword::For)) && for_idx.is_none()
+            if matches!(self.tokens[self.pos].kind, TokenKind::Kw(Keyword::For))
+                && for_idx.is_none()
             {
                 for_idx = Some(self.pos);
             } else if matches!(self.tokens[self.pos].kind, TokenKind::Kw(Keyword::Where))
@@ -1054,27 +1061,11 @@ impl<'a> Scanner<'a> {
         let sig_end = sel_span.end;
         if self.pos < end {
             match &self.tokens[self.pos].kind {
-                TokenKind::LBrace => {
-                    self.pos = self.find_matching_delim(
-                        self.pos,
-                        &TokenKind::LBrace,
-                        &TokenKind::RBrace,
-                    ) + 1;
+                TokenKind::RawMacroBody { delim: '{', .. } => {
+                    self.pos += 1;
                 }
-                TokenKind::LParen => {
-                    self.pos = self.find_matching_delim(
-                        self.pos,
-                        &TokenKind::LParen,
-                        &TokenKind::RParen,
-                    ) + 1;
-                    self.skip_to_semicolon(end);
-                }
-                TokenKind::LBracket => {
-                    self.pos = self.find_matching_delim(
-                        self.pos,
-                        &TokenKind::LBracket,
-                        &TokenKind::RBracket,
-                    ) + 1;
+                TokenKind::RawMacroBody { .. } => {
+                    self.pos += 1;
                     self.skip_to_semicolon(end);
                 }
                 _ => self.skip_to_semicolon(end),
@@ -1150,9 +1141,13 @@ impl<'a> Scanner<'a> {
             && matches!(self.tokens[self.pos + 1].kind, TokenKind::Bang)
         {
             self.pos += 2;
-            if self.pos < end && matches!(self.tokens[self.pos].kind, TokenKind::LBrace) {
-                self.pos =
-                    self.find_matching_delim(self.pos, &TokenKind::LBrace, &TokenKind::RBrace) + 1;
+            if self.pos < end
+                && matches!(
+                    self.tokens[self.pos].kind,
+                    TokenKind::RawMacroBody { delim: '{', .. }
+                )
+            {
+                self.pos += 1;
             } else {
                 self.skip_to_semicolon(end);
             }
@@ -1279,17 +1274,17 @@ impl<'a> Scanner<'a> {
             self.pos += 1;
         }
         let sig_end = self.tokens[self.pos.saturating_sub(1)].span.end;
-        let (body_range, full_end) =
-            if self.pos < end && matches!(self.tokens[self.pos].kind, TokenKind::LBrace) {
-                let lbrace = self.pos;
-                let rbrace =
-                    self.find_matching_delim(lbrace, &TokenKind::LBrace, &TokenKind::RBrace);
-                self.pos = (rbrace + 1).min(end);
-                (Some((lbrace, rbrace)), self.tokens[rbrace].span.end)
-            } else {
-                self.skip_to_semicolon(end);
-                (None, self.tokens[self.pos.saturating_sub(1)].span.end)
-            };
+        let (body_range, full_end) = if self.pos < end
+            && matches!(self.tokens[self.pos].kind, TokenKind::LBrace)
+        {
+            let lbrace = self.pos;
+            let rbrace = self.find_matching_delim(lbrace, &TokenKind::LBrace, &TokenKind::RBrace);
+            self.pos = (rbrace + 1).min(end);
+            (Some((lbrace, rbrace)), self.tokens[rbrace].span.end)
+        } else {
+            self.skip_to_semicolon(end);
+            (None, self.tokens[self.pos.saturating_sub(1)].span.end)
+        };
 
         if let Some(gen_idx) = generic_open {
             let saved = self.pos;
@@ -1443,8 +1438,7 @@ impl<'a> Scanner<'a> {
         while i < rbrace {
             match &self.tokens[i].kind {
                 TokenKind::LBrace => {
-                    let close =
-                        self.find_matching_delim(i, &TokenKind::LBrace, &TokenKind::RBrace);
+                    let close = self.find_matching_delim(i, &TokenKind::LBrace, &TokenKind::RBrace);
                     block_ends.push(self.tokens[close].span.end);
                     at_stmt_start = true;
                     i += 1;
@@ -1460,11 +1454,8 @@ impl<'a> Scanner<'a> {
                 }
                 TokenKind::Kw(Keyword::Foreach) => {
                     if i + 1 < rbrace && matches!(self.tokens[i + 1].kind, TokenKind::LParen) {
-                        let rp = self.find_matching_delim(
-                            i + 1,
-                            &TokenKind::LParen,
-                            &TokenKind::RParen,
-                        );
+                        let rp =
+                            self.find_matching_delim(i + 1, &TokenKind::LParen, &TokenKind::RParen);
                         let loop_end = self.block_end_after(rp + 1, *block_ends.last().unwrap());
                         // `foreach ([mut] Type name in iter)`
                         let mut in_idx = i + 2;
@@ -1490,11 +1481,8 @@ impl<'a> Scanner<'a> {
                 }
                 TokenKind::Kw(Keyword::For) => {
                     if i + 1 < rbrace && matches!(self.tokens[i + 1].kind, TokenKind::LParen) {
-                        let rp = self.find_matching_delim(
-                            i + 1,
-                            &TokenKind::LParen,
-                            &TokenKind::RParen,
-                        );
+                        let rp =
+                            self.find_matching_delim(i + 1, &TokenKind::LParen, &TokenKind::RParen);
                         let loop_end = self.block_end_after(rp + 1, *block_ends.last().unwrap());
                         let mut eq_idx = i + 2;
                         while eq_idx < rp
@@ -1531,11 +1519,8 @@ impl<'a> Scanner<'a> {
                         )
                     {
                         if matches!(self.tokens[j].kind, TokenKind::LParen) {
-                            let inner_rp = self.find_matching_delim(
-                                j,
-                                &TokenKind::LParen,
-                                &TokenKind::RParen,
-                            );
+                            let inner_rp =
+                                self.find_matching_delim(j, &TokenKind::LParen, &TokenKind::RParen);
                             self.try_record_typed_binding(
                                 j + 1,
                                 inner_rp,
@@ -1665,7 +1650,9 @@ impl<'a> Scanner<'a> {
                 | TokenKind::RBracket
                 | TokenKind::RParen
                 | TokenKind::Question
-                | TokenKind::Kw(Keyword::Void | Keyword::Never | Keyword::Dynamic | Keyword::SelfType)
+                | TokenKind::Kw(
+                    Keyword::Void | Keyword::Never | Keyword::Dynamic | Keyword::SelfType
+                )
         ) {
             return false;
         }
@@ -1688,7 +1675,12 @@ impl<'a> Scanner<'a> {
             name: name.clone(),
             kind: DeclKind::Variable,
             selection_span: name_span,
-            full_span: Span::new(decl_start.line, decl_start.col, decl_start.start, name_span.end),
+            full_span: Span::new(
+                decl_start.line,
+                decl_start.col,
+                decl_start.start,
+                name_span.end,
+            ),
             scope_start,
             scope_end,
             owner: None,

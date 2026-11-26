@@ -6,6 +6,7 @@ pub mod position;
 pub mod semantic_tokens;
 
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_types::InitializeParams;
 use lsp_types::notification::{
     DidChangeConfiguration, DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
     DidSaveTextDocument, Notification as LspNotification, PublishDiagnostics,
@@ -14,7 +15,6 @@ use lsp_types::request::{
     Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as LspRequest,
     SemanticTokensFullRequest,
 };
-use lsp_types::InitializeParams;
 
 use crate::handlers::{ServerState, server_capabilities};
 

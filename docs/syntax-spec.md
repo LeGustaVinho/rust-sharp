@@ -157,6 +157,9 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
 | `#!/usr/bin/env ...`, `extern crate self as alias;` | `#!/usr/bin/env ...`, `extern crate this as alias;` |
 | `#[forbid(...)]`, `#[expect(...)]`, `#[a[x]]`, `#[a{ x }]`, `#[doc = concat!(...)]` | `[Forbid(...)]`, `[Expect(...)]`, `[a[x]]`, `[a{ x }]`, `[Doc = concat!(...)]` |
 | Attributes on `self` receivers, tuple-struct/union/enum-named fields, assoc items/macros, fn-ptr params & `...` | `[Allow(...)] read this`, `[Allow(...)] public int`, `[Allow(...)] ...` |
+| `Option<Option<T>>`, `let (a, b): (T1, T2) = expr;` | `T??`, `(a, b) : (T1, T2) = expr;` |
+| `\|_\|\|`, `\|(i, _)\|`, `let (a, mut b) = pair;` | `(_) => ...`, `((nuint i, _)) => ...`, `(int a, mut b) = pair;` |
+| `Foo<{ let k = 1; k + 1 }>` *(multi-statement const generic block)* | `Foo<{ int k = 1; return k + 1; }>` |
 
 > **Intentionally Deferred (Nightly-Only on `rustc 1.99.1 --edition=2024`)**: `gen`/`yield` blocks & functions, `try { ... }` blocks, `trait Alias = ...`, `extern type T;`, `impl !Trait for T`, `const trait` / `~const`, associated const equality (`Tr<C = 1>`), `for<'a> \|...\|` closure binders, `become` tail calls, `box` patterns, `default` specialization, `const { ... }` patterns, `more_qualified_paths` in struct literals, `const \|\|` / `static \|\|`, `auto trait`, postfix `.use` / `.match`.
 
@@ -173,7 +176,7 @@ LocalDecl     := 'shadow'? 'mut'? Type Ident ('=' Expr)? ';'
   - Pattern bindings (`foreach`, `if is`, `while is`, `require is`, `match`) emit zero-cost compile-time type checks (`let _: &T = &x;`) enforced by `rustc`.
 - **Rust -> R#**:
   - Parses Rust via `syn` (full syntax).
-  - Resolves untyped `let` bindings using local type inference plus optional `rustc` compiler type probing, emitting an explicit `UnresolvedType` error if a standalone snippet cannot be resolved.
+  - Resolves untyped `let` bindings and closure parameters using local type inference, standalone `rustc` type probing, or batch Cargo-workspace type hints via `rust-analyzer` (`rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict]` / `--workspace <dir>`).
   - Converts implicit tail returns into explicit `return expr;` statements.
   - Converts `&`, `&mut`, `&'a`, `&[T]`, `*const`, `*mut`, `::`, `#[...]`, `?`, `.await`, `for`, `if let`, `while let`, `let ... else`, `match`, `..base`, closures, and stdlib types into idiomatic R#.
-  - Falls back to `rust { ... }` for rare macro-heavy constructs that have no direct C#-style representation so no Rust semantics are ever lost.
+  - Falls back to statement/expression-level `rust { ... }` for unnameable Rust types (e.g., nested closure/iterator adapters or unimported `dyn Trait` objects) unless `--strict` is enabled, preserving 100% of Rust semantics.

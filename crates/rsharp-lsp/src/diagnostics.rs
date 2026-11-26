@@ -62,9 +62,7 @@ pub fn syntax_diagnostics(source: &str, lines: &LineIndex) -> Vec<Diagnostic> {
 
 fn rsharp_error_to_diagnostic(err: RSharpError, source: &str, lines: &LineIndex) -> Diagnostic {
     let (range, code, message) = match err {
-        RSharpError::Lex { span, message } => {
-            (lines.span_to_range(source, span), "lex", message)
-        }
+        RSharpError::Lex { span, message } => (lines.span_to_range(source, span), "lex", message),
         RSharpError::Parse { span, message } => {
             (lines.span_to_range(source, span), "parse", message)
         }
@@ -119,7 +117,11 @@ pub fn parse_rustc_json_diagnostics(
         {
             continue;
         }
-        let primary = msg.spans.iter().find(|s| s.is_primary).or(msg.spans.first());
+        let primary = msg
+            .spans
+            .iter()
+            .find(|s| s.is_primary)
+            .or(msg.spans.first());
         let range = primary
             .map(|span| map_rustc_span_to_range(rust_src, span, rsharp_src, lines, index))
             .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 1)));
@@ -202,7 +204,9 @@ fn find_enclosing_rust_item(rust_src: &str, line_start: usize) -> Option<String>
     let start_idx = (line_start - 1).min(rust_lines.len() - 1);
     for line in rust_lines[..=start_idx].iter().rev() {
         let trimmed = line.trim();
-        for kw in ["fn ", "struct ", "enum ", "union ", "trait ", "const ", "static "] {
+        for kw in [
+            "fn ", "struct ", "enum ", "union ", "trait ", "const ", "static ",
+        ] {
             if let Some(pos) = trimmed.find(kw) {
                 let after = &trimmed[pos + kw.len()..];
                 let ident: String = after

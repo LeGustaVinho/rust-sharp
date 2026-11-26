@@ -266,13 +266,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn collect_docs(&mut self) -> Vec<String> {
+    fn collect_outer_meta(&mut self) -> Result<(Vec<String>, Vec<Attribute>)> {
         let mut docs = Vec::new();
-        while let TokenKind::DocComment(text) = self.peek_kind().clone() {
-            self.bump();
-            docs.push(text);
+        let mut attrs = Vec::new();
+        loop {
+            if let TokenKind::DocComment(text) = self.peek_kind().clone() {
+                self.bump();
+                docs.push(text);
+                continue;
+            }
+            if self.check(&TokenKind::LBracket) {
+                attrs.push(self.parse_attr()?);
+                continue;
+            }
+            break;
         }
-        docs
+        Ok((docs, attrs))
     }
 
     fn collect_inner_meta(&mut self) -> Result<(Vec<String>, Vec<Attribute>)> {
@@ -309,39 +318,55 @@ impl<'a> Parser<'a> {
 
     /// Speculatively parses attributes in contexts where `[` could also start a slice pattern or array literal.
     fn try_parse_contextual_attrs(&mut self, is_match_arm: bool) -> Vec<Attribute> {
-        let mut attrs = Vec::new();
-        while self.check(&TokenKind::LBracket) {
-            let save = self.checkpoint();
-            if let Ok(attr) = self.parse_attr() {
-                let not_attr = if is_match_arm {
-                    matches!(
+        if is_match_arm {
+            let mut attrs = Vec::new();
+            while self.check(&TokenKind::LBracket) {
+                let save = self.checkpoint();
+                if let Ok(attr) = self.parse_attr() {
+                    let not_attr = matches!(
                         self.peek_kind(),
                         TokenKind::FatArrow
                             | TokenKind::Kw(Keyword::When | Keyword::As)
                             | TokenKind::Pipe
-                    )
+                    );
+                    if not_attr {
+                        self.restore(save);
+                        break;
+                    }
+                    attrs.push(attr);
                 } else {
-                    matches!(
-                        self.peek_kind(),
-                        TokenKind::Eq
-                            | TokenKind::Dot
-                            | TokenKind::ColonColon
-                            | TokenKind::LBracket
-                            | TokenKind::Semicolon
-                            | TokenKind::Comma
-                            | TokenKind::RParen
-                            | TokenKind::RBrace
-                    )
-                };
-                if not_attr {
                     self.restore(save);
                     break;
                 }
+            }
+            return attrs;
+        }
+        let save = self.checkpoint();
+        let mut attrs = Vec::new();
+        while self.check(&TokenKind::LBracket) {
+            let item_save = self.checkpoint();
+            if let Ok(attr) = self.parse_attr() {
                 attrs.push(attr);
             } else {
-                self.restore(save);
+                self.restore(item_save);
                 break;
             }
+        }
+        if !attrs.is_empty()
+            && matches!(
+                self.peek_kind(),
+                TokenKind::Eq
+                    | TokenKind::Dot
+                    | TokenKind::ColonColon
+                    | TokenKind::LBracket
+                    | TokenKind::Semicolon
+                    | TokenKind::Comma
+                    | TokenKind::RParen
+                    | TokenKind::RBrace
+            )
+        {
+            self.restore(save);
+            return Vec::new();
         }
         attrs
     }
@@ -409,7 +434,7 @@ impl<'a> Parser<'a> {
     }
 
     fn collect_balanced_raw(&mut self, open: TokenKind, close: TokenKind) -> Result<String> {
-        let open_tok = self.expect(&open, "opening delimiter")?;
+        let open_tok = self.bump();
         let body_start = open_tok.span.end;
         let mut depth = 1usize;
         loop {
@@ -475,11 +500,10 @@ impl<'a> Parser<'a> {
             if self.is_eof() {
                 break;
             }
-            let docs = self.collect_docs();
-            if self.is_eof() {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.is_eof() && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             let (inners, outers): (Vec<_>, Vec<_>) = attrs.into_iter().partition(|a| a.inner);
             inner_attrs.extend(inners);
             let item = self.parse_item_after_meta(docs, outers, false)?;
@@ -494,8 +518,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_item(&mut self) -> Result<Item> {
-        let docs = self.collect_docs();
-        let attrs = self.parse_attrs()?;
+        let (docs, attrs) = self.collect_outer_meta()?;
         self.parse_item_after_meta(docs, attrs, false)
     }
 
@@ -1195,11 +1218,10 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let docs = self.collect_docs();
-            if self.check(&TokenKind::RBrace) {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             let vis = self.parse_visibility()?;
             if let Some((ty, fname)) = self.try_parse_field_decl() {
                 fields.push(FieldDecl {
@@ -1256,11 +1278,10 @@ impl<'a> Parser<'a> {
         let mut variants = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let docs = self.collect_docs();
-            if self.check(&TokenKind::RBrace) {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             if self.is_enum_method_start() {
                 let vis = self.parse_visibility()?;
                 let func = self.parse_fn_decl()?;
@@ -1293,8 +1314,7 @@ impl<'a> Parser<'a> {
             } else if self.eat(&TokenKind::LBrace) {
                 let mut fields = Vec::new();
                 while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-                    let fdocs = self.collect_docs();
-                    let fattrs = self.parse_attrs()?;
+                    let (fdocs, fattrs) = self.collect_outer_meta()?;
                     let ty = self.parse_type()?;
                     let fname = self.expect_ident()?;
                     if !self.eat(&TokenKind::Semicolon) {
@@ -1362,11 +1382,10 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let docs = self.collect_docs();
-            if self.check(&TokenKind::RBrace) {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             let vis = self.parse_visibility()?;
             if let Some((ty, fname)) = self.try_parse_field_decl() {
                 fields.push(FieldDecl {
@@ -1415,11 +1434,10 @@ impl<'a> Parser<'a> {
         let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
         let mut items = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let docs = self.collect_docs();
-            if self.check(&TokenKind::RBrace) {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             if self.eat_kw(Keyword::Type) {
                 let aname = self.expect_ident()?;
                 let agens = self.parse_generic_params()?;
@@ -1512,11 +1530,10 @@ impl<'a> Parser<'a> {
         let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
         let mut items = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let docs = self.collect_docs();
-            if self.check(&TokenKind::RBrace) {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             if self.eat_kw(Keyword::Type) {
                 let aname = self.expect_ident()?;
                 let agens = self.parse_generic_params()?;
@@ -1632,11 +1649,10 @@ impl<'a> Parser<'a> {
         let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
         let mut items = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.is_eof() {
-            let docs = self.collect_docs();
-            if self.check(&TokenKind::RBrace) {
+            let (docs, attrs) = self.collect_outer_meta()?;
+            if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
-            let attrs = self.parse_attrs()?;
             items.push(self.parse_item_after_meta(docs, attrs, true)?);
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
@@ -1652,16 +1668,18 @@ impl<'a> Parser<'a> {
     fn parse_macro_decl(&mut self) -> Result<MacroDecl> {
         self.bump(); // 'macro'
         let name = self.expect_ident()?;
-        let (delim, open, close) = match self.peek_kind() {
-            TokenKind::LParen => (MacroDelim::Paren, TokenKind::LParen, TokenKind::RParen),
-            TokenKind::LBracket => (
-                MacroDelim::Bracket,
-                TokenKind::LBracket,
-                TokenKind::RBracket,
-            ),
-            _ => (MacroDelim::Brace, TokenKind::LBrace, TokenKind::RBrace),
+        let (delim, body) = match self.peek_kind().clone() {
+            TokenKind::RawMacroBody { delim, body } => {
+                self.bump();
+                let md = match delim {
+                    '(' => MacroDelim::Paren,
+                    '[' => MacroDelim::Bracket,
+                    _ => MacroDelim::Brace,
+                };
+                (md, body)
+            }
+            _ => return Err(self.err_here("Expected '{', '(', or '[' after macro name")),
         };
-        let body = self.collect_balanced_raw(open, close)?;
         if delim != MacroDelim::Brace {
             self.expect(&TokenKind::Semicolon, "';' after macro declaration")?;
         } else {
@@ -2052,18 +2070,16 @@ impl<'a> Parser<'a> {
         } else {
             let tp = self.parse_type_path(allow_infer)?;
             if self.check(&TokenKind::Bang)
-                && matches!(
-                    self.peek_at(1).kind,
-                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
-                )
                 && tp
                     .segments
                     .iter()
                     .all(|s| matches!(s.args, TypePathArgs::None))
+                && let TokenKind::RawMacroBody { delim, body } = self.peek_at(1).kind.clone()
             {
                 self.bump(); // '!'
+                self.bump(); // RawMacroBody
                 let path = tp.segments.into_iter().map(|s| s.name).collect();
-                Type::Macro(self.parse_macro_call_body(tp.global, path)?)
+                Type::Macro(build_macro_call(tp.global, path, delim, body))
             } else {
                 Type::Path(tp)
             }
@@ -2091,6 +2107,8 @@ impl<'a> Parser<'a> {
                 };
             } else if self.eat(&TokenKind::Question) {
                 ty = Type::Optional(Box::new(ty));
+            } else if self.eat(&TokenKind::QuestionQuestion) {
+                ty = Type::Optional(Box::new(Type::Optional(Box::new(ty))));
             } else {
                 break;
             }
@@ -2268,10 +2286,20 @@ impl<'a> Parser<'a> {
                 args.push(GenericArg::Lifetime(self.expect_lifetime_name()?));
             } else if self.eat_kw(Keyword::Static) {
                 args.push(GenericArg::Lifetime("static".to_string()));
-            } else if self.eat(&TokenKind::LBrace) {
-                let expr = self.parse_expr()?;
-                self.expect(&TokenKind::RBrace, "'}'")?;
-                args.push(GenericArg::ConstBlock(expr));
+            } else if self.check(&TokenKind::LBrace) {
+                let save = self.checkpoint();
+                self.bump(); // '{'
+                if let Ok(expr) = self.parse_expr()
+                    && self.eat(&TokenKind::RBrace)
+                {
+                    args.push(GenericArg::ConstBlock(expr));
+                } else {
+                    self.restore(save);
+                    let block = self.parse_block()?;
+                    args.push(GenericArg::ConstBlock(Expr::ConstBlock(ConstBody::Block(
+                        block,
+                    ))));
+                }
             } else if matches!(self.peek_kind(), TokenKind::Ident { .. })
                 && let Some(assoc) = self.try_parse_assoc_generic_arg()?
             {
@@ -2354,7 +2382,21 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt> {
-        let attrs = self.try_parse_contextual_attrs(false);
+        let mut docs = Vec::new();
+        let mut attrs = Vec::new();
+        loop {
+            if let TokenKind::DocComment(text) = self.peek_kind().clone() {
+                self.bump();
+                docs.push(text);
+                continue;
+            }
+            let more_attrs = self.try_parse_contextual_attrs(false);
+            if !more_attrs.is_empty() {
+                attrs.extend(more_attrs);
+                continue;
+            }
+            break;
+        }
 
         if self.check_kw(Keyword::Var) {
             return Err(self.err_here(
@@ -2513,7 +2555,7 @@ impl<'a> Parser<'a> {
 
         // Nested item statements (const item vs const expr block handled carefully!)
         if self.is_nested_item_start() {
-            let item = self.parse_item_after_meta(Vec::new(), attrs, false)?;
+            let item = self.parse_item_after_meta(docs, attrs, false)?;
             return Ok(Stmt::plain(StmtKind::Item(Box::new(item))));
         }
 
@@ -2683,14 +2725,29 @@ impl<'a> Parser<'a> {
                 }
                 _ => false,
             };
+            let explicit_ty = if allowed && self.eat(&TokenKind::Colon) {
+                if let Ok(ty) = self.parse_type() {
+                    Some(ty)
+                } else {
+                    self.restore(save);
+                    return Ok(None);
+                }
+            } else {
+                None
+            };
             if allowed && self.eat(&TokenKind::Eq) {
                 let init = self.parse_expr()?;
                 self.expect(&TokenKind::Semicolon, "';'")?;
-                let kind = if has_types {
-                    StmtKind::Destructure { pat, init }
-                } else {
-                    StmtKind::DestructureAssign { pat, value: init }
-                };
+                let kind =
+                    if explicit_ty.is_some() || has_types || pattern_has_binding_modifier(&pat) {
+                        StmtKind::Destructure {
+                            pat,
+                            explicit_ty,
+                            init,
+                        }
+                    } else {
+                        StmtKind::DestructureAssign { pat, value: init }
+                    };
                 return Ok(Some(Stmt::plain(kind)));
             }
         }
@@ -3076,6 +3133,11 @@ impl<'a> Parser<'a> {
             return self.finish_pat_path(pat_path);
         }
 
+        // Typed binding pattern: `mut? Type name` (before `(` so `(T1, T2) name` and `(A) -> B name` work!)
+        if let Some(binding) = self.try_parse_typed_pattern_binding() {
+            return Ok(binding);
+        }
+
         // Parenthesized pattern `(1 | 2)` or tuple pattern `()`, `(int a,)`, `(int a, .., string b)`
         if self.eat(&TokenKind::LParen) {
             if self.eat(&TokenKind::RParen) {
@@ -3097,9 +3159,15 @@ impl<'a> Parser<'a> {
             return Ok(Pattern::Paren(Box::new(first)));
         }
 
-        // Typed binding pattern: `mut? Type name`
-        if let Some(binding) = self.try_parse_typed_pattern_binding() {
-            return Ok(binding);
+        // Untyped mutable binding pattern: `mut name` (e.g. `foreach (mut x in iter)`, `Some(mut x)`)
+        if self.check_kw(Keyword::Mut) && matches!(self.peek_at(1).kind, TokenKind::Ident { .. }) {
+            self.bump();
+            let name = self.eat_ident().unwrap();
+            return Ok(Pattern::Binding {
+                is_mut: true,
+                ty: None,
+                name,
+            });
         }
 
         // Path / Range-from-const-path / Macro / TupleStruct / Struct pattern
@@ -3127,16 +3195,17 @@ impl<'a> Parser<'a> {
                 .iter()
                 .all(|s| matches!(s.args, TypePathArgs::None))
             && self.check(&TokenKind::Bang)
-            && matches!(
-                self.peek_at(1).kind,
-                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
-            )
+            && let TokenKind::RawMacroBody { delim, body } = self.peek_at(1).kind.clone()
         {
             self.bump(); // '!'
+            self.bump(); // RawMacroBody
             let simple = pat_path.segments.into_iter().map(|s| s.name).collect();
-            return Ok(Pattern::Macro(
-                self.parse_macro_call_body(pat_path.global, simple)?,
-            ));
+            return Ok(Pattern::Macro(build_macro_call(
+                pat_path.global,
+                simple,
+                delim,
+                body,
+            )));
         }
         if self.eat(&TokenKind::LParen) {
             let mut fields = Vec::new();
@@ -3852,14 +3921,17 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self) -> Result<Expr> {
         let mut expr = self.parse_primary()?;
         loop {
-            if self.eat(&TokenKind::Dot) || self.eat(&TokenKind::ColonColon) {
-                if let TokenKind::IntLit(idx) = self.peek_kind().clone() {
+            let saw_dot = self.eat(&TokenKind::Dot);
+            let saw_cc = !saw_dot && self.eat(&TokenKind::ColonColon);
+            if saw_dot || saw_cc {
+                if saw_dot && let TokenKind::IntLit(idx) = self.peek_kind().clone() {
                     self.bump();
                     expr = Expr::TupleIndex {
                         object: Box::new(expr),
                         index: idx,
                     };
-                } else if let TokenKind::FloatLit(f) = self.peek_kind().clone()
+                } else if saw_dot
+                    && let TokenKind::FloatLit(f) = self.peek_kind().clone()
                     && let Some((a, b)) = f.split_once('.')
                     && !a.is_empty()
                     && !b.is_empty()
@@ -3878,11 +3950,44 @@ impl<'a> Parser<'a> {
                 } else {
                     let field = self.expect_member_ident()?;
                     let type_args = self.try_parse_expr_generic_args();
-                    expr = Expr::Member {
-                        object: Box::new(expr),
-                        field,
-                        type_args,
-                    };
+                    if saw_cc {
+                        expr = match expr {
+                            Expr::Ident(first) => Expr::Path {
+                                global: false,
+                                segments: vec![
+                                    PathExprSegment {
+                                        name: first,
+                                        type_args: Vec::new(),
+                                    },
+                                    PathExprSegment {
+                                        name: field,
+                                        type_args,
+                                    },
+                                ],
+                            },
+                            Expr::Path {
+                                global,
+                                mut segments,
+                            } => {
+                                segments.push(PathExprSegment {
+                                    name: field,
+                                    type_args,
+                                });
+                                Expr::Path { global, segments }
+                            }
+                            other => Expr::Member {
+                                object: Box::new(other),
+                                field,
+                                type_args,
+                            },
+                        };
+                    } else {
+                        expr = Expr::Member {
+                            object: Box::new(expr),
+                            field,
+                            type_args,
+                        };
+                    }
                 }
             } else if self.check(&TokenKind::Lt) {
                 let type_args = self.try_parse_expr_generic_args();
@@ -3937,15 +4042,12 @@ impl<'a> Parser<'a> {
                     fields,
                 };
             } else if self.check(&TokenKind::Bang)
-                && matches!(
-                    self.peek_at(1).kind,
-                    TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
-                )
+                && let TokenKind::RawMacroBody { delim, body } = self.peek_at(1).kind.clone()
             {
                 if let Some((global, path)) = expr_to_path(&expr) {
                     self.bump(); // '!'
-                    let mc = self.parse_macro_call_body(global, path)?;
-                    expr = Expr::MacroCall(mc);
+                    self.bump(); // RawMacroBody
+                    expr = Expr::MacroCall(build_macro_call(global, path, delim, body));
                 } else {
                     break;
                 }
@@ -4000,23 +4102,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_macro_call_body(&mut self, global: bool, path: Vec<String>) -> Result<MacroCall> {
-        let (delim, open, close) = match self.peek_kind() {
-            TokenKind::LParen => (MacroDelim::Paren, TokenKind::LParen, TokenKind::RParen),
-            TokenKind::LBracket => (
-                MacroDelim::Bracket,
-                TokenKind::LBracket,
-                TokenKind::RBracket,
-            ),
-            TokenKind::LBrace => (MacroDelim::Brace, TokenKind::LBrace, TokenKind::RBrace),
-            _ => return Err(self.err_here("Expected '(', '[', or '{' after '!'")),
-        };
-        let body = self.collect_balanced_raw(open, close)?;
-        Ok(MacroCall {
-            global,
-            path,
-            delim,
-            body,
-        })
+        match self.peek_kind().clone() {
+            TokenKind::RawMacroBody { delim, body } => {
+                self.bump();
+                Ok(build_macro_call(global, path, delim, body))
+            }
+            _ => Err(self.err_here("Expected '(', '[', or '{' after '!'")),
+        }
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
@@ -4324,7 +4416,22 @@ impl<'a> Parser<'a> {
                     Ok(Expr::TupleLit(elems))
                 } else {
                     self.expect(&TokenKind::RParen, "')'")?;
-                    Ok(first)
+                    let keep_group = (matches!(
+                        first,
+                        Expr::Member { .. } | Expr::TupleIndex { .. } | Expr::Lambda { .. }
+                    ) && self.check(&TokenKind::LParen))
+                        || (matches!(
+                            first,
+                            Expr::Path { .. }
+                                | Expr::Member { .. }
+                                | Expr::Ident(_)
+                                | Expr::IfExpr { .. }
+                        ) && self.check(&TokenKind::Dot));
+                    if keep_group {
+                        Ok(Expr::Group(Box::new(first)))
+                    } else {
+                        Ok(first)
+                    }
                 }
             }
             TokenKind::LBracket => {
@@ -4563,13 +4670,15 @@ fn lambda_param_is_typed(param: &Param) -> bool {
             explicit_ty.is_some()
                 || matches!(
                     pat,
-                    Pattern::Tuple(_)
+                    Pattern::Wildcard
+                        | Pattern::Tuple(_)
                         | Pattern::Struct { .. }
                         | Pattern::Slice(_)
                         | Pattern::BorrowRef { .. }
                 )
                 || (matches!(pat, Pattern::TupleStruct { .. } | Pattern::DerefPat { .. })
-                    && pattern_has_explicit_type(pat))
+                    && (pattern_has_explicit_type(pat)
+                        || matches!(pat, Pattern::DerefPat { inner, .. } if matches!(inner.as_ref(), Pattern::Wildcard))))
         }
         Param::Receiver { .. } => false,
     }
@@ -4578,8 +4687,6 @@ fn lambda_param_is_typed(param: &Param) -> bool {
 fn is_unambiguous_inherent_qself_type(ty: &Type) -> bool {
     match ty {
         Type::Slice(_)
-        | Type::Read { .. }
-        | Type::Write { .. }
         | Type::ReadPtr(_)
         | Type::WritePtr(_)
         | Type::DynTrait(_)
@@ -4590,6 +4697,9 @@ fn is_unambiguous_inherent_qself_type(ty: &Type) -> bool {
         | Type::Optional(_)
         | Type::Array { .. }
         | Type::QualifiedPath { .. } => true,
+        Type::Read { inner, .. } | Type::Write { inner, .. } => {
+            is_unambiguous_inherent_qself_type(inner)
+        }
         Type::Path(tp) => {
             tp.global
                 || tp
@@ -4651,6 +4761,27 @@ fn pattern_has_explicit_type(pat: &Pattern) -> bool {
                 || f.ref_mode.is_some()
                 || f.pat.as_ref().is_some_and(pattern_has_explicit_type)
         }),
+        _ => false,
+    }
+}
+
+fn pattern_has_binding_modifier(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Binding { is_mut, .. } => *is_mut,
+        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) => {
+            pattern_has_binding_modifier(inner)
+        }
+        Pattern::Tuple(ps) | Pattern::TupleStruct { fields: ps, .. } | Pattern::Or(ps) => {
+            ps.iter().any(pattern_has_binding_modifier)
+        }
+        Pattern::Slice(elems) => elems.iter().any(|e| match e {
+            SlicePatElem::Pat(p) => pattern_has_binding_modifier(p),
+            SlicePatElem::RestBind { is_mut, .. } => *is_mut,
+            SlicePatElem::Rest => false,
+        }),
+        Pattern::Struct { fields, .. } => fields
+            .iter()
+            .any(|f| f.is_mut || f.pat.as_ref().is_some_and(pattern_has_binding_modifier)),
         _ => false,
     }
 }
@@ -4834,6 +4965,20 @@ fn is_binary_or_postfix_continuation(kind: &TokenKind) -> bool {
             | TokenKind::QuestionQuestion
             | TokenKind::Kw(Keyword::As | Keyword::With | Keyword::Is)
     )
+}
+
+fn build_macro_call(global: bool, path: Vec<String>, delim: char, body: String) -> MacroCall {
+    let delim = match delim {
+        '(' => MacroDelim::Paren,
+        '[' => MacroDelim::Bracket,
+        _ => MacroDelim::Brace,
+    };
+    MacroCall {
+        global,
+        path,
+        delim,
+        body,
+    }
 }
 
 fn attach_type_args_to_expr(expr: Expr, type_args: Vec<GenericArg>) -> Expr {
