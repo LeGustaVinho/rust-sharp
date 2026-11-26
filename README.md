@@ -245,6 +245,8 @@ cargo install --path crates/rsharp-cli --locked
 
 The single-file conversion commands write to standard output unless you pass `-o`. When converting from Rust, R# prefers explicit types whenever obvious or resolvable and emits native `var` bindings and inferred lambda parameters otherwise, reserving inline `rust { ... }` only for unsupported experimental nightly syntax.
 
+Converted R# follows Rider's C# blank-line spacing for the constructs it emits. It separates multiline methods and local functions, types, and namespaces, adds a blank line after import lists and before the next statement following a control block, and preserves up to two blank lines between emitted siblings.
+
 ### Convert Rust with Cargo workspace context
 
 Use `--workspace` or `--project` to convert Cargo crates with `rust-analyzer` type resolution (install `rust-analyzer` and `rust-src` for full explicit type hints, or pass `--no-ra` for fast offline conversion using local inference + `var`).

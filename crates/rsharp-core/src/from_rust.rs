@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use quote::ToTokens;
+use syn::spanned::Spanned;
 use syn::{
     Attribute, BinOp, Block, Expr, FnArg, GenericArgument, GenericParam, Generics, Item, Local,
     Member, Pat, Path, PathArguments, ReturnType, Stmt, TraitBoundModifier, TraitItem, Type,
@@ -15,6 +16,14 @@ use crate::rustc_runner::probes::TypeProbes;
 use crate::token::Keyword;
 
 const INDENT: &str = "    ";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlankLines {
+    Preserve,
+    Around,
+    After,
+    Imports,
+}
 
 /// Options controlling Rust -> R# conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +62,9 @@ pub fn convert_from_rust_with_hints(
         .map_err(|e| RSharpError::from_rust(format!("Invalid Rust syntax: {}", e)))?;
     let probes = TypeProbes::new(rust_source, &parsed);
     let mut conv = RustToRSharp::new(rust_source, options, hints, strict_unnameable, &probes);
+    // Syn assigns spans after stripping the BOM and shebang.
+    let source = rust_source.strip_prefix('\u{feff}').unwrap_or(rust_source);
+    conv.spacing_source = &source[parsed.shebang.as_ref().map_or(0, String::len)..];
     conv.collect_signatures(&parsed.items);
     conv.emit_file(&parsed);
     if let Some(err) = conv.first_err.borrow_mut().take() {
@@ -78,6 +90,7 @@ enum HintLookup {
 struct RustToRSharp<'a> {
     probes: &'a TypeProbes<'a>,
     source_lines: Rc<Vec<&'a str>>,
+    spacing_source: &'a str,
     options: FromRustOptions,
     type_hints: &'a TypeHintMap,
     strict_unnameable: bool,
@@ -115,6 +128,7 @@ impl<'a> RustToRSharp<'a> {
         Self {
             probes,
             source_lines: Rc::new(source_lines),
+            spacing_source: raw_source,
             options,
             type_hints,
             strict_unnameable,
@@ -137,6 +151,7 @@ impl<'a> RustToRSharp<'a> {
         Self {
             probes: self.probes,
             source_lines: Rc::clone(&self.source_lines),
+            spacing_source: self.spacing_source,
             options: self.options,
             type_hints: self.type_hints,
             strict_unnameable: self.strict_unnameable,
@@ -383,6 +398,43 @@ impl<'a> RustToRSharp<'a> {
         self.out.push('\n');
     }
 
+    fn separate(
+        &mut self,
+        previous: &mut Option<(BlankLines, usize)>,
+        spacing: BlankLines,
+        span: proc_macro2::Span,
+        start: usize,
+    ) {
+        let range = span.byte_range();
+        let Some((preceding, end)) = previous.replace((spacing, range.end)) else {
+            return;
+        };
+        let needs_line = spacing == BlankLines::Around
+            || matches!(preceding, BlankLines::Around | BlankLines::After)
+            || (preceding == BlankLines::Imports && spacing != BlankLines::Imports);
+        let preserved = self
+            .spacing_source
+            .get(end..range.start)
+            .and_then(|gap| gap.rsplit_once('\n'))
+            .map_or("", |(lines, _)| lines)
+            .split('\n')
+            .skip(1)
+            .filter(|line| line.trim().is_empty())
+            .take(2)
+            .count();
+        self.out
+            .insert_str(start, &"\n\n"[..preserved.max(usize::from(needs_line))]);
+    }
+
+    fn field_line(&mut self, declaration: &str) -> BlankLines {
+        self.line(declaration);
+        if declaration.contains('\n') {
+            BlankLines::Around
+        } else {
+            BlankLines::Preserve
+        }
+    }
+
     fn open_block(&mut self, header: &str) {
         self.line(header);
         self.line("{");
@@ -565,11 +617,46 @@ impl<'a> RustToRSharp<'a> {
         if let Some(sb) = &file.shebang {
             self.line(sb);
         }
+        let mut header = false;
         for attr in &file.attrs {
+            let is_comment = attr.path().is_ident("doc");
+            if header && !is_comment {
+                self.out.push('\n');
+            }
             self.emit_attr(attr, true);
+            header = is_comment;
         }
-        for item in &file.items {
-            self.emit_item(item);
+        if header && !file.items.is_empty() {
+            self.out.push('\n');
+        }
+        self.emit_items(&file.items);
+    }
+
+    fn emit_items(&mut self, items: &[Item]) {
+        let mut previous = None;
+        for item in items {
+            let start = self.out.len();
+            let spacing = self.emit_item(item);
+            self.separate(&mut previous, spacing, item.span(), start);
+        }
+    }
+
+    fn emit_fields(&mut self, fields: &syn::FieldsNamed, include_visibility: bool) {
+        let mut previous = None;
+        for field in &fields.named {
+            let start = self.out.len();
+            for attr in &field.attrs {
+                self.emit_attr(attr, false);
+            }
+            let vis = if include_visibility {
+                fmt_vis(&field.vis)
+            } else {
+                String::new()
+            };
+            let name = escape_ident(&field.ident.as_ref().unwrap().to_string());
+            let ty = self.fmt_type(&field.ty);
+            let spacing = self.field_line(&format!("{}{} {};", vis, ty, name));
+            self.separate(&mut previous, spacing, field.span(), start);
         }
     }
 
@@ -626,7 +713,7 @@ impl<'a> RustToRSharp<'a> {
         }
     }
 
-    fn emit_item(&mut self, item: &Item) {
+    fn emit_item(&mut self, item: &Item) -> BlankLines {
         match item {
             Item::Use(u) => {
                 for a in &u.attrs {
@@ -671,9 +758,7 @@ impl<'a> RustToRSharp<'a> {
                     }
                     sub.collect_signatures(items);
                     sub.emit_split_attrs(&m.attrs, true, "module");
-                    for item in items {
-                        sub.emit_item(item);
-                    }
+                    sub.emit_items(items);
                     self.out.push_str(&sub.out);
                     self.line("}");
                 } else {
@@ -719,15 +804,7 @@ impl<'a> RustToRSharp<'a> {
                     syn::Fields::Named(nf) => {
                         self.open_block(&format!("{}struct {}{}{}", vis, name, gens, wh));
                         self.indent += 1;
-                        for f in &nf.named {
-                            for a in &f.attrs {
-                                self.emit_attr(a, false);
-                            }
-                            let fvis = fmt_vis(&f.vis);
-                            let fname = escape_ident(&f.ident.as_ref().unwrap().to_string());
-                            let fty = self.fmt_type(&f.ty);
-                            self.line(&format!("{}{} {};", fvis, fty, fname));
-                        }
+                        self.emit_fields(nf, true);
                         self.indent -= 1;
                         self.line("}");
                     }
@@ -743,7 +820,9 @@ impl<'a> RustToRSharp<'a> {
                 let wh = self.fmt_where(&e.generics);
                 self.open_block(&format!("{}enum {}{}{}", vis, name, gens, wh));
                 self.indent += 1;
+                let mut previous = None;
                 for v in &e.variants {
+                    let start = self.out.len();
                     for a in &v.attrs {
                         self.emit_attr(a, false);
                     }
@@ -773,18 +852,12 @@ impl<'a> RustToRSharp<'a> {
                         syn::Fields::Named(nf) => {
                             self.open_block(&vname);
                             self.indent += 1;
-                            for f in &nf.named {
-                                for a in &f.attrs {
-                                    self.emit_attr(a, false);
-                                }
-                                let fname = escape_ident(&f.ident.as_ref().unwrap().to_string());
-                                let fty = self.fmt_type(&f.ty);
-                                self.line(&format!("{} {};", fty, fname));
-                            }
+                            self.emit_fields(nf, false);
                             self.indent -= 1;
                             self.line(&format!("}}{},", disc));
                         }
                     }
+                    self.separate(&mut previous, BlankLines::Preserve, v.span(), start);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -799,15 +872,7 @@ impl<'a> RustToRSharp<'a> {
                 let wh = self.fmt_where(&u.generics);
                 self.open_block(&format!("{}union {}{}{}", vis, name, gens, wh));
                 self.indent += 1;
-                for f in &u.fields.named {
-                    for a in &f.attrs {
-                        self.emit_attr(a, false);
-                    }
-                    let fvis = fmt_vis(&f.vis);
-                    let fname = escape_ident(&f.ident.as_ref().unwrap().to_string());
-                    let fty = self.fmt_type(&f.ty);
-                    self.line(&format!("{}{} {};", fvis, fty, fname));
-                }
+                self.emit_fields(&u.fields, true);
                 self.indent -= 1;
                 self.line("}");
             }
@@ -831,7 +896,10 @@ impl<'a> RustToRSharp<'a> {
                 ));
                 self.indent += 1;
                 self.emit_split_attrs(&t.attrs, true, "inner");
+                let mut previous = None;
                 for ti in &t.items {
+                    let start = self.out.len();
+                    let mut spacing = BlankLines::Preserve;
                     match ti {
                         TraitItem::Fn(tf) => {
                             self.emit_split_attrs(&tf.attrs, false, "inner");
@@ -841,7 +909,7 @@ impl<'a> RustToRSharp<'a> {
                                 .filter(|a| matches!(a.style, syn::AttrStyle::Inner(_)))
                                 .cloned()
                                 .collect();
-                            self.emit_fn_sig_and_body(
+                            spacing = self.emit_fn_sig_and_body(
                                 "",
                                 &tf.sig,
                                 tf.default.as_ref(),
@@ -881,7 +949,7 @@ impl<'a> RustToRSharp<'a> {
                                 Some((_, e)) => format!(" = {}", self.fmt_expr(e)),
                                 None => String::new(),
                             };
-                            self.line(&format!("const {} {}{};", cty, cname, def));
+                            spacing = self.field_line(&format!("const {} {}{};", cty, cname, def));
                         }
                         TraitItem::Macro(tm) => {
                             for a in &tm.attrs {
@@ -898,6 +966,7 @@ impl<'a> RustToRSharp<'a> {
                             self.line(&format!("rust {{ {} }}", other.to_token_stream()));
                         }
                     }
+                    self.separate(&mut previous, spacing, ti.span(), start);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -950,7 +1019,10 @@ impl<'a> RustToRSharp<'a> {
                 self.open_block(&header);
                 self.indent += 1;
                 self.emit_split_attrs(&im.attrs, true, "inner");
+                let mut previous = None;
                 for sub in &im.items {
+                    let start = self.out.len();
+                    let mut spacing = BlankLines::Preserve;
                     match sub {
                         syn::ImplItem::Fn(m) => {
                             self.emit_split_attrs(&m.attrs, false, "inner");
@@ -963,7 +1035,7 @@ impl<'a> RustToRSharp<'a> {
                             let mvis = fmt_vis(&m.vis);
                             let is_static =
                                 !m.sig.inputs.iter().any(|a| matches!(a, FnArg::Receiver(_)));
-                            self.emit_fn_sig_and_body(
+                            spacing = self.emit_fn_sig_and_body(
                                 &mvis,
                                 &m.sig,
                                 Some(&m.block),
@@ -990,7 +1062,8 @@ impl<'a> RustToRSharp<'a> {
                             let cty = self.fmt_type(&c.ty);
                             let cname = escape_ident(&c.ident.to_string());
                             let val = self.fmt_expr(&c.expr);
-                            self.line(&format!("{}const {} {} = {};", cvis, cty, cname, val));
+                            spacing = self
+                                .field_line(&format!("{}const {} {} = {};", cvis, cty, cname, val));
                         }
                         syn::ImplItem::Macro(mc) => {
                             for a in &mc.attrs {
@@ -1021,6 +1094,7 @@ impl<'a> RustToRSharp<'a> {
                             }
                         }
                     }
+                    self.separate(&mut previous, spacing, sub.span(), start);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -1044,7 +1118,7 @@ impl<'a> RustToRSharp<'a> {
                 let ty = self.fmt_type(&c.ty);
                 let name = escape_ident(&c.ident.to_string());
                 let val = self.fmt_expr(&c.expr);
-                self.line(&format!("{}const {} {} = {};", vis, ty, name, val));
+                return self.field_line(&format!("{}const {} {} = {};", vis, ty, name, val));
             }
             Item::Static(s) => {
                 for a in &s.attrs {
@@ -1059,7 +1133,7 @@ impl<'a> RustToRSharp<'a> {
                 let ty = self.fmt_type(&s.ty);
                 let name = escape_ident(&s.ident.to_string());
                 let val = self.fmt_expr(&s.expr);
-                self.line(&format!(
+                return self.field_line(&format!(
                     "{}static {}{} {} = {};",
                     vis, mut_kw, ty, name, val
                 ));
@@ -1073,7 +1147,14 @@ impl<'a> RustToRSharp<'a> {
                     .cloned()
                     .collect();
                 let vis = fmt_vis(&f.vis);
-                self.emit_fn_sig_and_body(&vis, &f.sig, Some(&f.block), &inner_attrs, false, false);
+                return self.emit_fn_sig_and_body(
+                    &vis,
+                    &f.sig,
+                    Some(&f.block),
+                    &inner_attrs,
+                    false,
+                    false,
+                );
             }
             Item::ForeignMod(fm) => {
                 self.emit_split_attrs(&fm.attrs, false, "inner");
@@ -1087,10 +1168,13 @@ impl<'a> RustToRSharp<'a> {
                 self.open_block(&format!("{}extern{}", unsf, abi));
                 self.indent += 1;
                 self.emit_split_attrs(&fm.attrs, true, "inner");
+                let mut previous = None;
                 for fi in &fm.items {
+                    let start = self.out.len();
+                    let mut spacing = BlankLines::Preserve;
                     match fi {
                         syn::ForeignItem::Fn(ff) => {
-                            self.emit_foreign_fn(ff, false);
+                            spacing = self.emit_foreign_fn(ff, false);
                         }
                         syn::ForeignItem::Static(fs) => {
                             self.emit_foreign_static(fs, "");
@@ -1123,6 +1207,7 @@ impl<'a> RustToRSharp<'a> {
                             }
                         }
                     }
+                    self.separate(&mut previous, spacing, fi.span(), start);
                 }
                 self.indent -= 1;
                 self.line("}");
@@ -1146,7 +1231,7 @@ impl<'a> RustToRSharp<'a> {
                             self.line(&format!("macro {} [ {} ];", mname, im.mac.tokens));
                         }
                     }
-                    return;
+                    return BlankLines::Preserve;
                 }
                 self.line(&format!("{};", fmt_syn_macro(&im.mac)));
             }
@@ -1167,14 +1252,26 @@ impl<'a> RustToRSharp<'a> {
                 }
             }
         }
+        match item {
+            Item::Use(_) => BlankLines::Imports,
+            Item::Mod(_)
+            | Item::Struct(_)
+            | Item::Enum(_)
+            | Item::Union(_)
+            | Item::Trait(_)
+            | Item::TraitAlias(_)
+            | Item::Impl(_)
+            | Item::Type(_) => BlankLines::Around,
+            _ => BlankLines::Preserve,
+        }
     }
 
-    fn emit_foreign_fn(&mut self, ff: &syn::ForeignItemFn, is_safe: bool) {
+    fn emit_foreign_fn(&mut self, ff: &syn::ForeignItemFn, is_safe: bool) -> BlankLines {
         for a in &ff.attrs {
             self.emit_attr(a, false);
         }
         let fvis = fmt_vis(&ff.vis);
-        self.emit_fn_sig_and_body(&fvis, &ff.sig, None, &[], false, is_safe);
+        self.emit_fn_sig_and_body(&fvis, &ff.sig, None, &[], false, is_safe)
     }
 
     fn emit_foreign_static(&mut self, fs: &syn::ForeignItemStatic, safety: &str) {
@@ -1245,7 +1342,7 @@ impl<'a> RustToRSharp<'a> {
         inner_attrs: &[Attribute],
         is_static: bool,
         is_safe: bool,
-    ) {
+    ) -> BlankLines {
         let mut header = String::new();
         header.push_str(vis);
         if sig.constness.is_some() {
@@ -1345,7 +1442,7 @@ impl<'a> RustToRSharp<'a> {
             BlockTail::Return
         };
 
-        if let Some(blk) = body {
+        let spacing = if let Some(blk) = body {
             self.open_block(&header);
             self.indent += 1;
             for a in inner_attrs {
@@ -1354,12 +1451,14 @@ impl<'a> RustToRSharp<'a> {
             self.emit_block_stmts(blk, tail);
             self.indent -= 1;
             self.line("}");
+            BlankLines::Around
         } else {
-            self.line(&format!("{};", header));
-        }
+            self.field_line(&format!("{};", header))
+        };
 
         self.declared_in_fn = prev_declared;
         self.pop_scope();
+        spacing
     }
 
     fn fmt_typed_fn_param(&mut self, attrs: &[Attribute], pat: &Pat, ty: &Type) -> String {
@@ -1504,11 +1603,14 @@ impl<'a> RustToRSharp<'a> {
                 Stmt::Macro(sm) => sm.semi_token.is_none() && has_cfg_attr(&sm.attrs),
                 _ => false,
             });
+        let mut previous = None;
         for (idx, stmt) in block.stmts.iter().enumerate() {
             let is_last = idx + 1 == len;
+            let start = self.out.len();
+            let mut spacing = BlankLines::Preserve;
             match stmt {
                 Stmt::Local(local) => self.emit_local(local, &block.stmts[idx + 1..]),
-                Stmt::Item(item) => self.emit_item(item),
+                Stmt::Item(item) => spacing = self.emit_item(item),
                 Stmt::Expr(expr, semi) => {
                     if is_last
                         && tail == BlockTail::Value
@@ -1538,9 +1640,7 @@ impl<'a> RustToRSharp<'a> {
                         && matches!(tail, BlockTail::Return | BlockTail::Value)
                     {
                         self.line(&format!("return {};", ms));
-                        continue;
-                    }
-                    if matches!(sm.mac.delimiter, syn::MacroDelimiter::Brace(_))
+                    } else if matches!(sm.mac.delimiter, syn::MacroDelimiter::Brace(_))
                         && sm.semi_token.is_none()
                     {
                         self.line(&ms);
@@ -1549,6 +1649,12 @@ impl<'a> RustToRSharp<'a> {
                     }
                 }
             }
+            if matches!(stmt, Stmt::Local(_) | Stmt::Expr(_, _))
+                && self.out[start..].ends_with("}\n")
+            {
+                spacing = BlankLines::After;
+            }
+            self.separate(&mut previous, spacing, stmt.span(), start);
         }
         self.pop_scope();
     }
@@ -2324,7 +2430,9 @@ impl<'a> RustToRSharp<'a> {
         } else {
             BlockTail::None
         };
+        let mut previous = None;
         for arm in &em.arms {
+            let start = self.out.len();
             for a in &arm.attrs {
                 self.emit_attr(a, false);
             }
@@ -2346,6 +2454,7 @@ impl<'a> RustToRSharp<'a> {
                 self.line(&format!("{}{} => {},", pat, guard, s));
             }
             self.pop_scope();
+            self.separate(&mut previous, BlankLines::Preserve, arm.span(), start);
         }
         self.indent -= 1;
         self.line("}");

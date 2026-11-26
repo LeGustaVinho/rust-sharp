@@ -32,6 +32,7 @@ fn main() {
 {
     int value;
 }
+
 impl Number
 {
     int get(read this)
@@ -50,6 +51,7 @@ impl Number
         }
     }
 }
+
 void main()
 {
     Number number = new Number { value = 42 };
@@ -61,6 +63,95 @@ void main()
 "#
     );
     assert_eq!(run_rsharp(&rsharp).unwrap().stdout.trim(), "{42}");
+}
+
+#[test]
+fn conversion_uses_rider_csharp_blank_lines() {
+    let rust = r#"
+//! Counter example.
+use std::cmp::min;
+use std::cmp::max;
+struct Counter {
+    initial: i32,
+    extra: i32,
+}
+trait Read {
+    fn first(&self) -> i32;
+    fn second(&self) -> i32;
+    fn fallback(&self) -> i32 { 42 }
+}
+impl Counter {
+    const ZERO: i32 = 0;
+    const ONE: i32 = 1;
+    fn first(&self) -> i32 {
+        let a = self.initial;
+        if a == 0 { return Self::ONE; }
+        max(a, Self::ZERO)
+    }
+    /// The next method.
+    #[inline]
+    fn second(&self) -> i32 { min(self.extra, 42) }
+}
+mod nested {
+    fn first() {}
+    fn second() {}
+}
+fn main() {
+    fn initial() -> i32 { 21 }
+    fn extra() -> i32 { 42 }
+    let c = Counter { initial: initial(), extra: extra() };
+    println!("{}", c.first() + c.second());
+}
+"#;
+    let converted = convert_from_rust(rust, FromRustOptions::default()).unwrap();
+    for fragment in [
+        "//! Counter example.\n\nusing ",
+        ";\nusing ",
+        "max;\n\nstruct Counter",
+        "    int initial;\n    int extra;\n}",
+        "}\n\ntrait Read\n{\n",
+        "int first(read this);\n    int second(read this);\n\n    int fallback",
+        "const int ZERO = 0;\n    const int ONE = 1;\n\n    int first",
+        "        }\n\n        return max(a, Self.ZERO);",
+        "\n    }\n\n    /// The next method.\n    [Inline]\n    int second",
+        "namespace nested\n{\n    void first()\n    {\n    }\n\n    void second()",
+        "    }\n\n    int extra()",
+    ] {
+        assert!(
+            converted.contains(fragment),
+            "missing {fragment:?} in:\n{converted}"
+        );
+    }
+    assert!(!converted.contains("{\n\n"));
+    assert!(!converted.contains("\n\n}"));
+    assert_eq!(run_rsharp(&converted).unwrap().stdout.trim(), "63");
+}
+
+#[test]
+fn conversion_caps_existing_gaps_and_separates_multiline_fields() {
+    let rust = "\u{feff}#!/usr/bin/env rust-script\r\n\
+        const A: i32 = 1;\r\n\r\n\r\n\r\n\
+        const B: i32 = 2;\r\n\
+        const C: i32 = { let value: i32 = 3; value };\r\n\
+        const D: i32 = 4;\r\n\
+        fn main() {\r\n\r\n\
+            let n: i32 = A + B;\r\n\r\n\r\n\r\n\
+            println!(\"{}\", n + C + D);\r\n\r\n\
+        }\r\n";
+    let converted = convert_from_rust(rust, FromRustOptions::default()).unwrap();
+    assert!(
+        converted.contains("A = 1;\n\n\nconst int B = 2;\n\nconst int C"),
+        "{converted}"
+    );
+    assert!(converted.contains("};\n\nconst int D = 4;"), "{converted}");
+    assert!(
+        converted.contains("int n = (A + B);\n\n\n    println!"),
+        "{converted}"
+    );
+    assert!(!converted.contains("{\n\n"), "{converted}");
+    assert!(!converted.contains("\n\n}"), "{converted}");
+    assert!(!converted.contains("\n\n\n\n"), "{converted}");
+    assert_eq!(run_rsharp(&converted).unwrap().stdout.trim(), "10");
 }
 
 #[test]
