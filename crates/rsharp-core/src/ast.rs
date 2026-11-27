@@ -705,6 +705,8 @@ pub enum Pattern {
         is_mut: bool,
         inner: Box<Pattern>,
     },
+    /// Nightly box pattern (`box pat`).
+    Box(Box<Pattern>),
     /// Parenthesized pattern `(1 | 2)`.
     Paren(Box<Pattern>),
     /// Subpattern binding `<pat> as [borrow (read|write) | mut] <Type> <name>` (`[ref] [mut] name @ pat`).

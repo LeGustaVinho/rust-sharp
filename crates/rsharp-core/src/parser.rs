@@ -35,6 +35,8 @@ struct Parser<'a> {
     pending_gt: bool,
     /// True at the top level of a `match` arm `when <guard>` so `(expr) =>` is not stolen as a lambda.
     in_match_guard: bool,
+    /// True while parsing the `then` branch of a ternary `c ? then : else` so `ident : loop/block` does not steal `:`.
+    in_ternary_then: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -45,6 +47,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             pending_gt: false,
             in_match_guard: false,
+            in_ternary_then: false,
         }
     }
 
@@ -784,7 +787,7 @@ impl<'a> Parser<'a> {
         }
 
         // Item-level macro call `foo!(...);`
-        if let Some(mc) = self.try_parse_item_macro_call()? {
+        if let Some(mc) = self.try_parse_item_macro_call(false)? {
             return Ok(Item {
                 docs,
                 attrs,
@@ -873,21 +876,18 @@ impl<'a> Parser<'a> {
         is_item
     }
 
-    fn try_parse_item_macro_call(&mut self) -> Result<Option<MacroCall>> {
+    fn try_parse_item_macro_call(&mut self, allow_semi_fn: bool) -> Result<Option<MacroCall>> {
         let save = self.checkpoint();
         let global = self.eat_global_prefix();
         if let Ok(path) = self.parse_simple_path()
             && self.eat(&TokenKind::Bang)
         {
             let mc = self.parse_macro_call_body(global, path)?;
+            if self.follows_fn_signature_after_macro_type(allow_semi_fn) {
+                self.restore(save);
+                return Ok(None);
+            }
             if mc.delim != MacroDelim::Brace {
-                // Macro in return-type position: `EventStream![] events(...)`
-                if !self.check(&TokenKind::Semicolon)
-                    && matches!(self.peek_kind(), TokenKind::Ident { .. })
-                {
-                    self.restore(save);
-                    return Ok(None);
-                }
                 self.expect(&TokenKind::Semicolon, "';' after macro invocation")?;
             } else {
                 self.eat(&TokenKind::Semicolon);
@@ -896,6 +896,64 @@ impl<'a> Parser<'a> {
         }
         self.restore(save);
         Ok(None)
+    }
+
+    fn follows_fn_signature_after_macro_type(&mut self, allow_semi_fn: bool) -> bool {
+        if !matches!(
+            self.peek_kind(),
+            TokenKind::Question
+                | TokenKind::QuestionQuestion
+                | TokenKind::LBracket
+                | TokenKind::Ident { .. }
+        ) {
+            return false;
+        }
+        let cp = self.checkpoint();
+        let ok = (|| {
+            let mut saw_opt_suffix = false;
+            loop {
+                if self.eat(&TokenKind::Question) || self.eat(&TokenKind::QuestionQuestion) {
+                    saw_opt_suffix = true;
+                    continue;
+                }
+                if self.eat(&TokenKind::LBracket) {
+                    if self.parse_expr().is_err() || !self.eat(&TokenKind::RBracket) {
+                        return false;
+                    }
+                    continue;
+                }
+                break;
+            }
+            if self.eat_ident().is_none() {
+                return false;
+            }
+            if self.check(&TokenKind::Lt) && self.parse_generic_params().is_err() {
+                return false;
+            }
+            if !self.eat(&TokenKind::LParen) {
+                return false;
+            }
+            if saw_opt_suffix {
+                return true;
+            }
+            // Skip balanced `(...)` so a call statement like `drop(x);` after a brace macro
+            // is never misparsed as a bodyless function declaration.
+            let mut depth = 1usize;
+            while depth > 0 && !self.is_eof() {
+                if self.eat(&TokenKind::LParen) {
+                    depth += 1;
+                } else if self.eat(&TokenKind::RParen) {
+                    depth -= 1;
+                } else {
+                    self.bump();
+                }
+            }
+            self.check(&TokenKind::LBrace)
+                || self.check_kw(Keyword::Where)
+                || (allow_semi_fn && self.check(&TokenKind::Semicolon))
+        })();
+        self.restore(cp);
+        ok
     }
 
     fn parse_simple_path(&mut self) -> Result<Vec<String>> {
@@ -1519,12 +1577,15 @@ impl<'a> Parser<'a> {
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
         if !is_unsafe && !is_auto && self.eat(&TokenKind::Eq) {
-            let mut bounds = vec![self.parse_type_bound()?];
-            while self.eat(&TokenKind::Plus) || self.eat(&TokenKind::Comma) {
-                if self.check(&TokenKind::Semicolon) || self.check_kw(Keyword::Where) {
-                    break;
-                }
+            let mut bounds = Vec::new();
+            if !self.check(&TokenKind::Semicolon) && !self.check_kw(Keyword::Where) {
                 bounds.push(self.parse_type_bound()?);
+                while self.eat(&TokenKind::Plus) || self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::Semicolon) || self.check_kw(Keyword::Where) {
+                        break;
+                    }
+                    bounds.push(self.parse_type_bound()?);
+                }
             }
             let where_clause = self.parse_where_clause()?;
             self.expect(&TokenKind::Semicolon, "';' after trait alias")?;
@@ -1603,7 +1664,7 @@ impl<'a> Parser<'a> {
                     name: cname,
                     default,
                 });
-            } else if let Some(mc) = self.try_parse_item_macro_call()? {
+            } else if let Some(mc) = self.try_parse_item_macro_call(true)? {
                 items.push(TraitItem::MacroCall { attrs, call: mc });
             } else {
                 let vis = self.parse_visibility()?;
@@ -1677,7 +1738,7 @@ impl<'a> Parser<'a> {
             } else if let TokenKind::RustBlock(raw) = self.peek_kind().clone() {
                 self.bump();
                 items.push(ImplItem::RawRust(raw));
-            } else if let Some(mc) = self.try_parse_item_macro_call()? {
+            } else if let Some(mc) = self.try_parse_item_macro_call(false)? {
                 items.push(ImplItem::MacroCall { attrs, call: mc });
             } else {
                 let vis = self.parse_visibility()?;
@@ -2517,7 +2578,9 @@ impl<'a> Parser<'a> {
     fn parse_block(&mut self) -> Result<Block> {
         self.expect(&TokenKind::LBrace, "'{'")?;
         let prev_guard = self.in_match_guard;
+        let prev_ternary = self.in_ternary_then;
         self.in_match_guard = false;
+        self.in_ternary_then = false;
         let res = (|| {
             let (inner_docs, inner_attrs) = self.collect_inner_meta()?;
             let mut stmts = Vec::new();
@@ -2532,6 +2595,7 @@ impl<'a> Parser<'a> {
             })
         })();
         self.in_match_guard = prev_guard;
+        self.in_ternary_then = prev_ternary;
         res
     }
 
@@ -2942,9 +3006,10 @@ impl<'a> Parser<'a> {
                 | Pattern::Slice(_)
                 | Pattern::Struct { .. }
                 | Pattern::TupleStruct { .. } => true,
-                Pattern::DerefPat { .. } | Pattern::BorrowRef { .. } | Pattern::Paren(_) => {
-                    has_types
-                }
+                Pattern::DerefPat { .. }
+                | Pattern::BorrowRef { .. }
+                | Pattern::Paren(_)
+                | Pattern::Box(_) => has_types,
                 _ => false,
             };
             let explicit_ty = if allowed && self.eat(&TokenKind::Colon) {
@@ -3246,8 +3311,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_atom_pattern(&mut self) -> Result<Pattern> {
-        // Wildcard `_` or inferred-type binding `_ name`
-        if matches!(self.peek_kind(), TokenKind::Ident { name, .. } if name == "_") {
+        // Wildcard `_` or inferred-type binding `_ name` (let `_?`, `_??`, `_[N]` fall through to typed binding)
+        if matches!(self.peek_kind(), TokenKind::Ident { name, .. } if name == "_")
+            && !matches!(
+                self.peek_at(1).kind,
+                TokenKind::Question | TokenKind::QuestionQuestion | TokenKind::LBracket
+            )
+        {
             self.bump();
             if let Some(name) = self.eat_ident() {
                 return Ok(Pattern::Binding {
@@ -3319,6 +3389,28 @@ impl<'a> Parser<'a> {
                 is_mut,
                 inner: Box::new(inner),
             });
+        }
+
+        // Nightly box pattern: `box <pat>`
+        if matches!(self.peek_kind(), TokenKind::Ident { name, verbatim: false } if name == "box")
+            && !matches!(
+                self.peek_at(1).kind,
+                TokenKind::Comma
+                    | TokenKind::RParen
+                    | TokenKind::RBracket
+                    | TokenKind::RBrace
+                    | TokenKind::Pipe
+                    | TokenKind::FatArrow
+                    | TokenKind::Eq
+                    | TokenKind::Colon
+                    | TokenKind::Semicolon
+                    | TokenKind::Kw(Keyword::When | Keyword::As | Keyword::In)
+                    | TokenKind::Eof
+            )
+        {
+            self.bump();
+            let inner = self.parse_single_pattern()?;
+            return Ok(Pattern::Box(Box::new(inner)));
         }
 
         // Inline const pattern: `const(MAX - 1)`
@@ -3905,7 +3997,11 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if min_bp <= 2 && self.eat(&TokenKind::Question) {
-                let then_expr = self.parse_expr_bp(1)?;
+                let prev_ternary = self.in_ternary_then;
+                self.in_ternary_then = true;
+                let then_res = self.parse_expr_bp(1);
+                self.in_ternary_then = prev_ternary;
+                let then_expr = then_res?;
                 self.expect(&TokenKind::Colon, "':' in ternary expression")?;
                 let else_expr = self.parse_expr_bp(2)?;
                 lhs = Expr::Ternary {
@@ -4449,10 +4545,12 @@ impl<'a> Parser<'a> {
         }
 
         // Labeled loop expression `a: loop { break a 42; }` or labeled block `b: { break b 42; }`
-        if matches!(
-            (self.peek_kind(), &self.peek_at(1).kind),
-            (TokenKind::Ident { .. }, TokenKind::Colon)
-        ) {
+        if !self.in_ternary_then
+            && matches!(
+                (self.peek_kind(), &self.peek_at(1).kind),
+                (TokenKind::Ident { .. }, TokenKind::Colon)
+            )
+        {
             if matches!(self.peek_at(2).kind, TokenKind::LBrace) {
                 let label = self.eat_ident().unwrap();
                 self.bump(); // ':'
@@ -4970,7 +5068,9 @@ fn pattern_has_explicit_type(pat: &Pattern) -> bool {
     match pat {
         Pattern::Binding { ty, .. } => ty.is_some(),
         Pattern::BorrowRef { .. } | Pattern::BindAt { .. } => true,
-        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) => pattern_has_explicit_type(inner),
+        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) | Pattern::Box(inner) => {
+            pattern_has_explicit_type(inner)
+        }
         Pattern::Tuple(ps) | Pattern::TupleStruct { fields: ps, .. } | Pattern::Or(ps) => {
             ps.iter().any(pattern_has_explicit_type)
         }
@@ -4991,7 +5091,7 @@ fn pattern_has_explicit_type(pat: &Pattern) -> bool {
 fn pattern_has_binding_modifier(pat: &Pattern) -> bool {
     match pat {
         Pattern::Binding { is_mut, .. } => *is_mut,
-        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) => {
+        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) | Pattern::Box(inner) => {
             pattern_has_binding_modifier(inner)
         }
         Pattern::Tuple(ps) | Pattern::TupleStruct { fields: ps, .. } | Pattern::Or(ps) => {

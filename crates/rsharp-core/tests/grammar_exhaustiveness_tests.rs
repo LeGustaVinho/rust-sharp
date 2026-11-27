@@ -392,7 +392,7 @@ void test_matrix(Option<int> opt, bool c1, bool c2, read int a, read int b, int 
     for invalid in [
         "extern \"C\" { type 123; }",
         "extern \"C\" { type Opaque }",
-        "trait BadAlias = ;",
+        "trait BadAlias = 123;",
         "trait BadAlias = Clone",
         "trait BadAlias = Clone + 123;",
         "trait BadAlias = Clone where 123;",
@@ -848,4 +848,315 @@ void direct_checks(
     let (deep150_rsh, deep150_rs) = convert_no_ra(&make_deep(150));
     assert_eq!(count_raw_rust_blocks(&deep150_rsh), 0);
     assert!(deep150_rs.contains(".set_default(\"k149\", 149))?"));
+}
+
+#[test]
+fn github_60_repos_all_8_root_causes_zero_fallback_and_discovery() {
+    // 1-8. All 8 real-Rust root causes from the 60-repo GitHub benchmark with 0 `rust {}` fallbacks.
+    let rust_all_8 = r#"
+#![feature(box_patterns, trait_alias)]
+
+pub trait MaybeSerde =;
+pub trait MaybeWhere<T> = where T: Clone;
+
+#[cfg(feature = "ssz")]
+use {
+    crate::chain_spec::{BYTES_PER_LOGS_BLOOM, MAX_EXTRA_DATA_BYTES},
+    ::ssz::types::{List, Vector},
+};
+
+pub fn brace_macro_followed_by_call_stmt(waited: i32) {
+    tokio::select! {
+        _ = async {} => {}
+    }
+    drop(waited);
+    tokio::select! {
+        _ = async {} => {}
+    }
+    drop(std::hint::black_box(waited));
+}
+
+pub fn float_dot_ranges(x: f64, y: f32) -> i32 {
+    let a = !(0. ..=1.).contains(&x);
+    let b = (0. ..1.).contains(&x);
+    let c = (0. ..).contains(&y);
+    let d = match x {
+        0. ..=1. => 1,
+        _ => 0,
+    };
+    if a && b && c { d } else { 0 }
+}
+
+pub fn ternary_block_branch_guard(cond: bool, fresh_connection: i32) -> i32 {
+    let v1 = if cond {
+        fresh_connection
+    } else {
+        loop {
+            break fresh_connection;
+        }
+    };
+    let v2 = if cond {
+        loop {
+            break 1;
+        }
+    } else {
+        2
+    };
+    v1 + v2
+}
+
+pub enum Inner {
+    Disabled { code: i32 },
+    Pair(i32, i32),
+}
+
+pub enum Wrap {
+    Api(Box<Inner>, i32),
+    None,
+}
+
+pub fn nightly_box_patterns(w: Wrap) -> i32 {
+    match w {
+        Wrap::Api(box Inner::Disabled { code, .. }, _) => code,
+        Wrap::Api(box Inner::Pair(a, b), _) => a + b,
+        Wrap::None => 0,
+    }
+}
+
+pub fn inferred_optional_closure_param<T, R>(f: impl Fn((T, Option<i32>)) -> R) {
+    let _ = f;
+}
+
+pub fn call_inferred_optional_closure() {
+    inferred_optional_closure_param(|(lower, upper): (i32, Option<_>)| -> Option<_> {
+        upper.map(|u| lower + u)
+    });
+}
+
+pub(super) fn simd_cpu() -> Option<cfg_select! { all() => { () } }> {
+    None
+}
+
+pub fn single_tail_block_receiver(tmp_dir: i32, pair: (i32, i32)) -> i32 {
+    let f: Box<dyn FnOnce()> = Box::new({ move || { drop(tmp_dir); } }.into());
+    f();
+    let x = { pair.0 }.abs();
+    let y = { 1 + 2 }.abs();
+    x + y
+}
+
+pub struct SearchRank {
+    pub score: i32,
+    pub exact: bool,
+}
+
+pub fn for_loop_scope_no_leak<J: IntoIterator<Item = (i32, Vec<String>, SearchRank)>>(
+    candidates: Vec<(i32, SearchRank)>,
+    phrase_jobs: J,
+) -> Vec<SearchRank> {
+    let mut out = Vec::new();
+    for (mut _candidate, priority) in candidates {
+        let _ = priority;
+    }
+    for (_id, _paths, priority) in phrase_jobs {
+        out.push(SearchRank { score: 1, ..priority });
+    }
+    let _u = for _x in 0..1 {};
+    out
+}
+"#;
+    let (rsh, rs) = convert_no_ra(rust_all_8);
+    assert_eq!(count_raw_rust_blocks(&rsh), 0, "got:\n{rsh}");
+    assert!(rsh.contains("0. ..=1."), "got:\n{rsh}");
+    assert!(rs.contains("0. ..=1."), "got:\n{rs}");
+    assert!(rsh.contains("0. ..1."), "got:\n{rsh}");
+    assert!(rs.contains("0. ..1."), "got:\n{rs}");
+    assert!(rsh.contains("box Inner.Disabled"), "got:\n{rsh}");
+    assert!(rs.contains("box Inner::Disabled"), "got:\n{rs}");
+    assert!(
+        rsh.contains("new SearchRank { score = 1, ..priority }"),
+        "for-loop binding leaked into struct update:\n{rsh}"
+    );
+    assert!(
+        rs.contains("pub trait MaybeSerde = ;") || rs.contains("pub trait MaybeSerde =;"),
+        "got:\n{rs}"
+    );
+
+    // Direct R# checks for parser/codegen branches of all new grammar features:
+    // - ternary `cond ? ident : loop { ... }` and nested labeled loop inside block
+    // - `box` patterns in `let` destructuring (typed + mut), `match`, and contextual `box` ident
+    // - `_?`, `_??`, `_[4]` in lambda tuple params
+    // - brace macro return types with `?`, `??`, `[N]`, generic `<T>()`, plus non-return-type
+    //   brace macros followed by `[Attr]`, `[Attr(a, b)]`, `Vec<read int>`, `Vec<T> f()`
+    let direct_rsh = r#"
+my_item_macro! { foo }
+
+[Derive(Debug)]
+struct AfterAttr {}
+
+my_item_macro! { bar }
+
+[Allow(dead_code, unused)]
+int after_multi_arg_attr() { return 0; }
+
+my_item_macro! { baz }
+
+Vec<read int> after_ref_generic_fn() { return Vec.new(); }
+
+my_item_macro! { qux }
+
+Vec<T> after_type_param_fn<T>() { return Vec.new(); }
+
+cfg_select! { a => b }? macro_opt_ret() { return None; }
+cfg_select! { a => b }?? macro_res_ret() { return Ok(()); }
+cfg_select! { a => b }[4] macro_arr_ret() { return [0; 4]; }
+cfg_select! { a => b } macro_gen_ret<T>() {}
+cfg_select! { a => b } macro_where_ret<T>() where T : Clone {}
+
+trait MacroRetTrait {
+    cfg_select! { a => b } macro_trait_ret();
+}
+
+void direct_60_checks(bool cond, int fresh_connection) {
+    var t1 = cond ? fresh_connection : loop { break fresh_connection; };
+    var t2 = cond ? { a: loop { break a 1; } } : 2;
+    box int bx = boxed_a;
+    (box mut bm, bn) = boxed_pair;
+    var bm_match = match (x) {
+        Some(box) => box,
+        None => 0,
+    };
+    var lam = ((Input lower, _? upper, _?? res, _[4] arr)) => (lower, upper, res, arr);
+    _ = (t1, t2, bx, bm, bn, bm_match, lam);
+}
+"#;
+    let direct_rs = transpile_to_rust(
+        direct_rsh,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("direct R# 60-repo constructs should transpile cleanly");
+    assert!(
+        direct_rs.contains("let box bx = boxed_a;"),
+        "got:\n{direct_rs}"
+    );
+    assert!(
+        direct_rs.contains("let (box mut bm, bn) = boxed_pair;"),
+        "got:\n{direct_rs}"
+    );
+    assert!(direct_rs.contains("Option<_>"), "got:\n{direct_rs}");
+    assert!(direct_rs.contains("Option<Option<_>>"), "got:\n{direct_rs}");
+    assert!(direct_rs.contains("[_; 4]"), "got:\n{direct_rs}");
+
+    // Exercise parser error/backtrack branches for `box`, ternary, and `[` after item macro.
+    for invalid in [
+        "void f() { match (x) { box (1 +) => 0 } }",
+        "void f() { var x = c ? (1 +) : 2; }",
+        "my_item_macro! { u } [1 +]",
+        "my_item_macro! { m } [foo : bar]",
+    ] {
+        assert!(
+            parser::parse_file(invalid).is_err(),
+            "should fail: {invalid}"
+        );
+    }
+
+    // Exercise `for_loop_scope_no_leak` with non-empty `TypeHintMap` as well.
+    let mut hints = rsharp_core::ra_oracle::TypeHintMap::default();
+    hints.insert(1, 1, "i32".to_string());
+    let hinted_rsh = rsharp_core::convert_from_rust_with_hints(
+        "fn f(xs: Vec<i32>) { for x in xs { let _ = x; } }",
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+        &hints,
+        false,
+    )
+    .expect("hinted for-loop should convert cleanly");
+    assert!(
+        hinted_rsh.contains("foreach (x in xs)"),
+        "got:\n{hinted_rsh}"
+    );
+
+    // Non-module discovery exclusion: `include!("...")` fragments, nested `Cargo.toml`/`book.toml`,
+    // and nested `tests/.../src/` fixture directories.
+    let base = std::env::temp_dir().join(format!("rsharp_disc60_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("ws");
+    std::fs::create_dir_all(proj.join("src").join("nested_pkg")).unwrap();
+    std::fs::create_dir_all(proj.join("src").join("nested_book")).unwrap();
+    std::fs::create_dir_all(
+        proj.join("tests")
+            .join("testsuite")
+            .join("includes")
+            .join("all_includes")
+            .join("src"),
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("Cargo.toml"),
+        "[package]\nname = \"ws\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("lib.rs"),
+        "pub const PALETTE: [u8; 3] = include!(\"palette_literals.rs\");\n\
+         pub const TEXT: &str = include!(\"notes.txt\");\n\
+         pub const DYN: () = include!(concat!(\"a\", \".rs\"));\n\
+         pub mod ok_mod;\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("src").join("ok_mod.rs"), "pub fn ok() {}\n").unwrap();
+    std::fs::write(proj.join("src").join("palette_literals.rs"), "[1, 2, 3]\n").unwrap();
+    std::fs::write(
+        proj.join("src").join("nested_pkg").join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("nested_pkg").join("fixture.rs"),
+        "not valid rust {{",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("nested_book").join("book.toml"),
+        "[book]\ntitle = \"fixture\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("nested_book").join("book_ex.rs"),
+        "not valid rust {{",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests").join("testsuite").join("main.rs"),
+        "fn main() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("includes")
+            .join("all_includes")
+            .join("src")
+            .join("example.rs"),
+        "fn ANCHOR: broken {{\n",
+    )
+    .unwrap();
+
+    let discovered = discover_cargo_rs_files(&proj).expect("should discover valid crate files");
+    assert_eq!(discovered.len(), 3, "got: {discovered:?}");
+    assert!(discovered.iter().any(|p| p.ends_with("lib.rs")));
+    assert!(discovered.iter().any(|p| p.ends_with("ok_mod.rs")));
+    assert!(discovered.iter().any(|p| p.ends_with("main.rs")));
+    assert!(
+        !discovered
+            .iter()
+            .any(|p| p.ends_with("palette_literals.rs"))
+    );
+    assert!(!discovered.iter().any(|p| p.ends_with("fixture.rs")));
+    assert!(!discovered.iter().any(|p| p.ends_with("book_ex.rs")));
+    assert!(!discovered.iter().any(|p| p.ends_with("example.rs")));
+    let _ = std::fs::remove_dir_all(&base);
 }

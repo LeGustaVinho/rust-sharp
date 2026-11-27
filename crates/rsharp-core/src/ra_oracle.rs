@@ -757,7 +757,11 @@ pub fn parse_cargo_metadata_rs_files(
                 Some("lib.rs" | "main.rs" | "mod.rs")
             );
             if is_crate_root && let Some(root_dir) = canon.parent() {
-                collect_crate_rs_tree(root_dir, &mut found);
+                let root_is_src = root_dir.file_name().and_then(|n| n.to_str()) == Some("src");
+                let mut crate_files = Vec::new();
+                collect_crate_rs_tree(root_dir, root_is_src, &mut crate_files);
+                filter_included_fragments(&mut crate_files);
+                found.extend(crate_files);
             } else {
                 found.insert(canon);
             }
@@ -777,20 +781,52 @@ fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
     }
 }
 
-fn collect_crate_rs_tree(dir: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
+fn collect_crate_rs_tree(dir: &Path, root_is_src: bool, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
         if entry_is_dir(&entry, &path) {
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && !name.starts_with('.')
                 && !matches!(name, "target" | "node_modules")
+                && !path.join("Cargo.toml").is_file()
+                && !path.join("book.toml").is_file()
+                && (root_is_src || name != "src")
             {
-                collect_crate_rs_tree(&path, out);
+                collect_crate_rs_tree(&path, root_is_src, out);
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let canon = std::fs::canonicalize(&path).unwrap_or(path);
-            out.insert(canon);
+            out.push(canon);
         }
+    }
+}
+
+fn filter_included_fragments(files: &mut Vec<PathBuf>) {
+    let mut excluded = HashSet::new();
+    for file in files.iter() {
+        if let Ok(content) = std::fs::read_to_string(file)
+            && content.contains("include!(")
+            && let Some(parent) = file.parent()
+        {
+            let mut rest = content.as_str();
+            while let Some(pos) = rest.find("include!(") {
+                rest = &rest[pos + "include!(".len()..];
+                let trimmed = rest.trim_start();
+                if let Some(after_q) = trimmed.strip_prefix('"')
+                    && let Some(end_q) = after_q.find('"')
+                {
+                    let rel = &after_q[..end_q];
+                    if rel.ends_with(".rs") {
+                        let cand = parent.join(rel);
+                        let canon = std::fs::canonicalize(&cand).unwrap_or(cand);
+                        excluded.insert(canon);
+                    }
+                }
+            }
+        }
+    }
+    if !excluded.is_empty() {
+        files.retain(|p| !excluded.contains(p));
     }
 }
 

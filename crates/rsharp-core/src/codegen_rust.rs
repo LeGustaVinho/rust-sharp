@@ -2098,7 +2098,7 @@ impl RustCodegen {
                     None => String::new(),
                 };
                 let op = if *inclusive { "..=" } else { ".." };
-                format!("{}{}{}", s, op, e)
+                fmt_range_parts(&s, op, &e)
             }
             Pattern::Binding { is_mut, name, .. } => {
                 let rn = fmt_rust_ident(name);
@@ -2118,6 +2118,7 @@ impl RustCodegen {
                     format!("&{}", self.fmt_pattern(inner))
                 }
             }
+            Pattern::Box(inner) => format!("box {}", self.fmt_pattern(inner)),
             Pattern::Paren(inner) => format!("({})", self.fmt_pattern(inner)),
             Pattern::BindAt {
                 ref_mode,
@@ -2436,7 +2437,7 @@ impl RustCodegen {
                     None => String::new(),
                 };
                 let op = if *inclusive { "..=" } else { ".." };
-                format!("{}{}{}", s, op, e)
+                fmt_range_parts(&s, op, &e)
             }
             Expr::Call {
                 callee,
@@ -3225,6 +3226,14 @@ fn format_using_tree_inner(tree: &UsingTree, in_std: bool, parent_mod: Option<&s
     }
 }
 
+fn fmt_range_parts(start: &str, op: &str, end: &str) -> String {
+    if start.ends_with('.') {
+        format!("{} {}{}", start, op, end)
+    } else {
+        format!("{}{}{}", start, op, end)
+    }
+}
+
 fn infer_param_pattern_type(pat: &Pattern) -> Option<Type> {
     match pat {
         Pattern::Binding { ty: Some(t), .. } => Some(t.clone()),
@@ -3380,7 +3389,7 @@ fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<(String, Option<Type>)>
             };
             out.push((name.clone(), ref_ty));
         }
-        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) => {
+        Pattern::DerefPat { inner, .. } | Pattern::Paren(inner) | Pattern::Box(inner) => {
             collect_pattern_bindings(inner, out)
         }
         Pattern::BindAt {
