@@ -760,18 +760,15 @@ pub fn parse_cargo_metadata_rs_files(
                 let root_is_src = root_dir.file_name().and_then(|n| n.to_str()) == Some("src");
                 let mut crate_files = Vec::new();
                 collect_crate_rs_tree(root_dir, root_is_src, &mut crate_files);
-                filter_included_fragments(&mut crate_files);
                 found.extend(crate_files);
             } else {
                 found.insert(canon);
             }
         }
     }
-    if found.is_empty() {
-        None
-    } else {
-        Some(found.into_iter().collect())
-    }
+    let mut files: Vec<PathBuf> = found.into_iter().collect();
+    filter_included_fragments(&mut files);
+    if files.is_empty() { None } else { Some(files) }
 }
 
 fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
@@ -779,6 +776,40 @@ fn entry_is_dir(entry: &std::fs::DirEntry, path: &Path) -> bool {
         Ok(ty) if !ty.is_symlink() => ty.is_dir(),
         _ => path.is_dir(),
     }
+}
+
+fn is_template_rs_file(path: &Path) -> bool {
+    const TEMPLATE_EXTS: &[&str] = &["tera", "hbs", "jinja", "j2", "tmpl"];
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|stem| Path::new(stem).extension().and_then(|e| e.to_str()))
+        .is_some_and(|ext| TEMPLATE_EXTS.contains(&ext))
+}
+
+fn is_text_symlink_stub(path: &Path) -> bool {
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() <= 512
+        && let Ok(raw) = std::fs::read_to_string(path)
+    {
+        let line = raw.trim();
+        return !line.is_empty()
+            && !line.chars().any(char::is_whitespace)
+            && line.ends_with(".rs")
+            && path.parent().is_some_and(|p| p.join(line).is_file());
+    }
+    false
+}
+
+fn is_expr_fragment_file(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| {
+            raw.lines()
+                .map(str::trim)
+                .find(|t| !t.is_empty() && !t.starts_with("//"))
+                .map(|t| t.starts_with('[') || t.starts_with("match "))
+        })
+        .unwrap_or(false)
 }
 
 fn collect_crate_rs_tree(dir: &Path, root_is_src: bool, out: &mut Vec<PathBuf>) {
@@ -790,11 +821,17 @@ fn collect_crate_rs_tree(dir: &Path, root_is_src: bool, out: &mut Vec<PathBuf>) 
                 && !matches!(name, "target" | "node_modules")
                 && !path.join("Cargo.toml").is_file()
                 && !path.join("book.toml").is_file()
-                && (root_is_src || name != "src")
+                && (root_is_src
+                    || path.join("mod.rs").is_file()
+                    || dir.join(format!("{name}.rs")).is_file())
             {
                 collect_crate_rs_tree(&path, root_is_src, out);
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && !is_template_rs_file(&path)
+            && !is_text_symlink_stub(&path)
+            && !is_expr_fragment_file(&path)
+        {
             let canon = std::fs::canonicalize(&path).unwrap_or(path);
             out.push(canon);
         }
@@ -802,32 +839,70 @@ fn collect_crate_rs_tree(dir: &Path, root_is_src: bool, out: &mut Vec<PathBuf>) 
 }
 
 fn filter_included_fragments(files: &mut Vec<PathBuf>) {
+    const ROOT_NAMES: &[&str] = &["lib.rs", "main.rs", "mod.rs"];
     let mut excluded = HashSet::new();
+    let mut suffix_excludes = Vec::new();
     for file in files.iter() {
         if let Ok(content) = std::fs::read_to_string(file)
-            && content.contains("include!(")
+            && (content.contains("include!(") || content.contains("include_str!("))
             && let Some(parent) = file.parent()
         {
-            let mut rest = content.as_str();
-            while let Some(pos) = rest.find("include!(") {
-                rest = &rest[pos + "include!(".len()..];
-                let trimmed = rest.trim_start();
-                if let Some(after_q) = trimmed.strip_prefix('"')
-                    && let Some(end_q) = after_q.find('"')
-                {
-                    let rel = &after_q[..end_q];
-                    if rel.ends_with(".rs") {
-                        let cand = parent.join(rel);
-                        let canon = std::fs::canonicalize(&cand).unwrap_or(cand);
-                        excluded.insert(canon);
+            for macro_pfx in ["include!(", "include_str!("] {
+                let mut rest = content.as_str();
+                while let Some(pos) = rest.find(macro_pfx) {
+                    rest = &rest[pos + macro_pfx.len()..];
+                    let end = find_balanced_paren_end(rest);
+                    let args = &rest[..end];
+                    let mut scan = args;
+                    while let Some(q1) = scan.find('"') {
+                        let after = &scan[q1 + 1..];
+                        let Some(q2) = after.find('"') else {
+                            break;
+                        };
+                        let lit = &after[..q2];
+                        scan = &after[q2 + 1..];
+                        if lit.ends_with(".rs") {
+                            let rel = lit.trim_start_matches(['/', '\\']);
+                            let is_root_name = Path::new(rel)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|fname| ROOT_NAMES.contains(&fname));
+                            if !is_root_name {
+                                let cand = parent.join(rel);
+                                if !lit.starts_with(['/', '\\']) && cand.is_file() {
+                                    excluded.insert(std::fs::canonicalize(&cand).unwrap_or(cand));
+                                } else if rel.contains('/') || rel.contains('\\') {
+                                    suffix_excludes.push(PathBuf::from(rel));
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    if !excluded.is_empty() {
-        files.retain(|p| !excluded.contains(p));
+    if !excluded.is_empty() || !suffix_excludes.is_empty() {
+        files.retain(|p| {
+            !excluded.contains(p) && !suffix_excludes.iter().any(|sfx| p.ends_with(sfx))
+        });
     }
+}
+
+fn find_balanced_paren_end(s: &str) -> usize {
+    let mut depth = 1usize;
+    for (idx, b) in s.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return idx;
+                }
+            }
+            _ => {}
+        }
+    }
+    s.len()
 }
 
 fn collect_workspace_cfg_gated_names(

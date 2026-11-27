@@ -1160,3 +1160,330 @@ void direct_60_checks(bool cond, int fresh_connection) {
     assert!(!discovered.iter().any(|p| p.ends_with("example.rs")));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn github_60_repos_wave2_all_6_root_causes_hang_and_discovery() {
+    // 1. 60-deep nested generic type (wgpu send_sync_recursion.rs O(2^N) hang regression)
+    //    Runs on a 16 MB stack matching CLI/parallel workers (must finish in linear O(N) time, 0 rust{}).
+    let mut deep_box = String::from("T");
+    for _ in 0..60 {
+        deep_box = format!("Box<{deep_box}>");
+    }
+    let deep_tower = format!("struct Tower<T: ?Sized>({deep_box});\n");
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let (tower_rsh, tower_rs) = convert_no_ra(&deep_tower);
+            assert_eq!(count_raw_rust_blocks(&tower_rsh), 0);
+            assert!(tower_rs.contains("struct Tower<T: ?Sized>(Box<Box<Box<"));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+
+    // 2-6. Remaining 5 Wave-2 real-Rust root causes + 25-deep nested generics directly on default stack.
+    let mut nested25 = String::from("T");
+    for _ in 0..25 {
+        nested25 = format!("Box<{nested25}>");
+    }
+    let rust_wave2 = format!(
+        r#"
+struct Tower25<T: ?Sized>({nested25});
+
+#[windows_interface::interface("372E1D3B-38D3-42E4-A15B-8AB2B178F513")]
+pub unsafe trait IApplicationView: IUnknown {{
+    pub unsafe fn get_iids(&self, count: *mut u32) -> i32;
+    pub unsafe fn set_focus(&self) -> i32;
+}}
+
+#[enum_trait_object(
+    #[expect(clippy::enum_variant_names)]
+    #[derive(Clone, Debug)]
+    pub enum Object<'gc> {{
+        A(A<'gc>),
+        B(B<'gc>),
+    }}
+)]
+pub trait TObject<'gc> {{
+    fn id(&self) -> i32;
+}}
+
+#[my_lifetime_attr(Pair<'a, 'b>)]
+#[my_char_attr('a', '\n')]
+pub fn double_ref_and_const_array_and_closure_postfix(
+    layers: &[&'static str],
+    mut_refs: &[&mut i32],
+    items: Vec<Option<i32>>,
+) -> Vec<*const u8> {{
+    const USIZE_SIZE: usize = 8;
+    let mut data = [0i32; {{ 2 * USIZE_SIZE }}];
+    let _mat: [[u8; {{ 2 * USIZE_SIZE }}]; {{ 1 + 1 }}] = [[0; {{ 2 * USIZE_SIZE }}]; {{ 1 + 1 }}];
+    let _arr_lit = [data.len()];
+    data[0] = 1;
+    let _kept: Vec<_> = items
+        .into_iter()
+        .filter(move |v| {{
+            let x = v;
+            x.map(|d| d > 0)
+        }}.unwrap_or(false))
+        .collect();
+    let _mut_sum: i32 = mut_refs.iter().map(|&s: &&mut i32| *s).sum();
+    layers.iter().map(|&s: &&'static _| {{ s.as_ptr() }}).collect()
+}}
+"#
+    );
+    let (rsh, rs) = convert_no_ra(&rust_wave2);
+    assert_eq!(count_raw_rust_blocks(&rsh), 0, "got:\n{rsh}");
+    assert!(
+        rs.contains("pub unsafe fn get_iids(&self, count: *mut u32) -> i32;"),
+        "got:\n{rs}"
+    );
+    assert!(rs.contains("enum_trait_object("), "got:\n{rs}");
+    assert!(rs.contains("my_lifetime_attr("), "got:\n{rs}");
+    assert!(rs.contains("&&'static _"), "got:\n{rs}");
+    assert!(rs.contains("&&mut i32"), "got:\n{rs}");
+    assert!(rs.contains(".unwrap_or(false)"), "got:\n{rs}");
+
+    // Exercise TraitItem::Verbatim non-fn fallback (`pub const` inside trait) so `from_rust` keeps 100% coverage.
+    let trait_const_rsh = rsharp_core::convert_from_rust_with_hints(
+        "trait BadConst { pub const X: i32; }",
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+        &rsharp_core::ra_oracle::TypeHintMap::default(),
+        false,
+    )
+    .expect("non-fn TraitItem::Verbatim should emit rust{} fallback");
+    assert!(trait_const_rsh.contains("rust {"));
+
+    // Direct R# checks: `deref read<static> _ s`, `deref read ptr<int> p`, `deref read int v`,
+    // and single-pass assoc type / assoc bound generics with GAT args + parenthesized trait args.
+    let direct_rsh = r#"
+void direct_wave2<I>(I it) where I : Iterator<Item = int> + Lending<Item<static> : Copy> {
+    var f1 = (deref read<static> _ s) => s;
+    var f2 = (deref read ptr<int> p) => p;
+    var f3 = (deref read int v) => v;
+    _ = (it, f1, f2, f3);
+}
+"#;
+    let direct_rs = transpile_to_rust(
+        direct_rsh,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("direct Wave-2 R# constructs should transpile cleanly");
+    assert!(
+        direct_rs.contains("let _: &&'static _ = &s;"),
+        "got:\n{direct_rs}"
+    );
+    assert!(
+        direct_rs.contains("let _: &*const i32 = &p;"),
+        "got:\n{direct_rs}"
+    );
+    assert!(direct_rs.contains("let _: &i32 = &v;"), "got:\n{direct_rs}");
+    // Cover error path when a lambda block has a broken postfix continuation.
+    assert!(parser::parse_file("void f() { var c = (v) => { return 1; }. ; }").is_err());
+
+    // Discovery hygiene with ZERO false positives on real `tests/*/in/` or `tests/*/out/` modules:
+    // - `tests/testsuite/in/mod.rs` and `tests/testsuite/out.rs` + `tests/testsuite/out/helper.rs` MUST be discovered!
+    // - `tests/testsuite/cargo_add/script_bare/in/cargo-test-fixture.rs` (no `in/mod.rs`, no `in.rs`) MUST be skipped!
+    // - `src/language_type.tera.rs` (template) MUST be skipped!
+    // - `src/proxy_link.rs` (1-line Windows text symlink stub pointing to `ok_mod.rs`) MUST be skipped!
+    // - `src/minicore.rs` (`include_str!("minicore.rs")`) and `src/process_table.rs` (`include!(concat!(...))`) MUST be skipped!
+    let base = std::env::temp_dir().join(format!("rsharp_disc60w2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("ws");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::create_dir_all(proj.join("tests").join("testsuite").join("in")).unwrap();
+    std::fs::create_dir_all(proj.join("tests").join("testsuite").join("out")).unwrap();
+    std::fs::create_dir_all(
+        proj.join("tests")
+            .join("testsuite")
+            .join("cargo_add")
+            .join("script_bare")
+            .join("in"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(
+        proj.join("tests")
+            .join("testsuite")
+            .join("script")
+            .join("rustc_fixtures"),
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("Cargo.toml"),
+        "[package]\nname = \"ws\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("lib.rs"),
+        "pub mod ok_mod;\n\
+         pub const CORE: &str = include_str!(\"minicore.rs\");\n\
+         pub fn tbl() { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/process_table.rs\")); }\n\
+         pub fn out_lib() { include!(concat!(env!(\"OUT_DIR\"), \"/lib.rs\")); }\n\
+         pub fn out_win() { include!(concat!(env!(\"OUT_DIR\"), \"\\\\sub\\\\gen_win.rs\")); }\n\
+         pub fn missing_inc() { include!(\"missing_nonexistent.rs\"); }\n\
+         // edge cases for balanced paren / unclosed quote scanner:\n\
+         // include!(\"unterminated\n\
+         // include!(concat!(\"x.rs\"\n",
+    )
+    .unwrap();
+    // >512 bytes so `is_text_symlink_stub` exercises its `meta.len() <= 512` false branch too.
+    std::fs::write(
+        proj.join("src").join("ok_mod.rs"),
+        format!("// {}\n\npub fn ok() {{}}\n", "x".repeat(600)),
+    )
+    .unwrap();
+    // Comment-only valid `.rs` file exercises the fallthrough `false` return in `is_expr_fragment_file`.
+    std::fs::write(proj.join("src").join("empty_mod.rs"), "// empty module\n").unwrap();
+    std::fs::write(
+        proj.join("src").join("minicore.rs"),
+        "//- minicore: broken {{\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("process_table.rs"),
+        "pub fn gen_included_via_concat() {}\n",
+    )
+    .unwrap();
+    // Orphan match-expression fragment (like ZLUDA's `process_table_windows.rs`).
+    std::fs::write(
+        proj.join("src").join("orphan_match_fragment.rs"),
+        "// generated fragment\n\nmatch (name, flag) { _ => 0 }\n",
+    )
+    .unwrap();
+    // Orphan array-literal fragment.
+    std::fs::write(
+        proj.join("src").join("orphan_array_fragment.rs"),
+        "[1, 2, 3]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("language_type.tera.rs"),
+        "{% for k in langs %}{{k}}{% endfor %}\n",
+    )
+    .unwrap();
+    // 1-line Windows git symlink text stub pointing to an existing sibling `.rs` file:
+    std::fs::write(proj.join("src").join("proxy_link.rs"), "ok_mod.rs").unwrap();
+
+    // Real test modules under `tests/testsuite/in/` (via `mod.rs`) and `tests/testsuite/out/` (via `out.rs`):
+    std::fs::write(
+        proj.join("tests").join("testsuite").join("main.rs"),
+        "mod r#in;\nmod out;\nmod cargo_add;\nfn main() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("in")
+            .join("mod.rs"),
+        "pub fn real_in_test() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests").join("testsuite").join("out.rs"),
+        "pub mod helper;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("out")
+            .join("helper.rs"),
+        "pub fn real_out_helper() {}\n",
+    )
+    .unwrap();
+    // Cargo-style fixture dirs under `tests/testsuite/cargo_add/`: `cargo_add/mod.rs` IS a real module,
+    // `script_bare/mod.rs` IS a real module, while `script_bare/in/` has neither `mod.rs` nor `in.rs`!
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("cargo_add")
+            .join("mod.rs"),
+        "mod script_bare;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("cargo_add")
+            .join("script_bare")
+            .join("mod.rs"),
+        "pub fn real_test() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("cargo_add")
+            .join("script_bare")
+            .join("in")
+            .join("cargo-test-fixture.rs"),
+        "---\n[package]\n---\nfn main() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests")
+            .join("testsuite")
+            .join("script")
+            .join("rustc_fixtures")
+            .join("multifrontmatter.rs"),
+        "---\n---\n---\n",
+    )
+    .unwrap();
+
+    let discovered = discover_cargo_rs_files(&proj).expect("should discover valid crate files");
+    assert_eq!(discovered.len(), 9, "got: {discovered:?}");
+    assert!(discovered.iter().any(|p| p.ends_with("lib.rs")));
+    assert!(discovered.iter().any(|p| p.ends_with("ok_mod.rs")));
+    assert!(discovered.iter().any(|p| p.ends_with("empty_mod.rs")));
+    assert!(discovered.iter().any(|p| p.ends_with("main.rs")));
+    assert!(
+        discovered
+            .iter()
+            .any(|p| p.ends_with("in\\mod.rs") || p.ends_with("in/mod.rs"))
+    );
+    assert!(discovered.iter().any(|p| p.ends_with("out.rs")));
+    assert!(discovered.iter().any(|p| p.ends_with("helper.rs")));
+    assert!(
+        discovered
+            .iter()
+            .any(|p| p.ends_with("cargo_add\\mod.rs") || p.ends_with("cargo_add/mod.rs"))
+    );
+    assert!(
+        discovered
+            .iter()
+            .any(|p| p.ends_with("script_bare\\mod.rs") || p.ends_with("script_bare/mod.rs"))
+    );
+    assert!(!discovered.iter().any(|p| p.ends_with("minicore.rs")));
+    assert!(!discovered.iter().any(|p| p.ends_with("process_table.rs")));
+    assert!(
+        !discovered
+            .iter()
+            .any(|p| p.ends_with("orphan_match_fragment.rs"))
+    );
+    assert!(
+        !discovered
+            .iter()
+            .any(|p| p.ends_with("orphan_array_fragment.rs"))
+    );
+    assert!(
+        !discovered
+            .iter()
+            .any(|p| p.ends_with("language_type.tera.rs"))
+    );
+    assert!(!discovered.iter().any(|p| p.ends_with("proxy_link.rs")));
+    assert!(
+        !discovered
+            .iter()
+            .any(|p| p.ends_with("cargo-test-fixture.rs"))
+    );
+    assert!(
+        !discovered
+            .iter()
+            .any(|p| p.ends_with("multifrontmatter.rs"))
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

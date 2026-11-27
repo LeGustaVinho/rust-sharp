@@ -2509,10 +2509,6 @@ impl<'a> Parser<'a> {
                         block,
                     ))));
                 }
-            } else if matches!(self.peek_kind(), TokenKind::Ident { .. })
-                && let Some(assoc) = self.try_parse_assoc_generic_arg()?
-            {
-                args.push(assoc);
             } else if self.check(&TokenKind::Minus)
                 || matches!(
                     self.peek_kind(),
@@ -2525,52 +2521,50 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_const_generic_expr()?;
                 args.push(GenericArg::ConstExpr(expr));
             } else {
-                args.push(GenericArg::Type(self.parse_type_inner(true)?));
+                // Single-pass parse: avoids O(2^N) backtracking on deeply nested generics like Box<Box<...<T>>>.
+                let mut ty = self.parse_type_inner(true)?;
+                if (self.check(&TokenKind::Eq) || self.check(&TokenKind::Colon))
+                    && let Type::Path(ref mut tp) = ty
+                    && !tp.global
+                    && tp.segments.len() == 1
+                    && !matches!(tp.segments[0].args, TypePathArgs::Parenthesized { .. })
+                {
+                    let seg = tp.segments.pop().unwrap();
+                    let generics = match seg.args {
+                        TypePathArgs::Angle(g) => g,
+                        _ => Vec::new(),
+                    };
+                    if self.eat(&TokenKind::Eq) {
+                        let rhs = self.parse_type_inner(true)?;
+                        args.push(GenericArg::AssocBinding {
+                            name: seg.name,
+                            generics,
+                            ty: rhs,
+                        });
+                    } else {
+                        self.bump(); // ':'
+                        let mut bounds = vec![self.parse_type_bound()?];
+                        while self.eat(&TokenKind::Plus) {
+                            if !self.starts_type_bound() {
+                                break;
+                            }
+                            bounds.push(self.parse_type_bound()?);
+                        }
+                        args.push(GenericArg::AssocBound {
+                            name: seg.name,
+                            generics,
+                            bounds,
+                        });
+                    }
+                } else {
+                    args.push(GenericArg::Type(ty));
+                }
             }
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
         }
         Ok(args)
-    }
-
-    fn try_parse_assoc_generic_arg(&mut self) -> Result<Option<GenericArg>> {
-        let save = self.checkpoint();
-        let name = self.eat_ident().unwrap();
-        let generics = if self.eat(&TokenKind::Lt) {
-            match self.parse_generic_arg_list().and_then(|g| {
-                self.expect_gt()?;
-                Ok(g)
-            }) {
-                Ok(g) => g,
-                Err(_) => {
-                    self.restore(save);
-                    return Ok(None);
-                }
-            }
-        } else {
-            Vec::new()
-        };
-        if self.eat(&TokenKind::Eq) {
-            let ty = self.parse_type_inner(true)?;
-            return Ok(Some(GenericArg::AssocBinding { name, generics, ty }));
-        }
-        if self.eat(&TokenKind::Colon) {
-            let mut bounds = vec![self.parse_type_bound()?];
-            while self.eat(&TokenKind::Plus) {
-                if !self.starts_type_bound() {
-                    break;
-                }
-                bounds.push(self.parse_type_bound()?);
-            }
-            return Ok(Some(GenericArg::AssocBound {
-                name,
-                generics,
-                bounds,
-            }));
-        }
-        self.restore(save);
-        Ok(None)
     }
 
     // ==================== BLOCKS & STATEMENTS ====================
@@ -3381,7 +3375,14 @@ impl<'a> Parser<'a> {
             let is_mut = if self.eat_kw(Keyword::Write) {
                 true
             } else {
-                self.eat_kw(Keyword::Read);
+                if self.check_kw(Keyword::Read)
+                    && !matches!(
+                        self.peek_at(1).kind,
+                        TokenKind::Lt | TokenKind::Kw(Keyword::Ptr | Keyword::Slice)
+                    )
+                {
+                    self.bump();
+                }
                 false
             };
             let inner = self.parse_single_pattern()?;
@@ -4985,7 +4986,14 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let body = if self.check(&TokenKind::LBrace) {
-            LambdaBody::Block(self.parse_block()?)
+            let bsave = self.checkpoint();
+            let block = self.parse_block()?;
+            if self.block_stmt_continues_postfix() {
+                self.restore(bsave);
+                LambdaBody::Expr(Box::new(self.parse_expr()?))
+            } else {
+                LambdaBody::Block(block)
+            }
         } else {
             LambdaBody::Expr(Box::new(self.parse_expr()?))
         };

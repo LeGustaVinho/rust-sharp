@@ -685,10 +685,13 @@ impl RustCodegen {
         for ti in &t.items {
             match ti {
                 TraitItem::Fn {
-                    docs, attrs, decl, ..
+                    docs,
+                    attrs,
+                    vis,
+                    decl,
                 } => {
                     self.emit_docs_and_attrs(docs, attrs);
-                    self.emit_fn("", decl);
+                    self.emit_fn(&format_vis(vis), decl);
                 }
                 TraitItem::AssocType {
                     docs,

@@ -1025,7 +1025,13 @@ impl<'a> RustToRSharp<'a> {
                             }
                         }
                         other => {
-                            self.line(&format!("rust {{ {} }}", other.to_token_stream()));
+                            if let TraitItem::Verbatim(ts) = other
+                                && let Ok(ff) = syn::parse2::<syn::ForeignItemFn>(ts.clone())
+                            {
+                                spacing = self.emit_foreign_fn(&ff, false);
+                            } else {
+                                self.line(&format!("rust {{ {} }}", other.to_token_stream()));
+                            }
                         }
                     }
                     self.separate(&mut previous, spacing, ti.span(), start);
@@ -1682,7 +1688,11 @@ impl<'a> RustToRSharp<'a> {
                 } else {
                     "deref "
                 };
-                (format!("{}{}", kw, inner), ok)
+                if pr.mutability.is_none() && matches!(tr.elem.as_ref(), Type::Reference(_)) {
+                    (format!("{}({})", kw, inner), ok)
+                } else {
+                    (format!("{}{}", kw, inner), ok)
+                }
             }
             (Pat::TupleStruct(pts), _) => {
                 let struct_key = pts
@@ -2707,10 +2717,10 @@ impl<'a> RustToRSharp<'a> {
                 format!("{} ptr<{}>", kw, self.fmt_type(&p.elem))
             }
             Type::Array(arr) => {
-                let mut dims = vec![self.fmt_const_expr(&arr.len)];
+                let mut dims = vec![self.child().fmt_expr(&arr.len)];
                 let mut cur = arr.elem.as_ref();
                 while let Type::Array(inner) = cur {
-                    dims.push(self.fmt_const_expr(&inner.len));
+                    dims.push(self.child().fmt_expr(&inner.len));
                     cur = inner.elem.as_ref();
                 }
                 let elem_s = self.fmt_type(cur);
@@ -3922,7 +3932,7 @@ impl<'a> RustToRSharp<'a> {
             }
             Expr::Repeat(er) => {
                 let elem_ty = self.infer_expr_type(&er.expr)?;
-                Some(format!("{}[{}]", elem_ty, self.fmt_const_expr(&er.len)))
+                Some(format!("{}[{}]", elem_ty, self.child().fmt_expr(&er.len)))
             }
             Expr::Path(ep) => {
                 if let Some(id) = ep.path.get_ident() {

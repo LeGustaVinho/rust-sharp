@@ -1196,6 +1196,13 @@ fn attr_payload_needs_raw_rust(raw: &str) -> bool {
     let Ok(tokens) = tokenize(raw) else {
         return true;
     };
+    if tokens.iter().any(|t| match &t.kind {
+        TokenKind::Hash => true,
+        TokenKind::CharLit(c) => c.chars().count() > 1 && !c.starts_with('\\'),
+        _ => false,
+    }) {
+        return true;
+    }
     tokens.windows(2).any(|w| {
         matches!(
             &w[0].kind,
