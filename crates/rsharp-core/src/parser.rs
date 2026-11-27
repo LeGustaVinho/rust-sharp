@@ -19,13 +19,8 @@ pub(crate) mod prec {
     pub const SHIFT: u8 = 12;
     pub const ADD: u8 = 13;
     pub const MUL: u8 = 14;
-    #[allow(dead_code)]
-    pub const CAST: u8 = 15;
-    #[allow(dead_code)]
     pub const UNARY: u8 = 16;
-    #[allow(dead_code)]
     pub const POSTFIX: u8 = 17;
-    #[allow(dead_code)]
     pub const ATOM: u8 = 18;
 }
 

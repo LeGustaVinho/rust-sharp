@@ -2862,7 +2862,10 @@ impl RustCodegen {
 
     fn fmt_unary_operand(&self, expr: &Expr) -> String {
         let s = self.fmt_expr(expr);
-        if matches!(expr, Expr::Range { .. }) {
+        if matches!(
+            expr,
+            Expr::Range { .. } | Expr::Assign { .. } | Expr::Lambda { .. }
+        ) {
             format!("({})", s)
         } else {
             s

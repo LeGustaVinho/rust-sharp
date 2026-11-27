@@ -12,6 +12,7 @@ use syn::{
 };
 
 use crate::error::{RSharpError, Result};
+use crate::fmt_rsharp;
 use crate::ra_oracle::TypeHintMap;
 use crate::rustc_runner::probes::TypeProbes;
 use crate::token::Keyword;
@@ -1683,16 +1684,12 @@ impl<'a> RustToRSharp<'a> {
             }
             (Pat::Reference(pr), Type::Reference(tr)) => {
                 let (inner, ok) = self.fmt_typed_pat(&pr.pat, &tr.elem);
-                let kw = if pr.mutability.is_some() {
-                    "deref write "
-                } else {
-                    "deref "
-                };
-                if pr.mutability.is_none() && matches!(tr.elem.as_ref(), Type::Reference(_)) {
-                    (format!("{}({})", kw, inner), ok)
-                } else {
-                    (format!("{}{}", kw, inner), ok)
-                }
+                let needs_parens =
+                    pr.mutability.is_none() && matches!(tr.elem.as_ref(), Type::Reference(_));
+                (
+                    fmt_rsharp::fmt_deref_pat(pr.mutability.is_some(), &inner, needs_parens),
+                    ok,
+                )
             }
             (Pat::TupleStruct(pts), _) => {
                 let struct_key = pts
@@ -2682,40 +2679,25 @@ impl<'a> RustToRSharp<'a> {
 
     fn fmt_type(&self, ty: &Type) -> String {
         match ty {
-            Type::Tuple(t) if t.elems.is_empty() => "void".to_string(),
             Type::Tuple(t) => {
                 let es: Vec<String> = t.elems.iter().map(|e| self.fmt_type(e)).collect();
-                if es.len() == 1 {
-                    format!("({},)", es[0])
-                } else {
-                    format!("({})", es.join(", "))
-                }
+                fmt_rsharp::fmt_type_tuple(&es)
             }
             Type::Never(_) => "never".to_string(),
             Type::Infer(_) => "_".to_string(),
             Type::Macro(tm) => fmt_syn_macro(&tm.mac),
             Type::Paren(p) => format!("({})", self.fmt_type(&p.elem)),
             Type::Reference(r) => {
-                let kw = if r.mutability.is_some() {
-                    "write"
-                } else {
-                    "read"
-                };
-                let life = r
-                    .lifetime
-                    .as_ref()
-                    .map(|l| format!("<{}>", escape_lifetime(l)))
-                    .unwrap_or_default();
-                format!("{}{} {}", kw, life, self.fmt_type(&r.elem))
+                let life = r.lifetime.as_ref().map(escape_lifetime);
+                fmt_rsharp::fmt_type_ref(
+                    r.mutability.is_some(),
+                    life.as_deref(),
+                    &self.fmt_type(&r.elem),
+                )
             }
             Type::Slice(s) => format!("slice<{}>", self.fmt_type(&s.elem)),
             Type::Ptr(p) => {
-                let kw = if p.mutability.is_some() {
-                    "write"
-                } else {
-                    "read"
-                };
-                format!("{} ptr<{}>", kw, self.fmt_type(&p.elem))
+                fmt_rsharp::fmt_type_ptr(p.mutability.is_some(), &self.fmt_type(&p.elem))
             }
             Type::Array(arr) => {
                 let mut dims = vec![self.child().fmt_expr(&arr.len)];
@@ -2725,11 +2707,7 @@ impl<'a> RustToRSharp<'a> {
                     cur = inner.elem.as_ref();
                 }
                 let elem_s = self.fmt_type(cur);
-                if type_needs_postfix_parens(cur) {
-                    format!("({})[{}]", elem_s, dims.join(", "))
-                } else {
-                    format!("{}[{}]", elem_s, dims.join(", "))
-                }
+                fmt_rsharp::fmt_type_array(&elem_s, type_needs_postfix_parens(cur), &dims)
             }
             Type::TraitObject(to) => {
                 let bs: Vec<String> = to.bounds.iter().map(|b| self.fmt_bound(b)).collect();
@@ -3152,11 +3130,12 @@ impl<'a> RustToRSharp<'a> {
                 format!("const({})", inner)
             }
             Pat::Reference(pr) => {
-                if pr.mutability.is_some() {
-                    format!("deref write {}", self.fmt_pat(&pr.pat, None))
-                } else {
-                    format!("deref {}", self.fmt_pat(&pr.pat, None))
-                }
+                let inner = self.fmt_pat(&pr.pat, None);
+                fmt_rsharp::fmt_deref_pat(
+                    pr.mutability.is_some(),
+                    &inner,
+                    matches!(pr.pat.as_ref(), Pat::Or(_)),
+                )
             }
             Pat::Paren(pp) => format!("({})", self.fmt_pat(&pp.pat, ty_hint)),
             Pat::Macro(pm) => fmt_syn_macro(&pm.mac),
@@ -3167,11 +3146,8 @@ impl<'a> RustToRSharp<'a> {
                     .map(|e| self.fmt_expr(e))
                     .unwrap_or_default();
                 let e = r.end.as_ref().map(|e| self.fmt_expr(e)).unwrap_or_default();
-                let op = match r.limits {
-                    syn::RangeLimits::Closed(_) => "..=",
-                    syn::RangeLimits::HalfOpen(_) => "..",
-                };
-                fmt_range_parts(&s, op, &e)
+                let inclusive = matches!(r.limits, syn::RangeLimits::Closed(_));
+                fmt_rsharp::fmt_range(&s, inclusive, &e)
             }
             Pat::Ident(pi) => {
                 let name = escape_ident(&pi.ident.to_string());
@@ -3442,11 +3418,8 @@ impl<'a> RustToRSharp<'a> {
                     .as_ref()
                     .map(|e| self.fmt_expr(e))
                     .unwrap_or_default();
-                let op = match er.limits {
-                    syn::RangeLimits::Closed(_) => "..=",
-                    syn::RangeLimits::HalfOpen(_) => "..",
-                };
-                fmt_range_parts(&s, op, &e)
+                let inclusive = matches!(er.limits, syn::RangeLimits::Closed(_));
+                fmt_rsharp::fmt_range(&s, inclusive, &e)
             }
             Expr::Struct(es) => {
                 let mut fs = Vec::new();
@@ -3783,11 +3756,7 @@ impl<'a> RustToRSharp<'a> {
 
     fn fmt_unary_operand(&mut self, expr: &Expr) -> String {
         let s = self.fmt_expr(expr);
-        if matches!(expr, Expr::Range(_)) {
-            format!("({})", s)
-        } else {
-            s
-        }
+        fmt_rsharp::fmt_unary_operand(s, emitted_expr_prec(expr))
     }
 
     fn try_fmt_inline_if(&mut self, eif: &syn::ExprIf, allow_ternary: bool) -> Option<String> {
@@ -3861,6 +3830,9 @@ impl<'a> RustToRSharp<'a> {
             Expr::Paren(ep) => self.infer_expr_type(&ep.expr),
             Expr::Cast(ec) => Some(self.fmt_type(&ec.ty)),
             Expr::Reference(er) => {
+                if matches!(er.expr.as_ref(), Expr::Closure(_)) {
+                    return None;
+                }
                 let inner = self.infer_expr_type(&er.expr)?;
                 let kw = if er.mutability.is_some() {
                     "write"
@@ -4187,7 +4159,7 @@ impl<'a> RustToRSharp<'a> {
         enum ChainStep<'a> {
             Try,
             Await,
-            Method(&'a syn::ExprMethodCall, bool),
+            Method(&'a syn::ExprMethodCall, u8, bool),
         }
         let mut steps = Vec::new();
         let mut cur = expr;
@@ -4202,8 +4174,11 @@ impl<'a> RustToRSharp<'a> {
                     cur = &ea.base;
                 }
                 Expr::MethodCall(mc) if steps.is_empty() || mc.attrs.is_empty() => {
-                    let wrap = needs_member_receiver_parens(&mc.receiver);
-                    steps.push(ChainStep::Method(mc, wrap));
+                    steps.push(ChainStep::Method(
+                        mc,
+                        emitted_expr_prec(&mc.receiver),
+                        is_member_path_requiring_parens(&mc.receiver),
+                    ));
                     cur = &mc.receiver;
                 }
                 _ => break,
@@ -4214,8 +4189,8 @@ impl<'a> RustToRSharp<'a> {
             match step {
                 ChainStep::Try => s = format!("try {}", s),
                 ChainStep::Await => s = format!("await {}", s),
-                ChainStep::Method(mc, wrap) => {
-                    let recv = if wrap { format!("({})", s) } else { s };
+                ChainStep::Method(mc, prec, force_parens) => {
+                    let recv = fmt_rsharp::fmt_receiver(s, prec, force_parens);
                     let mname = escape_ident(&mc.method.to_string());
                     let targs = match &mc.turbofish {
                         Some(tf) => {
@@ -4235,20 +4210,16 @@ impl<'a> RustToRSharp<'a> {
 
     fn fmt_member_receiver(&mut self, expr: &Expr) -> String {
         let s = self.fmt_expr(expr);
-        if needs_member_receiver_parens(expr) {
-            format!("({})", s)
-        } else {
-            s
-        }
+        fmt_rsharp::fmt_receiver(
+            s,
+            emitted_expr_prec(expr),
+            is_member_path_requiring_parens(expr),
+        )
     }
 
     fn fmt_receiver_expr(&mut self, expr: &Expr) -> String {
         let s = self.fmt_expr(expr);
-        if needs_receiver_parens(expr) {
-            format!("({})", s)
-        } else {
-            s
-        }
+        fmt_rsharp::fmt_receiver(s, emitted_expr_prec(expr), false)
     }
 
     fn fmt_for_loop_pat(&mut self, pat: &Pat, iter: &Expr) -> String {
@@ -5002,12 +4973,14 @@ fn collect_use_renamed_origs(tree: &syn::UseTree, renamed: &mut HashSet<String>)
     }
 }
 
-fn fmt_range_parts(start: &str, op: &str, end: &str) -> String {
-    if start.ends_with('.') {
-        format!("{} {}{}", start, op, end)
-    } else {
-        format!("{}{}{}", start, op, end)
-    }
+fn emitted_expr_prec(expr: &Expr) -> u8 {
+    let unwrapped = match expr {
+        Expr::Block(eb) if eb.label.is_none() => {
+            single_tail_expr(&eb.block).filter(|s| !matches!(s, Expr::Field(_)))
+        }
+        _ => None,
+    };
+    fmt_rsharp::syn_emitted_prec(expr, unwrapped)
 }
 
 fn is_block_or_control_expr(expr: &Expr) -> bool {
@@ -5025,44 +4998,21 @@ fn is_block_or_control_expr(expr: &Expr) -> bool {
     )
 }
 
-fn needs_receiver_parens(expr: &Expr) -> bool {
-    match expr {
-        Expr::Try(_)
-        | Expr::Await(_)
-        | Expr::Unary(_)
-        | Expr::Reference(_)
-        | Expr::RawAddr(_)
-        | Expr::Range(_)
-        | Expr::Assign(_)
-        | Expr::Closure(_)
-        | Expr::If(_)
-        | Expr::Return(_)
-        | Expr::Break(_) => true,
-        Expr::Block(eb) if eb.label.is_none() => {
-            single_tail_expr(&eb.block).is_some_and(|single| {
-                !matches!(single, Expr::Field(_)) && needs_receiver_parens(single)
-            })
-        }
-        _ => false,
-    }
-}
-
-fn needs_member_receiver_parens(expr: &Expr) -> bool {
-    if let Expr::Path(ep) = expr
-        && ep.qself.is_none()
-        && !ep.path.is_ident("self")
-        && (ep.path.segments.len() >= 2
-            || ep.path.segments.first().is_some_and(|seg| {
-                seg.ident
-                    .to_string()
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_uppercase)
-            }))
-    {
-        return true;
-    }
-    needs_receiver_parens(expr)
+fn is_member_path_requiring_parens(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Path(ep)
+            if ep.qself.is_none()
+                && !ep.path.is_ident("self")
+                && (ep.path.segments.len() >= 2
+                    || ep.path.segments.first().is_some_and(|seg| {
+                        seg.ident
+                            .to_string()
+                            .chars()
+                            .next()
+                            .is_some_and(char::is_uppercase)
+                    }))
+    )
 }
 
 fn expr_has_dangling_if(e: &Expr) -> bool {

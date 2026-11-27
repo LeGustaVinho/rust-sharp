@@ -483,6 +483,31 @@ void f(bool c, int x, List<int> xs)
             let rust = transpile_to_rust(extra_rsharp, transpile_opts).unwrap();
             assert!(syn::parse_file(&rust).is_ok(), "{rust}");
             assert!(parser::parse_file("void bad() { { return 1; }.; }").is_err());
+
+            // Phase 3 precedence-by-construction proofs: unary/borrow over `if let`, closures, ranges, and assignments.
+            let prec_rust = "\
+pub fn prec_checks(c: bool, o: Option<i32>, mut x: i32) {
+    let _a = &if let Some(v) = o { v } else { 0 };
+    let _b = &|| 1;
+    let _c = &(0..10);
+    let _d = &mut (x = 2);
+    let _e = &if c { 1 } else { 2 };
+    let _f = |v: &i32| match v { &(1 | 2) => 1, _ => 0 };
+}
+";
+            let prec_rsh = convert_from_rust_with_hints(prec_rust, opts, &hints, false).unwrap();
+            assert_eq!(count_raw_rust_blocks(&prec_rsh), 0);
+            assert!(
+                prec_rsh.contains("read (if (o is Some(v)) => v else => 0)"),
+                "expected parenthesized if-let under read: {prec_rsh}"
+            );
+            assert!(
+                prec_rsh.contains("read (() => 1)"),
+                "expected parenthesized closure under read: {prec_rsh}"
+            );
+            let prec_back = transpile_to_rust(&prec_rsh, transpile_opts).unwrap();
+            rustc_runner::check_rust_source(&prec_back, true)
+                .expect("Phase 3 precedence checks must compile cleanly with rustc");
         })
         .unwrap();
     handle.join().unwrap();
