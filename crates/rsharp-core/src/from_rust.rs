@@ -128,6 +128,7 @@ struct RustToRSharp<'a> {
     symbols: Rc<ModuleSymbols>,
     scopes: Vec<HashMap<String, String>>,
     in_scope_lifetimes: Vec<HashSet<String>>,
+    local_use_shadows: Vec<HashSet<String>>,
     declared_in_fn: HashSet<String>,
     rustc_probe_aborted: Rc<Cell<bool>>,
     first_err: Rc<RefCell<Option<RSharpError>>>,
@@ -169,6 +170,7 @@ impl<'a> RustToRSharp<'a> {
             }),
             scopes: vec![HashMap::new()],
             in_scope_lifetimes: Vec::new(),
+            local_use_shadows: Vec::new(),
             declared_in_fn: HashSet::new(),
             rustc_probe_aborted: Rc::new(Cell::new(false)),
             first_err: Rc::new(RefCell::new(None)),
@@ -188,6 +190,7 @@ impl<'a> RustToRSharp<'a> {
             symbols: Rc::clone(&self.symbols),
             scopes: self.scopes.clone(),
             in_scope_lifetimes: self.in_scope_lifetimes.clone(),
+            local_use_shadows: self.local_use_shadows.clone(),
             declared_in_fn: HashSet::new(),
             rustc_probe_aborted: Rc::clone(&self.rustc_probe_aborted),
             first_err: Rc::clone(&self.first_err),
@@ -283,6 +286,8 @@ impl<'a> RustToRSharp<'a> {
             )
             || contains_unimported_impl_future(&ty, &self.symbols.in_scope_traits)
             || contains_ref_to_static_dyn(&ty)
+            || (!self.local_use_shadows.is_empty()
+                && contains_shadowed_local_path(&ty, &self.local_use_shadows))
             || (!verified && (!all_unverified_paths_in_scope(&ty) || impl_trait_contains_dyn(&ty)))
         {
             return HintLookup::Unnameable;
@@ -1819,6 +1824,16 @@ impl<'a> RustToRSharp<'a> {
 
     fn emit_block_stmts(&mut self, block: &Block, tail: BlockTail) {
         self.push_scope();
+        let mut block_uses = HashSet::new();
+        for s in &block.stmts {
+            if let Stmt::Item(Item::Use(u)) = s {
+                collect_use_leaf_idents(&u.tree, false, false, &mut block_uses);
+            }
+        }
+        let pushed_uses = !block_uses.is_empty();
+        if pushed_uses {
+            self.local_use_shadows.push(block_uses);
+        }
         let len = block.stmts.len();
         let last_is_cfg_tail = !matches!(tail, BlockTail::None | BlockTail::UnitReturn)
             && block.stmts.last().is_some_and(|s| match s {
@@ -1881,6 +1896,9 @@ impl<'a> RustToRSharp<'a> {
                 spacing = BlankLines::After;
             }
             self.separate(&mut previous, spacing, stmt.span(), start);
+        }
+        if pushed_uses {
+            self.local_use_shadows.pop();
         }
         self.pop_scope();
     }
@@ -4681,6 +4699,21 @@ fn is_unsuffixed_num_lit(expr: &Expr) -> bool {
         Expr::Paren(ep) => is_unsuffixed_num_lit(&ep.expr),
         _ => false,
     }
+}
+
+fn contains_shadowed_local_path(ty: &Type, shadows: &[HashSet<String>]) -> bool {
+    any_type_node(ty, &mut |t| {
+        matches!(
+            t,
+            Type::Path(tp)
+                if tp.qself.is_none()
+                    && tp.path.leading_colon.is_none()
+                    && tp.path.segments.first().is_some_and(|seg| {
+                        let name = seg.ident.to_string();
+                        shadows.iter().any(|s| s.contains(&name))
+                    })
+        )
+    })
 }
 
 fn contains_ref_to_static_dyn(ty: &Type) -> bool {

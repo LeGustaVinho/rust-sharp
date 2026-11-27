@@ -2156,4 +2156,44 @@ pub fn check_methods(p: &Path, o: &Opts, owned_o: Opts, f: &MyFile, t: MyTimes) 
     assert!(rsh_m.contains("int fi = f.into_std();"), "{rsh_m}");
     assert!(rsh_m.contains("ulong ti = t.into_std();"), "{rsh_m}");
     rsharp_core::check_rsharp(&rsh_m).expect("sound method-call inference must pass rustc");
+
+    // Local `use` shadowing an outer struct with a trait (fixes `tokio` `mpsc/bounded.rs` E0782):
+    let src_local_shadow = "\
+mod chan {
+    pub trait Semaphore { fn is_idle(&self) -> bool; }
+}
+pub struct Semaphore;
+impl chan::Semaphore for Semaphore { fn is_idle(&self) -> bool { true } }
+pub fn check_shadow(s: &Semaphore) -> bool {
+    use chan::Semaphore;
+    let sem = s;
+    let ok = sem.is_idle();
+    ok
+}
+";
+    let mut sh_hints = TypeHintMap::default();
+    let find_sh = |needle: &str| -> (u32, u32) {
+        for (idx, line) in src_local_shadow.lines().enumerate() {
+            if let Some(pos) = line.find(needle) {
+                return ((idx + 1) as u32, (pos + needle.len()) as u32);
+            }
+        }
+        panic!("needle not found: {needle}");
+    };
+    let (l1, c1) = find_sh("let sem");
+    sh_hints.insert(l1, c1, "&Semaphore".to_string());
+    let (l2, c2) = find_sh("let ok");
+    sh_hints.insert(l2, c2, "bool".to_string());
+    let rsh_sh = convert_from_rust_with_hints(
+        src_local_shadow,
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+        &sh_hints,
+        false,
+    )
+    .expect("local use shadow conversion must succeed");
+    assert!(rsh_sh.contains("var sem = s;"), "{rsh_sh}");
+    assert!(rsh_sh.contains("bool ok = sem.is_idle();"), "{rsh_sh}");
+    rsharp_core::check_rsharp(&rsh_sh).expect("local use shadow must pass rustc");
 }
