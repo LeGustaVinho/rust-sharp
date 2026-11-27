@@ -3,6 +3,7 @@ pub mod codegen_rust;
 pub mod error;
 mod fmt_rsharp;
 pub mod from_rust;
+mod from_rust_nightly;
 pub mod lexer;
 mod module_graph;
 pub mod parallel;

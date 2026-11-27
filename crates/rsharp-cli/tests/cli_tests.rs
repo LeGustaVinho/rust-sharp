@@ -467,7 +467,7 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     .unwrap();
     std::fs::write(
         raw_proj.join("src").join("lib.rs"),
-        "type VerbatimOnly<T>;\n",
+        "macro decl_only() {}\n",
     )
     .unwrap();
     let raw_fail = run_cli(&args(&[

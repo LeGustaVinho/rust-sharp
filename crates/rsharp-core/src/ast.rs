@@ -55,7 +55,7 @@ pub enum ItemKind {
     TraitAlias(TraitAliasDecl),
     Impl(ImplDecl),
     Alias(AliasDecl),
-    ForeignType(String),
+    ForeignType(ForeignTypeDecl),
     Const(ConstDecl),
     Static(StaticDecl),
     Fn(FnDecl),
@@ -239,6 +239,7 @@ pub struct UnionDecl {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDecl {
+    pub is_const: bool,
     pub is_unsafe: bool,
     pub is_auto: bool,
     pub name: String,
@@ -292,6 +293,7 @@ pub enum TraitItem {
 pub struct ImplDecl {
     pub is_default: bool,
     pub is_unsafe: bool,
+    pub is_const: bool,
     pub is_negative: bool,
     pub generics: Vec<GenericParam>,
     pub trait_path: Option<TypePath>,
@@ -308,21 +310,36 @@ pub enum ImplItem {
         docs: Vec<String>,
         attrs: Vec<Attribute>,
         vis: Visibility,
+        is_default: bool,
         decl: FnDecl,
     },
     AssocType {
         attrs: Vec<Attribute>,
+        is_default: bool,
         name: String,
         generics: Vec<GenericParam>,
         where_clause: Option<WhereClause>,
         ty: Option<Type>,
     },
-    AssocConst(Item),
+    AssocConst {
+        docs: Vec<String>,
+        attrs: Vec<Attribute>,
+        vis: Visibility,
+        is_default: bool,
+        decl: ConstDecl,
+    },
     MacroCall {
         attrs: Vec<Attribute>,
         call: MacroCall,
     },
     RawRust(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForeignTypeDecl {
+    pub name: String,
+    pub generics: Vec<GenericParam>,
+    pub where_clause: Option<WhereClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -393,6 +410,7 @@ pub struct VariadicParam {
 pub struct FnDecl {
     pub is_const: bool,
     pub is_async: bool,
+    pub is_gen: bool,
     pub is_safe: bool,
     pub is_unsafe: bool,
     pub is_static: bool,
@@ -932,9 +950,15 @@ pub enum Expr {
         is_move: bool,
         block: Block,
     },
+    GenBlock {
+        is_async: bool,
+        is_move: bool,
+        block: Block,
+    },
     UnsafeBlock(Block),
     TryBlock(Block),
     Yield(Box<Expr>),
+    Become(Box<Expr>),
     InlineRust(String),
     MacroCall(MacroCall),
     IsPattern {

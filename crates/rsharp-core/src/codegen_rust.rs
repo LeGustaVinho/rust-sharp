@@ -192,9 +192,9 @@ impl RustCodegen {
                     self.known_paths.insert(a.name.clone());
                     self.known_types.insert(a.name.clone());
                 }
-                ItemKind::ForeignType(name) => {
-                    self.known_paths.insert(name.clone());
-                    self.known_types.insert(name.clone());
+                ItemKind::ForeignType(ft) => {
+                    self.known_paths.insert(ft.name.clone());
+                    self.known_types.insert(ft.name.clone());
                 }
                 ItemKind::ExternBlock(eb) => {
                     self.register_items(&eb.items);
@@ -422,8 +422,16 @@ impl RustCodegen {
                     target
                 ));
             }
-            ItemKind::ForeignType(name) => {
-                self.line(&format!("{}type {};", vis, fmt_rust_ident(name)));
+            ItemKind::ForeignType(ft) => {
+                let gens = self.fmt_generics(&ft.generics, true);
+                let wh = self.fmt_where(&ft.where_clause);
+                self.line(&format!(
+                    "{}type {}{}{};",
+                    vis,
+                    fmt_rust_ident(&ft.name),
+                    gens,
+                    wh
+                ));
             }
             ItemKind::Const(c) => {
                 let ty = self.fmt_type(&c.ty);
@@ -660,6 +668,7 @@ impl RustCodegen {
     }
 
     fn emit_trait(&mut self, vis: &str, t: &TraitDecl) {
+        let cst = if t.is_const { "const " } else { "" };
         let unsf = if t.is_unsafe { "unsafe " } else { "" };
         let auto_kw = if t.is_auto { "auto " } else { "" };
         let gens = self.fmt_generics(&t.generics, true);
@@ -671,8 +680,9 @@ impl RustCodegen {
         };
         let wh = self.fmt_where(&t.where_clause);
         self.line(&format!(
-            "{}{}{}trait {}{}{}{} {{",
+            "{}{}{}{}trait {}{}{}{} {{",
             vis,
+            cst,
             unsf,
             auto_kw,
             fmt_rust_ident(&t.name),
@@ -759,16 +769,18 @@ impl RustCodegen {
     fn emit_impl(&mut self, im: &ImplDecl) {
         let def = if im.is_default { "default " } else { "" };
         let unsf = if im.is_unsafe { "unsafe " } else { "" };
+        let cst = if im.is_const { "const " } else { "" };
         let neg = if im.is_negative { "!" } else { "" };
         let gens = self.fmt_generics(&im.generics, false);
         let target = self.fmt_type(&im.target_ty);
         let wh = self.fmt_where(&im.where_clause);
         let header = if let Some(tp) = &im.trait_path {
             format!(
-                "{}{}impl{} {}{} for {}{} {{",
+                "{}{}impl{} {}{}{} for {}{} {{",
                 def,
                 unsf,
                 gens,
+                cst,
                 neg,
                 self.fmt_type_path(tp),
                 target,
@@ -791,18 +803,23 @@ impl RustCodegen {
                     docs,
                     attrs,
                     vis,
+                    is_default,
                     decl,
                 } => {
                     self.emit_docs_and_attrs(docs, attrs);
-                    let fvis = if im.trait_path.is_some() {
+                    let mut fvis = if im.trait_path.is_some() {
                         String::new()
                     } else {
                         format_vis(vis)
                     };
+                    if *is_default {
+                        fvis.push_str("default ");
+                    }
                     self.emit_fn(&fvis, decl);
                 }
                 ImplItem::AssocType {
                     attrs,
+                    is_default,
                     name,
                     generics,
                     where_clause,
@@ -811,15 +828,43 @@ impl RustCodegen {
                     for a in attrs {
                         self.line(&format_attr(a));
                     }
+                    let d = if *is_default { "default " } else { "" };
                     let ag = self.fmt_generics(generics, true);
                     let t = ty
                         .as_ref()
                         .map(|t| format!(" = {}", self.fmt_type(t)))
                         .unwrap_or_default();
                     let aw = self.fmt_where(where_clause);
-                    self.line(&format!("type {}{}{}{};", fmt_rust_ident(name), ag, t, aw));
+                    self.line(&format!(
+                        "{}type {}{}{}{};",
+                        d,
+                        fmt_rust_ident(name),
+                        ag,
+                        t,
+                        aw
+                    ));
                 }
-                ImplItem::AssocConst(it) => self.emit_item(it),
+                ImplItem::AssocConst {
+                    docs,
+                    attrs,
+                    vis,
+                    is_default,
+                    decl,
+                } => {
+                    self.emit_docs_and_attrs(docs, attrs);
+                    let cvis = format_vis(vis);
+                    let d = if *is_default { "default " } else { "" };
+                    let ty = self.fmt_type(&decl.ty);
+                    let val = self.fmt_expr(&decl.value);
+                    self.line(&format!(
+                        "{}{}const {}: {} = {};",
+                        cvis,
+                        d,
+                        fmt_rust_ident(&decl.name),
+                        ty,
+                        val
+                    ));
+                }
                 ImplItem::MacroCall { attrs, call: mc } => {
                     for a in attrs {
                         self.line(&format_attr(a));
@@ -852,6 +897,9 @@ impl RustCodegen {
         }
         if f.is_async {
             sig.push_str("async ");
+        }
+        if f.is_gen {
+            sig.push_str("gen ");
         }
         if f.is_safe {
             sig.push_str("safe ");
@@ -890,7 +938,7 @@ impl RustCodegen {
         sig.push_str(&pstrs.join(", "));
         sig.push(')');
 
-        let effective_ret = unwrap_async_task_type(f.is_async, &f.return_ty);
+        let effective_ret = unwrap_async_task_type(f.is_async && !f.is_gen, &f.return_ty);
         if !matches!(effective_ret, Type::Void) {
             sig.push_str(" -> ");
             sig.push_str(&self.fmt_type(effective_ret));
@@ -2785,6 +2833,17 @@ impl RustCodegen {
                 sub.emit_value_block_stmts(block);
                 format!("async {} {{\n{}}}", mv, sub.out)
             }
+            Expr::GenBlock {
+                is_async,
+                is_move,
+                block,
+            } => {
+                let asy = if *is_async { "async " } else { "" };
+                let mv = if *is_move { "move " } else { "" };
+                let mut sub = self.child_formatter();
+                sub.emit_value_block_stmts(block);
+                format!("{}gen {} {{\n{}}}", asy, mv, sub.out)
+            }
             Expr::UnsafeBlock(block) => {
                 let mut sub = self.child_formatter();
                 sub.emit_value_block_stmts(block);
@@ -2796,6 +2855,7 @@ impl RustCodegen {
                 format!("try {{\n{}}}", sub.out)
             }
             Expr::Yield(e) => format!("yield {}", self.fmt_expr(e)),
+            Expr::Become(e) => format!("become {}", self.fmt_expr(e)),
             Expr::InlineRust(raw) => format!("{{ {} }}", raw.trim()),
             Expr::MacroCall(mc) => format_macro_call(mc),
             Expr::IsPattern { expr, negated, pat } => {

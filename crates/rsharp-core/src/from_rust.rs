@@ -60,15 +60,32 @@ pub fn convert_from_rust_with_hints(
     hints: &TypeHintMap,
     strict_unnameable: bool,
 ) -> Result<String> {
-    let parsed: syn::File = syn::parse_file(rust_source)
-        .map_err(|e| RSharpError::from_rust(format!("Invalid Rust syntax: {}", e)))?;
-    let probes = TypeProbes::new(rust_source, &parsed);
+    match syn::parse_file(rust_source) {
+        Ok(parsed) => convert_parsed_file(rust_source, &parsed, options, hints, strict_unnameable),
+        Err(syn_err) => crate::from_rust_nightly::convert_nightly_from_rust(
+            rust_source,
+            options,
+            hints,
+            strict_unnameable,
+            syn_err,
+        ),
+    }
+}
+
+pub(crate) fn convert_parsed_file(
+    rust_source: &str,
+    parsed: &syn::File,
+    options: FromRustOptions,
+    hints: &TypeHintMap,
+    strict_unnameable: bool,
+) -> Result<String> {
+    let probes = TypeProbes::new(rust_source, parsed);
     let mut conv = RustToRSharp::new(rust_source, options, hints, strict_unnameable, &probes);
     // Syn assigns spans after stripping the BOM and shebang.
     let source = rust_source.strip_prefix('\u{feff}').unwrap_or(rust_source);
     conv.spacing_source = &source[parsed.shebang.as_ref().map_or(0, String::len)..];
     conv.collect_signatures(&parsed.items);
-    conv.emit_file(&parsed);
+    conv.emit_file(parsed);
     if let Some(err) = conv.first_err.borrow_mut().take() {
         return Err(err);
     }
@@ -746,6 +763,9 @@ impl<'a> RustToRSharp<'a> {
     }
 
     fn emit_attr_with_target(&mut self, attr: &Attribute, inner_target: Option<&str>) {
+        if is_sentinel_attr(attr) {
+            return;
+        }
         if attr.path().is_ident("doc")
             && let syn::Meta::NameValue(nv) = &attr.meta
             && let Expr::Lit(el) = &nv.value
@@ -942,6 +962,11 @@ impl<'a> RustToRSharp<'a> {
             Item::Trait(t) => {
                 self.emit_split_attrs(&t.attrs, false, "inner");
                 let vis = fmt_vis(&t.vis);
+                let cst = if has_sentinel_attr(&t.attrs, "__rsharp_const_trait") {
+                    "const "
+                } else {
+                    ""
+                };
                 let unsf = if t.unsafety.is_some() { "unsafe " } else { "" };
                 let auto_kw = if t.auto_token.is_some() { "auto " } else { "" };
                 let name = escape_ident(&t.ident.to_string());
@@ -954,8 +979,8 @@ impl<'a> RustToRSharp<'a> {
                 };
                 let wh = self.fmt_where(&t.generics);
                 self.open_block(&format!(
-                    "{}{}{}trait {}{}{}{}",
-                    vis, unsf, auto_kw, name, gens, supers, wh
+                    "{}{}{}{}trait {}{}{}{}",
+                    vis, cst, unsf, auto_kw, name, gens, supers, wh
                 ));
                 self.indent += 1;
                 self.emit_split_attrs(&t.attrs, true, "inner");
@@ -979,6 +1004,7 @@ impl<'a> RustToRSharp<'a> {
                                 &inner_attrs,
                                 false,
                                 false,
+                                has_sentinel_attr(&tf.attrs, "__rsharp_gen_fn"),
                             );
                         }
                         TraitItem::Type(tt) => {
@@ -1066,6 +1092,11 @@ impl<'a> RustToRSharp<'a> {
                     ""
                 };
                 let unsf = if im.unsafety.is_some() { "unsafe " } else { "" };
+                let cst = if has_sentinel_attr(&im.attrs, "__rsharp_const_impl") {
+                    "const "
+                } else {
+                    ""
+                };
                 let gens = self.fmt_generics(&im.generics);
                 let target = self.fmt_type(&im.self_ty);
                 let wh = self.fmt_where(&im.generics);
@@ -1073,10 +1104,11 @@ impl<'a> RustToRSharp<'a> {
                     Some((neg, tp, _)) => {
                         let bang = if neg.is_some() { "!" } else { "" };
                         format!(
-                            "{}{}impl{} {}{} for {}{}",
+                            "{}{}impl{} {}{}{} for {}{}",
                             def,
                             unsf,
                             gens,
+                            cst,
                             bang,
                             self.fmt_path(tp),
                             target,
@@ -1101,7 +1133,12 @@ impl<'a> RustToRSharp<'a> {
                                 .filter(|a| matches!(a.style, syn::AttrStyle::Inner(_)))
                                 .cloned()
                                 .collect();
-                            let mvis = fmt_vis(&m.vis);
+                            let def = if m.defaultness.is_some() {
+                                "default "
+                            } else {
+                                ""
+                            };
+                            let mvis = format!("{}{}", fmt_vis(&m.vis), def);
                             let is_static =
                                 !m.sig.inputs.iter().any(|a| matches!(a, FnArg::Receiver(_)));
                             spacing = self.emit_fn_sig_and_body(
@@ -1111,23 +1148,34 @@ impl<'a> RustToRSharp<'a> {
                                 &inner_attrs,
                                 is_static,
                                 false,
+                                has_sentinel_attr(&m.attrs, "__rsharp_gen_fn"),
                             );
                         }
                         syn::ImplItem::Type(t) => {
                             for a in &t.attrs {
                                 self.emit_attr(a, false);
                             }
+                            let def = if t.defaultness.is_some() {
+                                "default "
+                            } else {
+                                ""
+                            };
                             let aname = escape_ident(&t.ident.to_string());
                             let agens = self.fmt_generics(&t.generics);
                             let ty = self.fmt_type(&t.ty);
                             let awh = self.fmt_where(&t.generics);
-                            self.line(&format!("type {}{} = {}{};", aname, agens, ty, awh));
+                            self.line(&format!("{}type {}{} = {}{};", def, aname, agens, ty, awh));
                         }
                         syn::ImplItem::Const(c) => {
                             for a in &c.attrs {
                                 self.emit_attr(a, false);
                             }
-                            let cvis = fmt_vis(&c.vis);
+                            let def = if c.defaultness.is_some() {
+                                "default "
+                            } else {
+                                ""
+                            };
+                            let cvis = format!("{}{}", fmt_vis(&c.vis), def);
                             let cty = self.fmt_type(&c.ty);
                             let cname = escape_ident(&c.ident.to_string());
                             let val = self.fmt_expr(&c.expr);
@@ -1176,6 +1224,7 @@ impl<'a> RustToRSharp<'a> {
                                     None,
                                     &[],
                                     is_static,
+                                    false,
                                     false,
                                 );
                             } else {
@@ -1243,6 +1292,7 @@ impl<'a> RustToRSharp<'a> {
                     &inner_attrs,
                     false,
                     false,
+                    has_sentinel_attr(&f.attrs, "__rsharp_gen_fn"),
                 );
             }
             Item::ForeignMod(fm) => {
@@ -1327,15 +1377,15 @@ impl<'a> RustToRSharp<'a> {
             other => {
                 if let Item::Verbatim(ts) = other
                     && let Ok(ft) = syn::parse2::<syn::ForeignItemType>(ts.clone())
-                    && ft.generics.params.is_empty()
-                    && ft.generics.where_clause.is_none()
                 {
                     for a in &ft.attrs {
                         self.emit_attr(a, false);
                     }
                     let fvis = fmt_vis(&ft.vis);
                     let fname = escape_ident(&ft.ident.to_string());
-                    self.line(&format!("{}type {};", fvis, fname));
+                    let fgens = self.fmt_generics(&ft.generics);
+                    let fwh = self.fmt_where(&ft.generics);
+                    self.line(&format!("{}type {}{}{};", fvis, fname, fgens, fwh));
                 } else if let Item::Verbatim(ts) = other
                     && let Ok(ff) = syn::parse2::<syn::ForeignItemFn>(ts.clone())
                 {
@@ -1420,7 +1470,7 @@ impl<'a> RustToRSharp<'a> {
             self.emit_attr(a, false);
         }
         let fvis = fmt_vis(&ff.vis);
-        self.emit_fn_sig_and_body(&fvis, &ff.sig, None, &[], false, is_safe)
+        self.emit_fn_sig_and_body(&fvis, &ff.sig, None, &[], false, is_safe, false)
     }
 
     fn emit_foreign_static(&mut self, fs: &syn::ForeignItemStatic, safety: &str) {
@@ -1483,6 +1533,7 @@ impl<'a> RustToRSharp<'a> {
         false
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_fn_sig_and_body(
         &mut self,
         vis: &str,
@@ -1491,6 +1542,7 @@ impl<'a> RustToRSharp<'a> {
         inner_attrs: &[Attribute],
         is_static: bool,
         is_safe: bool,
+        is_gen: bool,
     ) -> BlankLines {
         let mut header = String::new();
         header.push_str(vis);
@@ -1500,6 +1552,9 @@ impl<'a> RustToRSharp<'a> {
         let is_async = sig.asyncness.is_some();
         if is_async {
             header.push_str("async ");
+        }
+        if is_gen {
+            header.push_str("gen ");
         }
         if is_safe {
             header.push_str("safe ");
@@ -1519,7 +1574,7 @@ impl<'a> RustToRSharp<'a> {
             header.push_str("static ");
         }
 
-        let ret_ty = self.fmt_return_type(&sig.output, is_async);
+        let ret_ty = self.fmt_return_type(&sig.output, is_async && !is_gen);
         let fn_name = escape_ident(&sig.ident.to_string());
         let gens = self.fmt_generics(&sig.generics);
 
@@ -1585,7 +1640,9 @@ impl<'a> RustToRSharp<'a> {
             wh
         ));
 
-        let tail = if matches!(sig.output, ReturnType::Default) {
+        let tail = if is_gen {
+            BlockTail::None
+        } else if matches!(sig.output, ReturnType::Default) {
             BlockTail::UnitReturn
         } else {
             BlockTail::Return
@@ -3306,8 +3363,10 @@ impl<'a> RustToRSharp<'a> {
         let mut attr_pfx = String::new();
         if include_attrs {
             for a in expr_outer_attrs(expr) {
-                attr_pfx.push_str(&self.fmt_attr_inline(a, None));
-                attr_pfx.push(' ');
+                if !is_sentinel_attr(a) {
+                    attr_pfx.push_str(&self.fmt_attr_inline(a, None));
+                    attr_pfx.push(' ');
+                }
             }
         }
         let core = match expr {
@@ -3696,7 +3755,17 @@ impl<'a> RustToRSharp<'a> {
                 res
             }
             Expr::Block(eb) => {
-                if let Some(lbl) = &eb.label {
+                if has_sentinel_attr(&eb.attrs, "__rsharp_gen_block") {
+                    let header = if has_sentinel_attr(&eb.attrs, "__rsharp_gen_move") {
+                        "gen take"
+                    } else {
+                        "gen"
+                    };
+                    let body = self.capture_sub_block(1, |sub| {
+                        sub.emit_block_stmts(&eb.block, BlockTail::None);
+                    });
+                    self.fmt_named_block(header, &body)
+                } else if let Some(lbl) = &eb.label {
                     let body = self.capture_sub_block(1, |sub| {
                         sub.emit_block_stmts(&eb.block, BlockTail::None);
                     });
@@ -3715,13 +3784,20 @@ impl<'a> RustToRSharp<'a> {
                 }
             }
             Expr::Async(ea) => {
-                let header = if ea.capture.is_some() {
-                    "async take"
+                let is_gen = has_sentinel_attr(&ea.attrs, "__rsharp_gen_block");
+                let header = match (is_gen, ea.capture.is_some()) {
+                    (true, true) => "async gen take",
+                    (true, false) => "async gen",
+                    (false, true) => "async take",
+                    (false, false) => "async",
+                };
+                let tail = if is_gen {
+                    BlockTail::None
                 } else {
-                    "async"
+                    BlockTail::Return
                 };
                 let body = self.capture_sub_block(1, |sub| {
-                    sub.emit_block_stmts(&ea.block, BlockTail::Return);
+                    sub.emit_block_stmts(&ea.block, tail);
                 });
                 self.fmt_named_block(header, &body)
             }
@@ -3749,7 +3825,15 @@ impl<'a> RustToRSharp<'a> {
                 )
             }
             Expr::Macro(em) => fmt_syn_macro(&em.mac),
-            other => format!("rust {{ {} }}", other.to_token_stream()),
+            other => {
+                if let Expr::Verbatim(ts) = other
+                    && let Some(inner) = try_parse_become_expr(ts)
+                {
+                    format!("become {}", self.fmt_expr(&inner))
+                } else {
+                    format!("rust {{ {} }}", other.to_token_stream())
+                }
+            }
         };
         format!("{}{}", attr_pfx, core)
     }
@@ -5349,6 +5433,16 @@ fn expr_has_let(expr: &Expr) -> bool {
     }
 }
 
+fn is_sentinel_attr(attr: &Attribute) -> bool {
+    attr.path()
+        .get_ident()
+        .is_some_and(|id| id.to_string().starts_with("__rsharp_"))
+}
+
+fn has_sentinel_attr(attrs: &[Attribute], name: &str) -> bool {
+    attrs.iter().any(|a| a.path().is_ident(name))
+}
+
 fn expr_outer_attrs(expr: &Expr) -> &[Attribute] {
     match expr {
         Expr::Array(e) => &e.attrs,
@@ -5430,4 +5524,15 @@ fn fmt_syn_macro(mac: &syn::Macro) -> String {
         syn::MacroDelimiter::Bracket(_) => format!("{}![{}]", path, mac.tokens),
         syn::MacroDelimiter::Brace(_) => format!("{}!{{ {} }}", path, mac.tokens),
     }
+}
+
+fn try_parse_become_expr(ts: &proc_macro2::TokenStream) -> Option<Expr> {
+    let mut tokens = ts.clone().into_iter();
+    let is_become = matches!(
+        tokens.next(),
+        Some(proc_macro2::TokenTree::Ident(id)) if id == "become"
+    );
+    is_become
+        .then(|| syn::parse2::<Expr>(tokens.collect()).ok())
+        .flatten()
 }

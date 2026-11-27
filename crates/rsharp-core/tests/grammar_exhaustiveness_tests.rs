@@ -269,11 +269,146 @@ fn parity_constructs(opt: Option<i32>, flag: bool) {
     assert!(rust2.contains("let (u1, u2);"), "got:\n{rust2}");
     assert!(rust2.contains("let all_pat @ (a, b) ="), "got:\n{rust2}");
 
-    // Nightly/experimental Expr::Verbatim & Item::Verbatim still fall back safely to `rust { ... }`.
-    let (rsh_verb, _) = convert_no_ra(
-        "type VerbatimGeneric<T>;\ntype VerbatimWhere where i32: Copy;\nmacro decl_mac() {}\nfn tail_call(x: i32) -> i32 { become tail_call(x) }",
+    // Phase 4: generic/where `type Foo<T>;` and `become` now convert natively with 0 `rust {}`!
+    let (rsh_native, rust_native) = convert_no_ra(
+        "type VerbatimGeneric<T>;\n\
+         type VerbatimWhere where i32: Copy;\n\
+         fn tail_call(x: i32) -> i32 { become tail_call(x) }",
     );
-    assert_eq!(count_raw_rust_blocks(&rsh_verb), 4, "got:\n{rsh_verb}");
+    assert_eq!(count_raw_rust_blocks(&rsh_native), 0, "got:\n{rsh_native}");
+    assert!(rust_native.contains("type VerbatimGeneric<T>;"));
+    assert!(rust_native.contains("type VerbatimWhere where i32: Copy;"));
+    assert!(rust_native.contains("become tail_call(x)"));
+
+    // Residual exotic `syn` Verbatim items (`macro decl_mac() {}` and `builtin # ...`) still fall back safely.
+    let (rsh_verb, _) = convert_no_ra(
+        "macro decl_mac() {}\nfn builtin_expr() { let _ = builtin # offset_of(S, f); }",
+    );
+    assert_eq!(count_raw_rust_blocks(&rsh_verb), 2, "got:\n{rsh_verb}");
+
+    // Phase 4: `default` specialization items in `impl` (fn, type, const) + `default` as type name + `gen` as type name.
+    let (rsh_spec, rust_spec) = convert_no_ra(
+        "trait Spec { type Out; const N: i32; fn run(&self) -> i32; }\n\
+         impl Spec for () {\n\
+             #[allow(unused)]\n\
+             default type Out = i32;\n\
+             #[allow(unused)]\n\
+             default const N: i32 = 1;\n\
+             #[allow(unused)]\n\
+             pub default fn run(&self) -> i32 { 1 }\n\
+             default fn helper() -> i32 { 2 }\n\
+         }\n\
+         type default = i32;\n\
+         struct Boxed;\n\
+         impl Boxed {\n\
+             fn returns_default() -> default { 0 }\n\
+         }\n",
+    );
+    assert_eq!(count_raw_rust_blocks(&rsh_spec), 0, "got:\n{rsh_spec}");
+    assert!(rust_spec.contains("default type Out = i32;"));
+    assert!(rust_spec.contains("default const N: i32 = 1;"));
+    assert!(rust_spec.contains("default fn run(&self) -> i32"));
+    assert!(rust_spec.contains("default fn helper() -> i32"));
+    // Direct R# contextual `gen` as type name (non-modifier fallback in `parse_fn_decl`):
+    assert!(parser::parse_file("alias gen = int; gen returns_gen() { return 0; }").is_ok());
+
+    // Phase 4: `ra_ap_syntax` lossless nightly fallback (0 `rust {}` for `gen fn`, `async gen fn`,
+    // `gen {}`, `gen move {}`, `async gen {}`, `async gen move {}`, `const trait`, `impl const`).
+    let (rsh_nightly, rust_nightly) = convert_no_ra(
+        "pub const trait ConstTr { fn eval(&self) -> i32; }\n\
+         impl const ConstTr for i32 { fn eval(&self) -> i32 { *self } }\n\
+         pub gen fn count_up(n: i32) -> i32 {\n\
+             let g1 = gen { yield 1; };\n\
+             let g2 = gen move { yield n; };\n\
+             let g3 = async gen { yield 2; };\n\
+             let g4 = async gen move { yield n; };\n\
+             let _ = (g1, g2, g3, g4);\n\
+             yield n;\n\
+         }\n\
+         pub async gen fn async_stream(x: i32) -> i32 {\n\
+             yield x;\n\
+         }\n",
+    );
+    assert_eq!(
+        count_raw_rust_blocks(&rsh_nightly),
+        0,
+        "nightly constructs must convert with 0 rust{{}}:\n{rsh_nightly}"
+    );
+    assert!(
+        rust_nightly.contains("pub const trait ConstTr"),
+        "{rust_nightly}"
+    );
+    assert!(
+        rust_nightly.contains("impl const ConstTr for i32"),
+        "{rust_nightly}"
+    );
+    assert!(
+        rust_nightly.contains("pub gen fn count_up"),
+        "{rust_nightly}"
+    );
+    assert!(
+        rust_nightly.contains("pub async gen fn async_stream"),
+        "{rust_nightly}"
+    );
+    assert!(rust_nightly.contains("gen  {"), "{rust_nightly}");
+    assert!(rust_nightly.contains("gen move  {"), "{rust_nightly}");
+    assert!(rust_nightly.contains("async gen  {"), "{rust_nightly}");
+    assert!(rust_nightly.contains("async gen move  {"), "{rust_nightly}");
+
+    // Invalid Rust syntax must STILL return `Err` even with `ra_ap_syntax` fallback enabled.
+    assert!(
+        convert_from_rust_with_hints(
+            "fn broken( {",
+            FromRustOptions {
+                use_rustc_inference: false,
+            },
+            &TypeHintMap::default(),
+            false,
+        )
+        .is_err()
+    );
+
+    // Per-item lossless fallback in `from_rust_nightly`: valid nightly item that `syn` still rejects
+    // (`const trait` + `impl<const N: usize> const ...` or `fn f() { #[allow(unused)] yield; }` or `extern { ... }`
+    // — specifically Rust 2024 `safe` / nightly `use` / `trait` with `#[attr]` or `builtin#`):
+    // `syn` rejects `async trait AsyncTr {}` while `ra_ap_syntax` parses it with 0 errors!
+    let (rsh_future, _) = convert_no_ra(
+        "fn normal_ok() -> i32 { 1 }\n\
+         async trait FutureNightlyTrait {}\n",
+    );
+    assert!(rsh_future.contains("int normal_ok()"), "{rsh_future}");
+    assert_eq!(count_raw_rust_blocks(&rsh_future), 1, "{rsh_future}");
+
+    // Strict mode error propagation inside per-item nightly fallback:
+    assert!(
+        convert_from_rust_with_hints(
+            "fn strict_fail() { let x = unknown_call(); }\nasync trait FutureNightlyTrait {}\n",
+            FromRustOptions {
+                use_rustc_inference: false,
+            },
+            &TypeHintMap::default(),
+            true,
+        )
+        .is_err()
+    );
+
+    // Contextual `gen` as identifier + negative parser paths for Phase 4 constructs:
+    assert!(parser::parse_file("void f(int gen) { int x = gen; }").is_ok());
+    for bad in [
+        "type Bad<;",
+        "type Bad where 123;",
+        "const trait ;",
+        "impl S { default a b; }",
+        "void f() { become 1 + ; }",
+        "void f() { gen take 1; }",
+        "void f() { gen { + }; }",
+        "void f() { async gen { + }; }",
+    ] {
+        assert!(
+            parser::parse_file(bad).is_err(),
+            "expected parse error for `{bad}`"
+        );
+    }
 }
 
 #[test]

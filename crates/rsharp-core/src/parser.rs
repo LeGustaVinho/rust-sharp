@@ -644,16 +644,34 @@ impl<'a> Parser<'a> {
         }
         if self.eat_kw(Keyword::Type) {
             let name = self.expect_ident()?;
+            let generics = self.parse_generic_params()?;
+            let where_clause = self.parse_where_clause()?;
             self.expect(&TokenKind::Semicolon, "';' after type declaration")?;
             return Ok(Item {
                 docs,
                 attrs,
                 vis,
-                kind: ItemKind::ForeignType(name),
+                kind: ItemKind::ForeignType(ForeignTypeDecl {
+                    name,
+                    generics,
+                    where_clause,
+                }),
+            });
+        }
+        if self.check_kw(Keyword::Const)
+            && matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait))
+        {
+            self.bump();
+            let kind = self.parse_trait_or_alias(false, false, true)?;
+            return Ok(Item {
+                docs,
+                attrs,
+                vis,
+                kind,
             });
         }
         if self.check_kw(Keyword::Trait) {
-            let kind = self.parse_trait_or_alias(false, false)?;
+            let kind = self.parse_trait_or_alias(false, false, false)?;
             return Ok(Item {
                 docs,
                 attrs,
@@ -665,7 +683,7 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait))
         {
             self.bump();
-            let kind = self.parse_trait_or_alias(false, true)?;
+            let kind = self.parse_trait_or_alias(false, true, false)?;
             return Ok(Item {
                 docs,
                 attrs,
@@ -731,7 +749,7 @@ impl<'a> Parser<'a> {
         if self.check_kw(Keyword::Unsafe) {
             if matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Trait)) {
                 self.bump();
-                let kind = self.parse_trait_or_alias(true, false)?;
+                let kind = self.parse_trait_or_alias(true, false, false)?;
                 return Ok(Item {
                     docs,
                     attrs,
@@ -744,7 +762,7 @@ impl<'a> Parser<'a> {
             {
                 self.bump();
                 self.bump();
-                let kind = self.parse_trait_or_alias(true, true)?;
+                let kind = self.parse_trait_or_alias(true, true, false)?;
                 return Ok(Item {
                     docs,
                     attrs,
@@ -832,7 +850,10 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         self.bump(); // 'impl'
-        let is_block = if self.check(&TokenKind::Lt) || self.check(&TokenKind::Bang) {
+        let is_block = if self.check(&TokenKind::Lt)
+            || self.check(&TokenKind::Bang)
+            || self.check_kw(Keyword::Const)
+        {
             true
         } else if self.parse_type().is_ok() {
             self.check_kw(Keyword::For)
@@ -1593,11 +1614,16 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_trait_or_alias(&mut self, is_unsafe: bool, is_auto: bool) -> Result<ItemKind> {
+    fn parse_trait_or_alias(
+        &mut self,
+        is_unsafe: bool,
+        is_auto: bool,
+        is_const: bool,
+    ) -> Result<ItemKind> {
         self.bump(); // 'trait'
         let name = self.expect_ident()?;
         let generics = self.parse_generic_params()?;
-        if !is_unsafe && !is_auto && self.eat(&TokenKind::Eq) {
+        if !is_unsafe && !is_auto && !is_const && self.eat(&TokenKind::Eq) {
             let mut bounds = Vec::new();
             if !self.check(&TokenKind::Semicolon) && !self.check_kw(Keyword::Where) {
                 bounds.push(self.parse_type_bound()?);
@@ -1700,6 +1726,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(&TokenKind::RBrace, "'}'")?;
         Ok(ItemKind::Trait(TraitDecl {
+            is_const,
             is_unsafe,
             is_auto,
             name,
@@ -1712,9 +1739,42 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    fn try_eat_impl_item_default(&mut self) -> bool {
+        if !self.is_contextual_at(0, "default") {
+            return false;
+        }
+        if matches!(
+            self.peek_at(1).kind,
+            TokenKind::Kw(
+                Keyword::Type
+                    | Keyword::Const
+                    | Keyword::Public
+                    | Keyword::Internal
+                    | Keyword::Async
+                    | Keyword::Unsafe
+                    | Keyword::Static
+                    | Keyword::Extern
+            )
+        ) {
+            self.bump();
+            return true;
+        }
+        let save = self.checkpoint();
+        self.bump();
+        let is_fn = self.parse_type().is_ok()
+            && self.expect_ident().is_ok()
+            && matches!(self.peek_kind(), TokenKind::LParen | TokenKind::Lt);
+        self.restore(save);
+        if is_fn {
+            self.bump();
+        }
+        is_fn
+    }
+
     fn parse_impl(&mut self, is_unsafe: bool, is_default: bool) -> Result<ImplDecl> {
         self.bump(); // 'impl'
         let generics = self.parse_generic_params()?;
+        let is_const = self.eat_kw(Keyword::Const);
         let is_negative = self.eat(&TokenKind::Bang);
         let first_ty = self.parse_type()?;
         let (trait_path, target_ty) = if self.eat_kw(Keyword::For) {
@@ -1736,6 +1796,7 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::RBrace) && attrs.is_empty() {
                 break;
             }
+            let item_default = self.try_eat_impl_item_default();
             if self.eat_kw(Keyword::Type) {
                 let aname = self.expect_ident()?;
                 let agens = self.parse_generic_params()?;
@@ -1751,32 +1812,36 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::Semicolon, "';'")?;
                 items.push(ImplItem::AssocType {
                     attrs,
+                    is_default: item_default,
                     name: aname,
                     generics: agens,
                     where_clause: awhere,
                     ty,
                 });
-            } else if let TokenKind::RustBlock(raw) = self.peek_kind().clone() {
+            } else if !item_default && let TokenKind::RustBlock(raw) = self.peek_kind().clone() {
                 self.bump();
                 items.push(ImplItem::RawRust(raw));
-            } else if let Some(mc) = self.try_parse_item_macro_call(false)? {
+            } else if !item_default && let Some(mc) = self.try_parse_item_macro_call(false)? {
                 items.push(ImplItem::MacroCall { attrs, call: mc });
             } else {
                 let vis = self.parse_visibility()?;
+                let item_default = item_default || self.try_eat_impl_item_default();
                 if let Some((ty, name)) = self.try_parse_const_header() {
                     let c = self.parse_const_decl_rest(ty, name)?;
-                    items.push(ImplItem::AssocConst(Item {
+                    items.push(ImplItem::AssocConst {
                         docs,
                         attrs,
                         vis,
-                        kind: ItemKind::Const(c),
-                    }));
+                        is_default: item_default,
+                        decl: c,
+                    });
                 } else {
                     let decl = self.parse_fn_decl()?;
                     items.push(ImplItem::Fn {
                         docs,
                         attrs,
                         vis,
+                        is_default: item_default,
                         decl,
                     });
                 }
@@ -1786,6 +1851,7 @@ impl<'a> Parser<'a> {
         Ok(ImplDecl {
             is_default,
             is_unsafe,
+            is_const,
             is_negative,
             generics,
             trait_path,
@@ -1901,6 +1967,7 @@ impl<'a> Parser<'a> {
     fn parse_fn_decl(&mut self) -> Result<FnDecl> {
         let mut is_const = false;
         let mut is_async = false;
+        let mut is_gen = false;
         let mut is_safe = false;
         let mut is_unsafe = false;
         let mut is_static = false;
@@ -1911,6 +1978,17 @@ impl<'a> Parser<'a> {
                 is_const = true;
             } else if self.eat_kw(Keyword::Async) {
                 is_async = true;
+            } else if self.check_contextual("gen") {
+                let save = self.checkpoint();
+                self.bump();
+                if self.parse_type().is_ok() && self.expect_ident().is_ok() {
+                    self.restore(save);
+                    self.bump();
+                    is_gen = true;
+                } else {
+                    self.restore(save);
+                    break;
+                }
             } else if self.check_contextual("safe") {
                 let save = self.checkpoint();
                 self.bump();
@@ -1955,6 +2033,7 @@ impl<'a> Parser<'a> {
         Ok(FnDecl {
             is_const,
             is_async,
+            is_gen,
             is_safe,
             is_unsafe,
             is_static,
@@ -4617,12 +4696,44 @@ impl<'a> Parser<'a> {
             return Ok(Expr::Yield(Box::new(self.parse_expr()?)));
         }
 
-        // Async lambda `async (int x) => ...` or async block `async take? { ... }`
+        if self.is_contextual_at(0, "become")
+            && starts_expr_after_control_flow(&self.peek_at(1).kind)
+        {
+            self.bump();
+            return Ok(Expr::Become(Box::new(self.parse_expr()?)));
+        }
+
+        if self.is_contextual_at(0, "gen")
+            && (matches!(self.peek_at(1).kind, TokenKind::LBrace)
+                || (matches!(self.peek_at(1).kind, TokenKind::Kw(Keyword::Take))
+                    && matches!(self.peek_at(2).kind, TokenKind::LBrace)))
+        {
+            self.bump();
+            let is_move = self.eat_kw(Keyword::Take);
+            let block = self.parse_block()?;
+            return Ok(Expr::GenBlock {
+                is_async: false,
+                is_move,
+                block,
+            });
+        }
+
+        // Async lambda `async (int x) => ...`, async gen block, or async block `async take? { ... }`
         if self.check_kw(Keyword::Async) {
             if let Some(lambda) = self.try_parse_lambda()? {
                 return Ok(lambda);
             }
             self.bump();
+            if self.is_contextual_at(0, "gen") {
+                self.bump();
+                let is_move = self.eat_kw(Keyword::Take);
+                let block = self.parse_block()?;
+                return Ok(Expr::GenBlock {
+                    is_async: true,
+                    is_move,
+                    block,
+                });
+            }
             let is_move = self.eat_kw(Keyword::Take);
             let block = self.parse_block()?;
             return Ok(Expr::AsyncBlock { is_move, block });
