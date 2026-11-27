@@ -1832,3 +1832,231 @@ fn module_graph_discovery_all_rules_and_edge_cases() {
     }
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn phase5_stage_c_lifetime_validator_brace_macro_tail_and_cargo_features() {
+    use rsharp_core::{CargoFeaturesMode, RustAnalyzerOracle};
+    use std::cell::RefCell;
+    use std::io::{Cursor, Write};
+    use std::rc::Rc;
+
+    // 1. Tail-expression brace-macro lowering (`return cfg_select! { ... };` -> `cfg_select! { ... }`)
+    //    (fixes `emilk/egui` `context.rs` Stage C semantic bug).
+    let src_macro_tail = "\
+macro_rules! my_select {
+    ($x:expr) => { $x };
+}
+pub fn pick(v: i32) -> i32 {
+    let base = v + 1;
+    #[allow(unused)]
+    my_select! {
+        base * 2
+    }
+}
+";
+    let (rsh_mt, rust_mt) = convert_no_ra(src_macro_tail);
+    assert_eq!(count_raw_rust_blocks(&rsh_mt), 0, "{rsh_mt}");
+    assert!(
+        !rust_mt.contains("return my_select!"),
+        "brace macro tail must not emit `return my_select!`:\n{rust_mt}"
+    );
+    assert!(
+        rust_mt.contains("#[allow(unused)]\n    my_select!"),
+        "{rust_mt}"
+    );
+    rsharp_core::check_rsharp(&rsh_mt).expect("tail brace macro must pass rustc");
+
+    // 2. In-scope lifetime validator for `rust-analyzer` hints (fixes `emilk/egui` `Atoms<'a>` E0261/E0495):
+    let src_lt = "\
+struct Atoms<'a>(&'a str);
+trait Tr<'a> {
+    fn def_fn(&self) {
+        let a = Atoms(\"x\");
+        let _ = a;
+    }
+}
+trait DynTr {}
+trait IterTr { type Item; }
+struct Holder<'ok>(&'ok str);
+impl<'ok> Holder<'ok> {
+    fn method(&self) {
+        let ok_dyn = make_dyn();
+        let bad_dyn = make_bad_dyn();
+        let bad_vec = make_bad_vec();
+        let bad_assoc = make_bad_assoc();
+        let bad_qself = make_bad_qself();
+        let bad_fn_in = make_bad_fn_in();
+        let bad_fn_ret = make_bad_fn_ret();
+        let good_hrtb_fn = make_hrtb_fn();
+        let good_hrtb_dyn = make_hrtb_dyn();
+        let good_plain_fn = make_plain_fn();
+        let good_const_arg = make_const_arg();
+        let good_use_dyn = make_use_dyn();
+        let atoms_local = Atoms(self.0);
+        let f = |p| p;
+        let _ = (
+            ok_dyn, bad_dyn, bad_vec, bad_assoc, bad_qself, bad_fn_in, bad_fn_ret,
+            good_hrtb_fn, good_hrtb_dyn, good_plain_fn, good_const_arg, good_use_dyn,
+            atoms_local, f,
+        );
+    }
+}
+";
+    let mut hints = TypeHintMap::default();
+    let find_end = |needle: &str| -> (u32, u32) {
+        for (idx, line) in src_lt.lines().enumerate() {
+            if let Some(pos) = line.find(needle) {
+                let col = pos + needle.len();
+                return ((idx + 1) as u32, col as u32);
+            }
+        }
+        panic!("needle not found: {needle}");
+    };
+    let mut add = |needle: &str, ty: &str| {
+        let (l, c) = find_end(needle);
+        hints.insert(l, c, ty.to_string());
+    };
+    add("let a", "Atoms<'a>");
+    add("let ok_dyn", "Box<dyn DynTr + 'ok>");
+    add("let bad_dyn", "Box<dyn DynTr + 'undeclared>");
+    add("let bad_vec", "Vec<Box<dyn DynTr + 'undeclared>>");
+    add(
+        "let bad_assoc",
+        "Box<dyn IterTr<Item = Box<dyn DynTr + 'undeclared>>>",
+    );
+    add(
+        "let bad_qself",
+        "<Box<dyn DynTr + 'undeclared> as IterTr>::Item",
+    );
+    add("let bad_fn_in", "fn(Box<dyn DynTr + 'undeclared>)");
+    add("let bad_fn_ret", "fn() -> Box<dyn DynTr + 'undeclared>");
+    add("let good_hrtb_fn", "for<'h> fn(Atoms<'h>) -> Atoms<'h>");
+    add("let good_hrtb_dyn", "Box<dyn for<'h> Tr<'h> + 'static>");
+    add("let good_plain_fn", "fn(i32)");
+    add("let good_const_arg", "Arr<4>");
+    add("let good_use_dyn", "impl DynTr + use<>");
+    add("let atoms_local", "Atoms<'ok>");
+    let (cl_line, cl_col) = find_end("|p");
+    hints.insert(cl_line, cl_col, "Atoms<'a>".to_string());
+
+    let rsh_lt = convert_from_rust_with_hints(
+        src_lt,
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+        &hints,
+        false,
+    )
+    .expect("lifetime-sanitized conversion must succeed");
+    assert_eq!(count_raw_rust_blocks(&rsh_lt), 0, "{rsh_lt}");
+    assert!(rsh_lt.contains("Atoms<life _> a ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("Atoms<life _> atoms_local ="), "{rsh_lt}");
+    assert!(
+        rsh_lt.contains("Box<dyn DynTr + life ok> ok_dyn ="),
+        "{rsh_lt}"
+    );
+    assert!(rsh_lt.contains("var bad_dyn ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("var bad_vec ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("var bad_assoc ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("var bad_qself ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("var bad_fn_in ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("var bad_fn_ret ="), "{rsh_lt}");
+    assert!(
+        rsh_lt.contains("forall<life h> (Atoms<life h>) -> Atoms<life h> good_hrtb_fn ="),
+        "{rsh_lt}"
+    );
+    assert!(
+        rsh_lt.contains("Box<dyn forall<life h> Tr<life h> + static> good_hrtb_dyn ="),
+        "{rsh_lt}"
+    );
+    assert!(rsh_lt.contains("(int) -> void good_plain_fn ="), "{rsh_lt}");
+    assert!(rsh_lt.contains("(p) => p"), "{rsh_lt}");
+    let rust_lt = transpile_to_rust(
+        &rsh_lt,
+        TranspileOptions {
+            prelude_mode: PreludeMode::None,
+        },
+    )
+    .expect("lifetime-sanitized R# must transpile");
+    assert!(rust_lt.contains("let a: Atoms<'_> ="), "{rust_lt}");
+    assert!(
+        rust_lt.contains("let atoms_local: Atoms<'_> ="),
+        "{rust_lt}"
+    );
+
+    // 3. CargoFeaturesMode parsing, cargo_args, and LSP initializationOptions payload:
+    assert_eq!(
+        CargoFeaturesMode::parse_cli("default").unwrap(),
+        CargoFeaturesMode::Default
+    );
+    assert_eq!(
+        CargoFeaturesMode::parse_cli("").unwrap(),
+        CargoFeaturesMode::Default
+    );
+    assert_eq!(
+        CargoFeaturesMode::parse_cli("all").unwrap(),
+        CargoFeaturesMode::All
+    );
+    assert_eq!(
+        CargoFeaturesMode::parse_cli("rt, time").unwrap(),
+        CargoFeaturesMode::List(vec!["rt".to_string(), "time".to_string()])
+    );
+    assert!(CargoFeaturesMode::parse_cli(",,,").is_err());
+    assert!(CargoFeaturesMode::Default.cargo_args().is_empty());
+    assert_eq!(
+        CargoFeaturesMode::All.cargo_args(),
+        vec!["--all-features".to_string()]
+    );
+    assert_eq!(
+        CargoFeaturesMode::List(vec!["a".to_string(), "b".to_string()]).cargo_args(),
+        vec!["--features".to_string(), "a,b".to_string()]
+    );
+
+    struct SharedWriter(Rc<RefCell<Vec<u8>>>);
+    impl Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let frame = |body: &str| format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+    let make_init_stream = || {
+        let mut buf = Vec::new();
+        buf.extend(frame(r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#).as_bytes());
+        buf.extend(
+            frame(
+                r#"{"jsonrpc":"2.0","method":"experimental/serverStatus","params":{"quiescent":true}}"#,
+            )
+            .as_bytes(),
+        );
+        buf
+    };
+
+    let sent_all = Rc::new(RefCell::new(Vec::new()));
+    let _o_all = RustAnalyzerOracle::from_io_with_features(
+        Cursor::new(make_init_stream()),
+        SharedWriter(Rc::clone(&sent_all)),
+        &std::env::temp_dir(),
+        &CargoFeaturesMode::All,
+    )
+    .expect("from_io_with_features All");
+    let text_all = String::from_utf8(sent_all.borrow().clone()).unwrap();
+    assert!(text_all.contains(r#""features":"all""#), "{text_all}");
+
+    let sent_list = Rc::new(RefCell::new(Vec::new()));
+    let _o_list = RustAnalyzerOracle::from_io_with_features(
+        Cursor::new(make_init_stream()),
+        SharedWriter(Rc::clone(&sent_list)),
+        &std::env::temp_dir(),
+        &CargoFeaturesMode::List(vec!["rt".to_string(), "time".to_string()]),
+    )
+    .expect("from_io_with_features List");
+    let text_list = String::from_utf8(sent_list.borrow().clone()).unwrap();
+    assert!(
+        text_list.contains(r#""features":["rt","time"]"#),
+        "{text_list}"
+    );
+}

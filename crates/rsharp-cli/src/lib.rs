@@ -1,11 +1,23 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rsharp_core::{
-    FromRustOptions, PreludeMode, ProjectConvertOptions, ProjectFile, RustAnalyzerOracle,
-    ToRustProjectOptions, TranspileOptions, build_rsharp, check_rsharp, convert_from_rust,
-    convert_from_rust_with_hints, convert_project_files, discover_cargo_rs_files,
-    find_cargo_workspace_root, run_rsharp, transpile_project_files, transpile_to_rust,
+    CargoFeaturesMode, CargoVerifyOptions, FromRustOptions, PreludeMode, ProjectConvertOptions,
+    ProjectFile, RustAnalyzerOracle, ToRustProjectOptions, TranspileOptions, build_rsharp,
+    check_rsharp, convert_from_rust, convert_from_rust_with_hints, convert_project_files,
+    discover_cargo_rs_files, find_cargo_workspace_root, run_rsharp, transpile_project_files,
+    transpile_to_rust, verify_project_with_cargo,
 };
+
+static CLI_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Result of executing a CLI invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +34,7 @@ Usage:
   rsharp to-rust <file.rsharp> [-o <out.rs>] [--prelude embedded|crate|none]
   rsharp to-rust --project <dir> [-o <out_dir>] [--prelude none|crate|embedded]
   rsharp from-rust <file.rs> [-o <out.rsharp>] [--workspace <dir>] [--no-rustc-infer] [--strict]
-  rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--strict] [--no-ra] [--all-rs-files] [--no-raw-rust]
+  rsharp from-rust --project <dir> [-o <out_dir>] [--verify] [--verify-cargo] [--cargo-features default|all|f1,f2] [--strict] [--no-ra] [--all-rs-files] [--no-raw-rust]
   rsharp build <file.rsharp> [-o <out_bin>]
   rsharp run <file.rsharp>
   rsharp check <file.rsharp>
@@ -309,6 +321,8 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
 
     let mut out_dir: Option<PathBuf> = None;
     let mut verify = false;
+    let mut verify_cargo = false;
+    let mut cargo_features = CargoFeaturesMode::Default;
     let mut strict_unnameable = false;
     let mut no_ra = false;
     let mut all_rs_files = false;
@@ -327,6 +341,17 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
             "--verify" => {
                 verify = true;
                 i += 1;
+            }
+            "--verify-cargo" => {
+                verify_cargo = true;
+                i += 1;
+            }
+            "--cargo-features" => {
+                let val = args
+                    .get(i + 1)
+                    .ok_or_else(|| "Missing value after '--cargo-features'".to_string())?;
+                cargo_features = CargoFeaturesMode::parse_cli(val)?;
+                i += 2;
             }
             "--strict" => {
                 strict_unnameable = true;
@@ -369,7 +394,10 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
     let mut oracle = if no_ra {
         None
     } else {
-        Some(RustAnalyzerOracle::open(&ws_root).map_err(|e| e.to_string())?)
+        Some(
+            RustAnalyzerOracle::open_with_features(&ws_root, &cargo_features)
+                .map_err(|e| e.to_string())?,
+        )
     };
     let files: Vec<ProjectFile> = rs_files
         .iter()
@@ -390,11 +418,22 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
             }
         })
         .collect();
+    let _temp_rsharp_guard = if verify_cargo && out_dir.is_none() {
+        let id = CLI_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("rsharp_cli_stage_c_{}_{id}", std::process::id()));
+        Some(TempDirGuard(dir))
+    } else {
+        None
+    };
+    let effective_out_dir = out_dir
+        .clone()
+        .or_else(|| _temp_rsharp_guard.as_ref().map(|g| g.0.clone()));
     let outcomes = convert_project_files(
         &files,
         oracle.as_mut(),
         &ProjectConvertOptions {
-            out_dir,
+            out_dir: effective_out_dir.clone(),
             verify,
             strict_unnameable,
         },
@@ -442,13 +481,41 @@ fn cmd_from_rust_project(args: &[String]) -> Result<CliOutput, String> {
         ));
     }
 
+    let cargo_suffix = if verify_cargo {
+        let rsharp_root = effective_out_dir.unwrap();
+        let rsharp_files: Vec<ProjectFile> = files
+            .iter()
+            .map(|f| {
+                let rsh_rel = f.rel.with_extension("rsharp");
+                ProjectFile {
+                    path: rsharp_root.join(&rsh_rel),
+                    rel: rsh_rel,
+                }
+            })
+            .collect();
+        let report = verify_project_with_cargo(
+            &project_dir,
+            &ws_root,
+            &rsharp_files,
+            &CargoVerifyOptions {
+                features: cargo_features,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        format!("; cargo check OK ({} files)", report.checked_files)
+    } else {
+        String::new()
+    };
+
     Ok(CliOutput {
         exit_code: 0,
         stdout: format!(
-            "Converted {}/{} files cleanly ({} rust{{}} blocks)\n",
+            "Converted {}/{} files cleanly ({} rust{{}} blocks){}\n",
             converted,
             rs_files.len(),
-            total_raw_rust
+            total_raw_rust,
+            cargo_suffix
         ),
         stderr: String::new(),
     })

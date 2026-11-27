@@ -127,6 +127,7 @@ struct RustToRSharp<'a> {
     indent: usize,
     symbols: Rc<ModuleSymbols>,
     scopes: Vec<HashMap<String, String>>,
+    in_scope_lifetimes: Vec<HashSet<String>>,
     declared_in_fn: HashSet<String>,
     rustc_probe_aborted: Rc<Cell<bool>>,
     first_err: Rc<RefCell<Option<RSharpError>>>,
@@ -167,6 +168,7 @@ impl<'a> RustToRSharp<'a> {
                 shadowed_std_aliases: HashSet::new(),
             }),
             scopes: vec![HashMap::new()],
+            in_scope_lifetimes: Vec::new(),
             declared_in_fn: HashSet::new(),
             rustc_probe_aborted: Rc::new(Cell::new(false)),
             first_err: Rc::new(RefCell::new(None)),
@@ -185,6 +187,7 @@ impl<'a> RustToRSharp<'a> {
             indent: self.indent + 1,
             symbols: Rc::clone(&self.symbols),
             scopes: self.scopes.clone(),
+            in_scope_lifetimes: self.in_scope_lifetimes.clone(),
             declared_in_fn: HashSet::new(),
             rustc_probe_aborted: Rc::clone(&self.rustc_probe_aborted),
             first_err: Rc::clone(&self.first_err),
@@ -260,7 +263,9 @@ impl<'a> RustToRSharp<'a> {
         let Ok(mut ty) = syn::parse_str::<Type>(trimmed) else {
             return HintLookup::Unnameable;
         };
-        normalize_unstable_stdlib_type(&mut ty);
+        if !normalize_hint_type(&mut ty, &self.in_scope_lifetimes, &mut Vec::new()) {
+            return HintLookup::Unnameable;
+        }
         if contains_nested_impl_trait(&ty)
             || contains_nested_bare_fn(&ty)
             || matches!(
@@ -983,6 +988,8 @@ impl<'a> RustToRSharp<'a> {
                     vis, cst, unsf, auto_kw, name, gens, supers, wh
                 ));
                 self.indent += 1;
+                self.in_scope_lifetimes
+                    .push(collect_generic_lifetimes(&t.generics));
                 self.emit_split_attrs(&t.attrs, true, "inner");
                 let mut previous = None;
                 for ti in &t.items {
@@ -1063,6 +1070,7 @@ impl<'a> RustToRSharp<'a> {
                     }
                     self.separate(&mut previous, spacing, ti.span(), start);
                 }
+                self.in_scope_lifetimes.pop();
                 self.indent -= 1;
                 self.line("}");
             }
@@ -1119,6 +1127,8 @@ impl<'a> RustToRSharp<'a> {
                 };
                 self.open_block(&header);
                 self.indent += 1;
+                self.in_scope_lifetimes
+                    .push(collect_generic_lifetimes(&im.generics));
                 self.emit_split_attrs(&im.attrs, true, "inner");
                 let mut previous = None;
                 for sub in &im.items {
@@ -1234,6 +1244,7 @@ impl<'a> RustToRSharp<'a> {
                     }
                     self.separate(&mut previous, spacing, sub.span(), start);
                 }
+                self.in_scope_lifetimes.pop();
                 self.indent -= 1;
                 self.line("}");
             }
@@ -1579,6 +1590,8 @@ impl<'a> RustToRSharp<'a> {
         let gens = self.fmt_generics(&sig.generics);
 
         self.push_scope();
+        self.in_scope_lifetimes
+            .push(collect_generic_lifetimes(&sig.generics));
         let prev_declared = std::mem::take(&mut self.declared_in_fn);
 
         let mut params = Vec::new();
@@ -1663,6 +1676,7 @@ impl<'a> RustToRSharp<'a> {
         };
 
         self.declared_in_fn = prev_declared;
+        self.in_scope_lifetimes.pop();
         self.pop_scope();
         spacing
     }
@@ -4544,7 +4558,7 @@ fn bare_fn_has_elided_ref(bf: &syn::TypeBareFn) -> bool {
 /// (`read T` / `write T` without `<static>`), which would force a rigid higher-ranked lifetime
 /// in Rust and break return-lifetime unification (e.g. `let f = |x: &str| x;`).
 fn hint_str_has_elided_ref(hinted: &str) -> bool {
-    for kw in ["read ", "write "] {
+    for kw in ["read ", "write ", "life _"] {
         let mut rest = hinted;
         while let Some(idx) = rest.find(kw) {
             let boundary_ok = idx == 0
@@ -4705,92 +4719,197 @@ fn impl_trait_contains_dyn(ty: &Type) -> bool {
         && any_child_type(ty, &mut |t| matches!(t, Type::TraitObject(_)))
 }
 
-/// Rewrites Rust 1.99+ `sync::atomic::Atomic<T>` (unstable `generic_atomic`) returned by
-/// `rust-analyzer` back to the stable `AtomicBool`/`AtomicUsize`/`AtomicPtr<T>` aliases.
-fn normalize_unstable_stdlib_type(ty: &mut Type) {
+fn collect_lifetimes<'a>(params: impl Iterator<Item = &'a GenericParam>) -> HashSet<String> {
+    params
+        .filter_map(|p| match p {
+            GenericParam::Lifetime(lp) => Some(lp.lifetime.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_generic_lifetimes(generics: &Generics) -> HashSet<String> {
+    collect_lifetimes(generics.params.iter())
+}
+
+fn has_lifetime(stack: &[HashSet<String>], name: &str) -> bool {
+    stack.iter().any(|s| s.contains(name))
+}
+
+fn push_bound_lifetimes(
+    hrtb: &mut Vec<HashSet<String>>,
+    lifetimes: &Option<syn::BoundLifetimes>,
+) -> bool {
+    let Some(bl) = lifetimes else {
+        return false;
+    };
+    hrtb.push(collect_lifetimes(bl.lifetimes.iter()));
+    true
+}
+
+/// Normalizes `rust-analyzer` type hints so they remain valid in local annotations:
+/// - Rewrites Rust 1.99+ `sync::atomic::Atomic<T>` back to stable `AtomicBool`/`AtomicPtr<T>` aliases.
+/// - Normalizes non-`'static`, non-HRTB generic lifetime arguments (e.g. `Atoms<'a>` -> `Atoms<'_>`)
+///   so out-of-scope (E0261) or over-constrained (E0495) lifetimes never break `rustc`.
+/// - Rejects `dyn Trait + 'a` bounds whose lifetime `'a` is not in scope (degrading cleanly to `var`).
+fn normalize_hint_type(
+    ty: &mut Type,
+    in_scope: &[HashSet<String>],
+    hrtb: &mut Vec<HashSet<String>>,
+) -> bool {
     match ty {
-        Type::Reference(r) => normalize_unstable_stdlib_type(&mut r.elem),
-        Type::Ptr(p) => normalize_unstable_stdlib_type(&mut p.elem),
-        Type::Slice(s) => normalize_unstable_stdlib_type(&mut s.elem),
-        Type::Array(a) => normalize_unstable_stdlib_type(&mut a.elem),
-        Type::Paren(p) => normalize_unstable_stdlib_type(&mut p.elem),
-        Type::Tuple(t) => {
-            for e in &mut t.elems {
-                normalize_unstable_stdlib_type(e);
-            }
-        }
+        Type::Reference(r) => normalize_hint_type(&mut r.elem, in_scope, hrtb),
+        Type::Ptr(p) => normalize_hint_type(&mut p.elem, in_scope, hrtb),
+        Type::Slice(s) => normalize_hint_type(&mut s.elem, in_scope, hrtb),
+        Type::Array(a) => normalize_hint_type(&mut a.elem, in_scope, hrtb),
+        Type::Paren(p) => normalize_hint_type(&mut p.elem, in_scope, hrtb),
+        Type::Tuple(t) => t
+            .elems
+            .iter_mut()
+            .all(|e| normalize_hint_type(e, in_scope, hrtb)),
         Type::Path(tp) => {
-            if let Some(q) = &mut tp.qself {
-                normalize_unstable_stdlib_type(&mut q.ty);
-            }
-            for seg in &mut tp.path.segments {
-                if let PathArguments::AngleBracketed(ab) = &mut seg.arguments {
-                    let has_non_static_lt = ab.args.iter().any(
-                        |a| matches!(a, GenericArgument::Lifetime(lt) if lt.ident != "static"),
-                    );
-                    for arg in &mut ab.args {
-                        match arg {
-                            GenericArgument::Lifetime(lt)
-                                if has_non_static_lt && lt.ident == "static" =>
-                            {
-                                lt.ident = syn::Ident::new("_", lt.ident.span());
-                            }
-                            GenericArgument::Type(t) => normalize_unstable_stdlib_type(t),
-                            GenericArgument::AssocType(at) => {
-                                normalize_unstable_stdlib_type(&mut at.ty)
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            if let Some(last) = tp.path.segments.last_mut()
-                && last.ident == "Atomic"
-                && let PathArguments::AngleBracketed(ab) = &last.arguments
-                && ab.args.len() == 1
-                && let GenericArgument::Type(inner) = &ab.args[0]
+            if let Some(q) = &mut tp.qself
+                && !normalize_hint_type(&mut q.ty, in_scope, hrtb)
             {
-                let stable_name = match inner {
-                    Type::Path(itp) if itp.qself.is_none() && itp.path.segments.len() == 1 => {
-                        match itp.path.segments[0].ident.to_string().as_str() {
-                            "bool" => Some(("AtomicBool", None)),
-                            "i8" => Some(("AtomicI8", None)),
-                            "i16" => Some(("AtomicI16", None)),
-                            "i32" => Some(("AtomicI32", None)),
-                            "i64" => Some(("AtomicI64", None)),
-                            "isize" => Some(("AtomicIsize", None)),
-                            "u8" => Some(("AtomicU8", None)),
-                            "u16" => Some(("AtomicU16", None)),
-                            "u32" => Some(("AtomicU32", None)),
-                            "u64" => Some(("AtomicU64", None)),
-                            "usize" => Some(("AtomicUsize", None)),
-                            _ => None,
+                return false;
+            }
+            if !normalize_path_args(&mut tp.path, in_scope, hrtb) {
+                return false;
+            }
+            rewrite_unstable_atomic(tp);
+            true
+        }
+        Type::TraitObject(to) => normalize_bounds(&mut to.bounds, in_scope, hrtb),
+        Type::ImplTrait(it) => normalize_bounds(&mut it.bounds, in_scope, hrtb),
+        Type::BareFn(bf) => {
+            let pushed = push_bound_lifetimes(hrtb, &bf.lifetimes);
+            let ok = bf
+                .inputs
+                .iter_mut()
+                .all(|i| normalize_hint_type(&mut i.ty, in_scope, hrtb))
+                && match &mut bf.output {
+                    ReturnType::Type(_, r) => normalize_hint_type(r, in_scope, hrtb),
+                    ReturnType::Default => true,
+                };
+            if pushed {
+                hrtb.pop();
+            }
+            ok
+        }
+        _ => true,
+    }
+}
+
+fn normalize_bounds(
+    bounds: &mut syn::punctuated::Punctuated<TypeParamBound, syn::Token![+]>,
+    in_scope: &[HashSet<String>],
+    hrtb: &mut Vec<HashSet<String>>,
+) -> bool {
+    bounds.iter_mut().all(|b| match b {
+        TypeParamBound::Lifetime(lt) => {
+            let name = lt.ident.to_string();
+            name == "static"
+                || name == "_"
+                || has_lifetime(hrtb, &name)
+                || has_lifetime(in_scope, &name)
+        }
+        TypeParamBound::Trait(tb) => {
+            let pushed = push_bound_lifetimes(hrtb, &tb.lifetimes);
+            let ok = normalize_path_args(&mut tb.path, in_scope, hrtb);
+            if pushed {
+                hrtb.pop();
+            }
+            ok
+        }
+        _ => true,
+    })
+}
+
+fn normalize_path_args(
+    path: &mut Path,
+    in_scope: &[HashSet<String>],
+    hrtb: &mut Vec<HashSet<String>>,
+) -> bool {
+    for seg in &mut path.segments {
+        if let PathArguments::AngleBracketed(ab) = &mut seg.arguments {
+            let has_non_static_lt = ab
+                .args
+                .iter()
+                .any(|a| matches!(a, GenericArgument::Lifetime(lt) if lt.ident != "static"));
+            for arg in &mut ab.args {
+                match arg {
+                    GenericArgument::Lifetime(lt) => {
+                        let name = lt.ident.to_string();
+                        if !has_lifetime(hrtb, &name)
+                            && ((name != "static" && name != "_")
+                                || (has_non_static_lt && name == "static"))
+                        {
+                            lt.ident = syn::Ident::new("_", lt.ident.span());
                         }
                     }
-                    Type::Ptr(ptr) if ptr.mutability.is_some() => {
-                        Some(("AtomicPtr", Some(ptr.elem.as_ref().clone())))
+                    GenericArgument::Type(t) => {
+                        if !normalize_hint_type(t, in_scope, hrtb) {
+                            return false;
+                        }
                     }
-                    _ => None,
-                };
-                if let Some((alias, ptr_inner)) = stable_name {
-                    last.ident = syn::Ident::new(alias, last.ident.span());
-                    if let Some(elem) = ptr_inner {
-                        let mut args = syn::punctuated::Punctuated::new();
-                        args.push(GenericArgument::Type(elem));
-                        last.arguments =
-                            PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                                colon2_token: None,
-                                lt_token: Default::default(),
-                                args,
-                                gt_token: Default::default(),
-                            });
-                    } else {
-                        last.arguments = PathArguments::None;
+                    GenericArgument::AssocType(at) => {
+                        if !normalize_hint_type(&mut at.ty, in_scope, hrtb) {
+                            return false;
+                        }
                     }
+                    _ => {}
                 }
             }
         }
-        _ => {}
+    }
+    true
+}
+
+fn rewrite_unstable_atomic(tp: &mut syn::TypePath) {
+    if let Some(last) = tp.path.segments.last_mut()
+        && last.ident == "Atomic"
+        && let PathArguments::AngleBracketed(ab) = &last.arguments
+        && ab.args.len() == 1
+        && let GenericArgument::Type(inner) = &ab.args[0]
+    {
+        let stable_name = match inner {
+            Type::Path(itp) if itp.qself.is_none() && itp.path.segments.len() == 1 => {
+                match itp.path.segments[0].ident.to_string().as_str() {
+                    "bool" => Some(("AtomicBool", None)),
+                    "i8" => Some(("AtomicI8", None)),
+                    "i16" => Some(("AtomicI16", None)),
+                    "i32" => Some(("AtomicI32", None)),
+                    "i64" => Some(("AtomicI64", None)),
+                    "isize" => Some(("AtomicIsize", None)),
+                    "u8" => Some(("AtomicU8", None)),
+                    "u16" => Some(("AtomicU16", None)),
+                    "u32" => Some(("AtomicU32", None)),
+                    "u64" => Some(("AtomicU64", None)),
+                    "usize" => Some(("AtomicUsize", None)),
+                    _ => None,
+                }
+            }
+            Type::Ptr(ptr) if ptr.mutability.is_some() => {
+                Some(("AtomicPtr", Some(ptr.elem.as_ref().clone())))
+            }
+            _ => None,
+        };
+        if let Some((alias, ptr_inner)) = stable_name {
+            last.ident = syn::Ident::new(alias, last.ident.span());
+            if let Some(elem) = ptr_inner {
+                let mut args = syn::punctuated::Punctuated::new();
+                args.push(GenericArgument::Type(elem));
+                last.arguments =
+                    PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                        colon2_token: None,
+                        lt_token: Default::default(),
+                        args,
+                        gt_token: Default::default(),
+                    });
+            } else {
+                last.arguments = PathArguments::None;
+            }
+        }
     }
 }
 

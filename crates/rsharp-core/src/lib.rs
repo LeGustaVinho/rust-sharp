@@ -11,6 +11,7 @@ pub mod parser;
 pub mod ra_oracle;
 pub mod rustc_runner;
 pub mod token;
+pub mod verify_cargo;
 
 use std::path::Path;
 
@@ -23,10 +24,11 @@ pub use parallel::{
     transpile_project_files, transpile_project_files_async,
 };
 pub use ra_oracle::{
-    RustAnalyzerOracle, TypeHintMap, discover_cargo_rs_files, find_cargo_workspace_root,
-    parse_cargo_metadata_rs_files,
+    CargoFeaturesMode, RustAnalyzerOracle, TypeHintMap, discover_cargo_rs_files,
+    find_cargo_workspace_root, parse_cargo_metadata_rs_files,
 };
 pub use rustc_runner::{RunOutput, RustcJsonOutput};
+pub use verify_cargo::{CargoVerifyOptions, CargoVerifyReport, verify_project_with_cargo};
 
 fn has_candidate_rust_block(source: &str) -> bool {
     let bytes = source.as_bytes();

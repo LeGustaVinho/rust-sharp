@@ -117,6 +117,57 @@ pub fn absolute_file_uri(path: &Path) -> String {
     encoded
 }
 
+/// Cargo feature activation mode shared by `rust-analyzer` and `--verify-cargo` so both
+/// evaluate the exact same `#[cfg(feature = "...")]` graph.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CargoFeaturesMode {
+    #[default]
+    Default,
+    All,
+    List(Vec<String>),
+}
+
+impl CargoFeaturesMode {
+    /// Parses a CLI `--cargo-features` value (`default`, `all`, or comma-separated feature names).
+    pub fn parse_cli(raw: &str) -> std::result::Result<Self, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed == "default" {
+            Ok(Self::Default)
+        } else if trimmed == "all" {
+            Ok(Self::All)
+        } else {
+            let list: Vec<String> = trimmed
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if list.is_empty() {
+                Err("Invalid --cargo-features value: expected 'default', 'all', or comma-separated feature names".to_string())
+            } else {
+                Ok(Self::List(list))
+            }
+        }
+    }
+
+    pub(crate) fn to_ra_json(&self) -> Option<Value> {
+        match self {
+            Self::Default => None,
+            Self::All => Some(Value::String("all".to_string())),
+            Self::List(fs) => Some(json!(fs)),
+        }
+    }
+
+    /// Returns matching `cargo check` CLI flags for this feature mode.
+    pub fn cargo_args(&self) -> Vec<String> {
+        match self {
+            Self::Default => Vec::new(),
+            Self::All => vec!["--all-features".to_string()],
+            Self::List(fs) => vec!["--features".to_string(), fs.join(",")],
+        }
+    }
+}
+
 /// Minimal stdio JSON-RPC client driving `rust-analyzer` once per Cargo workspace to collect
 /// full Cargo-aware type hints (`textDocument/inlayHint`) across all workspace `.rs` files.
 pub struct RustAnalyzerOracle {
@@ -134,12 +185,26 @@ impl RustAnalyzerOracle {
     /// Spawns `rust-analyzer` (or `RUST_ANALYZER` env override) rooted at `workspace_root`
     /// and waits for initial workspace indexing (`experimental/serverStatus` quiescent).
     pub fn open(workspace_root: &Path) -> Result<Self> {
+        Self::open_with_features(workspace_root, &CargoFeaturesMode::Default)
+    }
+
+    /// Spawns `rust-analyzer` rooted at `workspace_root` with explicit Cargo feature configuration.
+    pub fn open_with_features(workspace_root: &Path, features: &CargoFeaturesMode) -> Result<Self> {
         let bin = std::env::var("RUST_ANALYZER").unwrap_or_else(|_| "rust-analyzer".to_string());
-        Self::open_with_bin(&bin, workspace_root)
+        Self::open_with_bin_and_features(&bin, workspace_root, features)
     }
 
     /// Spawns a specific `rust-analyzer` executable path for `workspace_root`.
     pub fn open_with_bin(bin: &str, workspace_root: &Path) -> Result<Self> {
+        Self::open_with_bin_and_features(bin, workspace_root, &CargoFeaturesMode::Default)
+    }
+
+    /// Spawns a specific `rust-analyzer` executable path with explicit Cargo feature configuration.
+    pub fn open_with_bin_and_features(
+        bin: &str,
+        workspace_root: &Path,
+        features: &CargoFeaturesMode,
+    ) -> Result<Self> {
         let mut child = Command::new(bin)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -163,7 +228,7 @@ impl RustAnalyzerOracle {
             cfg_test_reexports: HashSet::new(),
             is_no_std: false,
         };
-        oracle.initialize(workspace_root)?;
+        oracle.initialize(workspace_root, features)?;
         Ok(oracle)
     }
 
@@ -172,6 +237,16 @@ impl RustAnalyzerOracle {
         reader: impl BufRead + 'static,
         writer: impl Write + 'static,
         workspace_root: &Path,
+    ) -> Result<Self> {
+        Self::from_io_with_features(reader, writer, workspace_root, &CargoFeaturesMode::Default)
+    }
+
+    /// Creates an oracle over arbitrary stdio streams with explicit Cargo feature configuration.
+    pub fn from_io_with_features(
+        reader: impl BufRead + 'static,
+        writer: impl Write + 'static,
+        workspace_root: &Path,
+        features: &CargoFeaturesMode,
     ) -> Result<Self> {
         let mut oracle = Self {
             reader: Box::new(reader),
@@ -183,11 +258,11 @@ impl RustAnalyzerOracle {
             cfg_test_reexports: HashSet::new(),
             is_no_std: false,
         };
-        oracle.initialize(workspace_root)?;
+        oracle.initialize(workspace_root, features)?;
         Ok(oracle)
     }
 
-    fn initialize(&mut self, workspace_root: &Path) -> Result<()> {
+    fn initialize(&mut self, workspace_root: &Path, features: &CargoFeaturesMode) -> Result<()> {
         if workspace_root.join("Cargo.toml").exists() {
             collect_workspace_cfg_gated_names(
                 workspace_root,
@@ -202,6 +277,16 @@ impl RustAnalyzerOracle {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("workspace");
+        let mut cargo_cfg = json!({
+            "allTargets": true,
+            "buildScripts": { "enable": true }
+        });
+        if let Some(feat_val) = features.to_ra_json() {
+            cargo_cfg
+                .as_object_mut()
+                .unwrap()
+                .insert("features".to_string(), feat_val);
+        }
         let init_params = json!({
             "processId": std::process::id(),
             "rootUri": root_uri,
@@ -221,10 +306,7 @@ impl RustAnalyzerOracle {
                 }
             },
             "initializationOptions": {
-                "cargo": {
-                    "allTargets": true,
-                    "buildScripts": { "enable": true }
-                },
+                "cargo": cargo_cfg,
                 "procMacro": { "enable": true },
                 "checkOnSave": false,
                 "diagnostics": { "enable": false },

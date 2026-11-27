@@ -740,3 +740,110 @@ fn test_cli_to_rust_project_parallel_and_errors() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn test_cli_verify_cargo_and_cargo_features() {
+    let base = std::env::temp_dir().join(format!("rsharp_cli_verify_cargo_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("sample_pkg");
+    std::fs::create_dir_all(proj.join("src")).unwrap();
+    std::fs::write(
+        proj.join("Cargo.toml"),
+        "[package]\nname = \"sample_pkg\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [features]\nextra = []\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("lib.rs"),
+        "#[cfg(feature = \"extra\")]\npub fn extra_add(a: i32, b: i32) -> i32 { a + b }\n\
+         pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    let proj_str = proj.to_string_lossy().to_string();
+
+    // Missing and invalid --cargo-features values fail cleanly
+    let miss = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj_str,
+        "--cargo-features",
+    ]));
+    assert_eq!(miss.exit_code, 1);
+    assert!(
+        miss.stderr
+            .contains("Missing value after '--cargo-features'")
+    );
+
+    let bad = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj_str,
+        "--cargo-features",
+        ",,,",
+    ]));
+    assert_eq!(bad.exit_code, 1);
+    assert!(bad.stderr.contains("Invalid --cargo-features"));
+
+    // Stage C `--verify-cargo` without `-o` (uses temporary R# dir + shadow cargo check)
+    let ok_temp = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj_str,
+        "--no-ra",
+        "--verify-cargo",
+        "--cargo-features",
+        "extra",
+        "--no-raw-rust",
+    ]));
+    assert_eq!(ok_temp.exit_code, 0, "stderr: {}", ok_temp.stderr);
+    assert!(
+        ok_temp.stdout.contains("cargo check OK (1 files)"),
+        "stdout: {}",
+        ok_temp.stdout
+    );
+
+    // Stage C `--verify-cargo` with `-o <out_dir>` and `--cargo-features all`
+    let out_dir = base.join("out_rsh");
+    let ok_out = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &proj_str,
+        "-o",
+        &out_dir.to_string_lossy(),
+        "--no-ra",
+        "--verify-cargo",
+        "--cargo-features",
+        "all",
+    ]));
+    assert_eq!(ok_out.exit_code, 0, "stderr: {}", ok_out.stderr);
+    assert!(out_dir.join("src").join("lib.rsharp").is_file());
+
+    // Failing Stage C shadow cargo check propagates non-zero exit code
+    let bad_proj = base.join("bad_sem_pkg");
+    std::fs::create_dir_all(bad_proj.join("src")).unwrap();
+    std::fs::write(
+        bad_proj.join("Cargo.toml"),
+        "[package]\nname = \"bad_sem_pkg\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bad_proj.join("src").join("lib.rs"),
+        "pub fn bad() -> i32 { \"not_an_int\" }\n",
+    )
+    .unwrap();
+    let fail = run_cli(&args(&[
+        "from-rust",
+        "--project",
+        &bad_proj.to_string_lossy(),
+        "--no-ra",
+        "--verify-cargo",
+    ]));
+    assert_eq!(fail.exit_code, 1);
+    assert!(
+        fail.stderr.contains("Shadow cargo check failed"),
+        "stderr: {}",
+        fail.stderr
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}

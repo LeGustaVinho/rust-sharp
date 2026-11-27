@@ -953,7 +953,7 @@ impl RustCodegen {
                 self.generic_depth += 1;
             }
             self.indent += 1;
-            self.emit_block_stmts(body);
+            self.emit_block_stmts_inner(body, true);
             self.indent -= 1;
             if !f.generics.is_empty() {
                 self.generic_depth -= 1;
@@ -1101,11 +1101,29 @@ impl RustCodegen {
     }
 
     fn emit_block_stmts(&mut self, block: &Block) {
+        self.emit_block_stmts_inner(block, false);
+    }
+
+    fn emit_block_stmts_inner(&mut self, block: &Block, lift_brace_macro_tail: bool) {
         self.push_scope();
         let prev_shadowed = self.shadowed_expr_aliases.clone();
         self.emit_inner_docs_and_attrs(&block.inner_docs, &block.inner_attrs);
-        for stmt in &block.stmts {
-            self.emit_stmt(stmt);
+        if lift_brace_macro_tail
+            && let Some((last, init)) = block.stmts.split_last()
+            && let StmtKind::Return(Some(Expr::MacroCall(mc))) = &last.kind
+            && mc.delim == MacroDelim::Brace
+        {
+            for st in init {
+                self.emit_stmt(st);
+            }
+            for a in &last.attrs {
+                self.line(&format_attr(a));
+            }
+            self.line(&format_macro_call(mc));
+        } else {
+            for stmt in &block.stmts {
+                self.emit_stmt(stmt);
+            }
         }
         self.shadowed_expr_aliases = prev_shadowed;
         self.pop_scope();

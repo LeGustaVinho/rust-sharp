@@ -949,7 +949,8 @@ fn break_and_loop_jumps(items: &[i32]) -> i32 {
     assert!(!cx_rsh.contains("__blk_val"), "got:\n{cx_rsh}");
     assert!(cx_rsh.contains("Box<dyn std.any.Any + Send>"));
     assert!(cx_rust.contains("api::BUDGET"));
-    assert!(cx_rust.contains("return my_macro!{ 42 };"));
+    assert!(cx_rust.contains("my_macro!{ 42 }"));
+    assert!(!cx_rust.contains("return my_macro!{ 42 };"));
 
     // 4. Closure parameter hints & strict vs non-strict fallback
     let clo_src = "fn f() { let _ = [1].iter().copied().map(|x| x + 1); }";
