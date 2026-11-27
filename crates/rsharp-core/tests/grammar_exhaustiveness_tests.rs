@@ -2125,4 +2125,35 @@ impl S {
         )
         .unwrap();
     assert!(dual_hints.is_empty());
+
+    // Sound method-call inference (fixes `tokio` `file.rs` + `open_options.rs` Stage C):
+    // - `path.to_owned()` on `&Path` stays `var`, while `"hi".to_owned()` infers `string`
+    // - `opts.clone()` on `&Opts` stays `var`, while owned `v.clone()` infers `Opts`
+    // - `times.into_std()` does NOT steal `MyFile::into_std() -> i32`, while `f.into_std()` does!
+    let src_methods = "\
+use std::path::Path;
+#[derive(Clone)]
+struct Opts(i32);
+struct MyFile;
+struct MyTimes;
+impl MyFile { fn into_std(&self) -> i32 { 1 } }
+impl MyTimes { fn into_std(&self) -> u64 { 2 } }
+pub fn check_methods(p: &Path, o: &Opts, owned_o: Opts, f: &MyFile, t: MyTimes) {
+    let pb = p.to_owned();
+    let s = \"hi\".to_owned();
+    let oc = o.clone();
+    let owned_c = owned_o.clone();
+    let fi = f.into_std();
+    let ti = t.into_std();
+    let _ = (pb, s, oc, owned_c, fi, ti);
+}
+";
+    let (rsh_m, _) = convert_no_ra(src_methods);
+    assert!(rsh_m.contains("var pb = p.to_owned();"), "{rsh_m}");
+    assert!(rsh_m.contains("string s = \"hi\".to_owned();"), "{rsh_m}");
+    assert!(rsh_m.contains("var oc = o.clone();"), "{rsh_m}");
+    assert!(rsh_m.contains("Opts owned_c = owned_o.clone();"), "{rsh_m}");
+    assert!(rsh_m.contains("int fi = f.into_std();"), "{rsh_m}");
+    assert!(rsh_m.contains("ulong ti = t.into_std();"), "{rsh_m}");
+    rsharp_core::check_rsharp(&rsh_m).expect("sound method-call inference must pass rustc");
 }

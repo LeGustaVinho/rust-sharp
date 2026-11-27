@@ -597,7 +597,6 @@ impl<'a> RustToRSharp<'a> {
                 }
                 Item::Impl(im) => {
                     let self_ty = self.fmt_type(&im.self_ty);
-                    let is_trait_impl = im.trait_.is_some();
                     for sub in &im.items {
                         if let syn::ImplItem::Fn(m) = sub
                             && m.sig.generics.type_params().next().is_none()
@@ -606,11 +605,9 @@ impl<'a> RustToRSharp<'a> {
                             if ret == "Self" {
                                 ret = self_ty.clone();
                             }
-                            let fn_returns = &mut Rc::make_mut(&mut self.symbols).fn_returns;
-                            fn_returns.insert(format!("{}::{}", self_ty, m.sig.ident), ret.clone());
-                            if !is_trait_impl {
-                                fn_returns.insert(m.sig.ident.to_string(), ret);
-                            }
+                            Rc::make_mut(&mut self.symbols)
+                                .fn_returns
+                                .insert(format!("{}::{}", self_ty, m.sig.ident), ret);
                         }
                     }
                 }
@@ -4077,15 +4074,30 @@ impl<'a> RustToRSharp<'a> {
             Expr::MethodCall(mc) => {
                 let m = mc.method.to_string();
                 match m.as_str() {
-                    "to_string" | "to_owned" => Some("string".to_string()),
+                    "to_string" => Some("string".to_string()),
+                    "to_owned" => self
+                        .infer_expr_type(&mc.receiver)
+                        .filter(|t| matches!(strip_leading_borrow_prefix(t, false), "str"))
+                        .map(|_| "string".to_string()),
                     "len" => Some("nuint".to_string()),
                     "is_empty" => Some("bool".to_string()),
-                    "clone" => self.infer_expr_type(&mc.receiver),
-                    _ => self
-                        .symbols
-                        .fn_returns
-                        .get(&m)
-                        .map(|r| strip_non_static_lifetimes(r)),
+                    "clone" => self.infer_expr_type(&mc.receiver).filter(|t| {
+                        !t.starts_with("read ")
+                            && !t.starts_with("read<")
+                            && !t.starts_with("write ")
+                            && !t.starts_with("write<")
+                    }),
+                    _ => {
+                        let recv = self.infer_expr_type(&mc.receiver)?;
+                        let base = strip_leading_borrow_prefix(
+                            strip_leading_borrow_prefix(&recv, false),
+                            true,
+                        );
+                        self.symbols
+                            .fn_returns
+                            .get(&format!("{}::{}", base, m))
+                            .map(|r| strip_non_static_lifetimes(r))
+                    }
                 }
             }
             Expr::If(eif) => {
