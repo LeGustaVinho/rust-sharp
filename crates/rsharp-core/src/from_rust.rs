@@ -3999,8 +3999,17 @@ impl<'a> RustToRSharp<'a> {
                                 Some(lt)
                             }
                         }
-                        (Some(lt), None) if !is_unsuffixed_num_lit(&eb.left) => Some(lt),
-                        (None, Some(rt)) if !is_unsuffixed_num_lit(&eb.right) => Some(rt),
+                        (Some(lt), None)
+                            if !is_unsuffixed_num_lit(&eb.left) && is_rsharp_primitive_num(&lt) =>
+                        {
+                            Some(lt)
+                        }
+                        (None, Some(rt))
+                            if !is_unsuffixed_num_lit(&eb.right)
+                                && is_rsharp_primitive_num(&rt) =>
+                        {
+                            Some(rt)
+                        }
                         _ => None,
                     }
                 }
@@ -4014,11 +4023,19 @@ impl<'a> RustToRSharp<'a> {
             Expr::Array(ea) => {
                 let first = ea.elems.first()?;
                 let elem_ty = self.infer_expr_type(first)?;
-                Some(format!("{}[{}]", elem_ty, ea.elems.len()))
+                Some(fmt_rsharp::fmt_type_array(
+                    &elem_ty,
+                    inferred_type_needs_postfix_parens(&elem_ty),
+                    &[ea.elems.len().to_string()],
+                ))
             }
             Expr::Repeat(er) => {
                 let elem_ty = self.infer_expr_type(&er.expr)?;
-                Some(format!("{}[{}]", elem_ty, self.child().fmt_expr(&er.len)))
+                Some(fmt_rsharp::fmt_type_array(
+                    &elem_ty,
+                    inferred_type_needs_postfix_parens(&elem_ty),
+                    &[self.child().fmt_expr(&er.len)],
+                ))
             }
             Expr::Path(ep) => {
                 if let Some(id) = ep.path.get_ident() {
@@ -4059,15 +4076,7 @@ impl<'a> RustToRSharp<'a> {
                     }
                     if full == "Some" || full == "Option.Some" {
                         let inner = ec.args.first().and_then(|a| self.infer_expr_type(a))?;
-                        if inner.starts_with("read")
-                            || inner.starts_with("write")
-                            || inner.starts_with("dyn ")
-                            || inner.starts_with("impl ")
-                            || inner.starts_with("unsafe ")
-                            || inner.starts_with("extern ")
-                            || inner.starts_with("forall<")
-                            || inner.contains(" -> ")
-                        {
+                        if inferred_type_needs_postfix_parens(&inner) {
                             return Some(format!("Option<{}>", inner));
                         }
                         return Some(format!("{}?", inner));
@@ -4686,6 +4695,39 @@ fn is_unqualified_non_prelude_path(path: &Path) -> bool {
             .segments
             .first()
             .is_some_and(|seg| !is_rust_prelude_or_primitive_type(&seg.ident.to_string()))
+}
+
+fn inferred_type_needs_postfix_parens(ty: &str) -> bool {
+    ty.starts_with("read ")
+        || ty.starts_with("read<")
+        || ty.starts_with("write ")
+        || ty.starts_with("write<")
+        || ty.starts_with("dyn ")
+        || ty.starts_with("impl ")
+        || ty.starts_with("unsafe ")
+        || ty.starts_with("extern ")
+        || ty.starts_with("forall<")
+        || ty.contains(" -> ")
+}
+
+fn is_rsharp_primitive_num(ty: &str) -> bool {
+    matches!(
+        ty,
+        "sbyte"
+            | "short"
+            | "int"
+            | "long"
+            | "i128"
+            | "nint"
+            | "byte"
+            | "ushort"
+            | "uint"
+            | "ulong"
+            | "u128"
+            | "nuint"
+            | "float"
+            | "double"
+    )
 }
 
 fn is_unsuffixed_num_lit(expr: &Expr) -> bool {

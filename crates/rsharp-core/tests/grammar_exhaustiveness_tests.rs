@@ -2239,4 +2239,24 @@ pub fn run() {
     assert!(rsh_u.contains("mut var arr = [1, 2];"), "{rsh_u}");
     assert!(rsh_u.contains("var neg = -1;"), "{rsh_u}");
     rsharp_core::check_rsharp(&rsh_u).expect("unsuffixed array/repeat/unary must pass rustc");
+
+    // Parenthesized array-of-reference inference (`&["a", "b"]` -> `read (read str)[2]`, fixes `fd --no-ra`)
+    // and heterogeneous binary ops (`Instant + Duration`, fixes `tokio` `tests/time_sleep.rs`):
+    let src_arr_bin = "\
+use std::time::{Duration, Instant};
+pub fn check_arr_and_time(now: Instant) -> Instant {
+    let dirs = &[\"a\", \"b\"];
+    let rep = [\"x\"; 2];
+    let deadline = (now + Duration::from_millis(1)) + Duration::new(0, 1);
+    let _ = (dirs, rep);
+    deadline
+}
+";
+    let (rsh_ab, rust_ab) = convert_no_ra(src_arr_bin);
+    assert!(rsh_ab.contains("read (read str)[2] dirs ="), "{rsh_ab}");
+    assert!(rsh_ab.contains("(read str)[2] rep ="), "{rsh_ab}");
+    assert!(rust_ab.contains("let dirs: &[(&str); 2] ="), "{rust_ab}");
+    assert!(rsh_ab.contains("var deadline ="), "{rsh_ab}");
+    rsharp_core::check_rsharp(&rsh_ab)
+        .expect("ref-array parens and Instant + Duration must pass rustc");
 }
