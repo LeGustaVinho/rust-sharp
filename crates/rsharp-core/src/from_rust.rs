@@ -2420,7 +2420,7 @@ impl<'a> RustToRSharp<'a> {
                 }
                 HintLookup::None => {
                     if let Some(init) = &local.init {
-                        if !self.type_hints.is_empty()
+                        if !self.options.use_rustc_inference
                             && !self.strict_unnameable
                             && is_unsuffixed_num_lit(&init.expr)
                         {
