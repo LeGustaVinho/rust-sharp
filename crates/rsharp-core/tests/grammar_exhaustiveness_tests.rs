@@ -2202,4 +2202,41 @@ pub fn check_shadow(s: &Semaphore) -> bool {
     let (rsh_ac, _) = convert_no_ra(src_async_clo);
     assert!(rsh_ac.contains("var quick = () => async"), "{rsh_ac}");
     rsharp_core::check_rsharp(&rsh_ac).expect("closure returning async block must pass rustc");
+
+    // Unsuffixed numeric array/repeat/unary inlines stay `var` when RA hints are active (fixes `tokio` `tests/udp.rs`):
+    let src_unsuf = "\
+pub fn takes_u8(_: &mut [u8], _: i8) {}
+pub fn run() {
+    let other = 1usize;
+    let mut buf = [0; 4];
+    let mut arr = [1, 2];
+    let neg = -1;
+    takes_u8(&mut buf, neg);
+    takes_u8(&mut arr, neg);
+    let _ = other;
+}
+";
+    let mut u_hints = TypeHintMap::default();
+    let (ol, oc) = src_unsuf
+        .lines()
+        .enumerate()
+        .find_map(|(i, l)| {
+            l.find("let other")
+                .map(|p| ((i + 1) as u32, (p + 9) as u32))
+        })
+        .unwrap();
+    u_hints.insert(ol, oc, "usize".to_string());
+    let rsh_u = convert_from_rust_with_hints(
+        src_unsuf,
+        FromRustOptions {
+            use_rustc_inference: false,
+        },
+        &u_hints,
+        false,
+    )
+    .expect("unsuffixed array/repeat/unary conversion must succeed");
+    assert!(rsh_u.contains("mut var buf = [0; 4];"), "{rsh_u}");
+    assert!(rsh_u.contains("mut var arr = [1, 2];"), "{rsh_u}");
+    assert!(rsh_u.contains("var neg = -1;"), "{rsh_u}");
+    rsharp_core::check_rsharp(&rsh_u).expect("unsuffixed array/repeat/unary must pass rustc");
 }

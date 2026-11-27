@@ -4699,6 +4699,9 @@ fn is_unsuffixed_num_lit(expr: &Expr) -> bool {
             ..
         }) => lf.suffix().is_empty(),
         Expr::Paren(ep) => is_unsuffixed_num_lit(&ep.expr),
+        Expr::Unary(eu) => is_unsuffixed_num_lit(&eu.expr),
+        Expr::Repeat(er) => is_unsuffixed_num_lit(&er.expr),
+        Expr::Array(ea) => !ea.elems.is_empty() && ea.elems.iter().all(is_unsuffixed_num_lit),
         _ => false,
     }
 }
