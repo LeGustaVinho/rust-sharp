@@ -2196,4 +2196,10 @@ pub fn check_shadow(s: &Semaphore) -> bool {
     assert!(rsh_sh.contains("var sem = s;"), "{rsh_sh}");
     assert!(rsh_sh.contains("bool ok = sem.is_idle();"), "{rsh_sh}");
     rsharp_core::check_rsharp(&rsh_sh).expect("local use shadow must pass rustc");
+
+    // Non-capturing closure returning `async { ... }` must stay `var`, NOT `fn() -> impl Future` (E0562, `tokio`):
+    let src_async_clo = "pub fn f() { let quick = || async {}; let _ = quick(); }";
+    let (rsh_ac, _) = convert_no_ra(src_async_clo);
+    assert!(rsh_ac.contains("var quick = () => async"), "{rsh_ac}");
+    rsharp_core::check_rsharp(&rsh_ac).expect("closure returning async block must pass rustc");
 }

@@ -4173,7 +4173,9 @@ impl<'a> RustToRSharp<'a> {
                         param_tys.join(", "),
                         ret
                     ))
-                } else if self.closure_captures_outer(&typed_inputs, &ec.body) {
+                } else if self.closure_captures_outer(&typed_inputs, &ec.body)
+                    || ret.starts_with("impl ")
+                {
                     None
                 } else {
                     Some(format!("({}) -> {}", param_tys.join(", "), ret))
