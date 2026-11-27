@@ -123,7 +123,7 @@ fn verify_project_with_cargo_in(
     let default_target = shadow.path().join("target");
     let target_dir = options.target_dir.as_deref().unwrap_or(&default_target);
     let mut cmd = Command::new(&options.cargo_bin);
-    cmd.current_dir(&shadow_proj).arg("check");
+    cmd.current_dir(&shadow_proj).args(["check", "--quiet"]);
     if proj_rel.as_os_str().is_empty() {
         cmd.arg("--workspace");
     }

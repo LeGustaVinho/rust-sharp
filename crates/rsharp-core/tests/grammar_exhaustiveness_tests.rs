@@ -2059,4 +2059,70 @@ impl<'ok> Holder<'ok> {
         text_list.contains(r#""features":["rt","time"]"#),
         "{text_list}"
     );
+
+    // 4. Live Stage C discoveries:
+    //    a) Struct destructuring of lifetime-parameterized fields (`Atoms<'a>` -> `Atoms<'_>`)
+    //       compiles inside `impl Window<'_>` (fixes `emilk/egui` `window.rs` & `checkbox.rs`).
+    //    b) Capturing closures (`|| self.err(...)` / `|(a, _): (i32, i32)| a + outer`) stay `var`
+    //       instead of emitting an invalid `fn()` pointer (fixes `zoxide --no-ra`).
+    //    c) Files swapping `#[cfg(test)]` vs `#[cfg(not(test))]` skip RA hints cleanly
+    //       (fixes `tokio/src/fs/file.rs` dual `--lib` / `--tests` compilation).
+    let src_stage_c = "\
+struct Atoms<'a>(&'a str);
+struct StaticAtoms(&'static str);
+struct Multi<'a, 'b>(&'a str, &'b str);
+struct Win<'a> { title: Atoms<'a>, s: StaticAtoms, m: Multi<'a, 'static> }
+impl Win<'_> {
+    fn show(self) -> usize {
+        let Win { title, s, m } = self;
+        let outer = 1i32;
+        let cap_self = || self_len(s.0);
+        let cap_outer = |(a, _): (i32, i32)| a + outer;
+        let non_cap = |(a, _): (i32, i32)| a + 1;
+        let _ = (cap_self, cap_outer, non_cap, m.0);
+        title.0.len()
+    }
+}
+fn self_len(s: &str) -> usize { s.len() }
+";
+    let (rsh_sc, rust_sc) = convert_no_ra(src_stage_c);
+    assert_eq!(count_raw_rust_blocks(&rsh_sc), 0, "{rsh_sc}");
+    assert!(rsh_sc.contains("Atoms<life _> title"), "{rsh_sc}");
+    assert!(rsh_sc.contains("Multi<life _, life static> m"), "{rsh_sc}");
+    assert!(rsh_sc.contains("var cap_outer ="), "{rsh_sc}");
+    assert!(rsh_sc.contains("((int, int)) -> int non_cap ="), "{rsh_sc}");
+    assert!(rust_sc.contains("Atoms<'_>"), "{rust_sc}");
+    rsharp_core::check_rsharp(&rsh_sc)
+        .expect("struct field lifetime elision & capturing closure must pass rustc");
+
+    // Capturing `self` directly inside a method closure:
+    let src_self_cap = "\
+struct S(i32);
+impl S {
+    fn get(&self) -> i32 { self.0 }
+    fn run(&self) -> i32 {
+        let f = || self.get();
+        f()
+    }
+}
+";
+    let (rsh_self, _) = convert_no_ra(src_self_cap);
+    assert!(rsh_self.contains("var f = () => this.get();"), "{rsh_self}");
+    rsharp_core::check_rsharp(&rsh_self).expect("self-capturing closure must pass rustc");
+
+    // Dual `#[cfg(test)]` / `#[cfg(not(test))]` file skips RA hints without querying LSP:
+    let mut o_dual = RustAnalyzerOracle::from_io_with_features(
+        Cursor::new(make_init_stream()),
+        Vec::new(),
+        &std::env::temp_dir(),
+        &CargoFeaturesMode::Default,
+    )
+    .unwrap();
+    let dual_hints = o_dual
+        .type_hints_for_file(
+            std::path::Path::new("file.rs"),
+            "#[cfg(test)]\nuse mocks::J;\n#[cfg(not(test))]\nuse real::J;\n",
+        )
+        .unwrap();
+    assert!(dual_hints.is_empty());
 }

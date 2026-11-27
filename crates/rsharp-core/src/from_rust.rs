@@ -4143,12 +4143,22 @@ impl<'a> RustToRSharp<'a> {
                         param_tys.join(", "),
                         ret
                     ))
+                } else if self.closure_captures_outer(&typed_inputs, &ec.body) {
+                    None
                 } else {
                     Some(format!("({}) -> {}", param_tys.join(", "), ret))
                 }
             }
             _ => None,
         }
+    }
+
+    fn closure_captures_outer(&self, inputs: &[(&Pat, &syn::Type)], body: &Expr) -> bool {
+        let mut param_names = HashSet::new();
+        for &(pat, _) in inputs {
+            collect_pat_ident_names(pat, &mut param_names);
+        }
+        stream_captures_outer(body.to_token_stream(), &param_names, &self.scopes)
     }
 
     fn bind_typed_pat(&mut self, pat: &Pat, ty: &syn::Type) {
@@ -5332,11 +5342,68 @@ fn strip_non_static_lifetimes(ty: &str) -> String {
             rest = &rest[open.len() + close_idx + 1..];
             continue;
         }
+        if !ty.contains("forall<")
+            && (out.ends_with('<') || out.ends_with(", "))
+            && let Some(after_life) = rest.strip_prefix("life ")
+        {
+            let ident_len = after_life
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'@')
+                .count();
+            let life = &after_life[..ident_len];
+            if life == "static" || life == "_" {
+                out.push_str(&rest[..5 + ident_len]);
+            } else {
+                out.push_str("life _");
+            }
+            rest = &after_life[ident_len..];
+            continue;
+        }
         let ch = rest.chars().next().unwrap();
         out.push(ch);
         rest = &rest[ch.len_utf8()..];
     }
     out
+}
+
+fn collect_pat_ident_names(pat: &Pat, out: &mut HashSet<String>) {
+    match pat {
+        Pat::Ident(pi) => {
+            out.insert(pi.ident.to_string());
+        }
+        Pat::Tuple(pt) => {
+            for p in &pt.elems {
+                collect_pat_ident_names(p, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn stream_captures_outer(
+    stream: proc_macro2::TokenStream,
+    params: &HashSet<String>,
+    scopes: &[HashMap<String, String>],
+) -> bool {
+    for tt in stream {
+        match tt {
+            proc_macro2::TokenTree::Ident(id) => {
+                let name = id.to_string();
+                if !params.contains(&name)
+                    && (name == "self" || scopes.iter().any(|s| s.contains_key(&name)))
+                {
+                    return true;
+                }
+            }
+            proc_macro2::TokenTree::Group(g)
+                if stream_captures_outer(g.stream(), params, scopes) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn split_tuple_type_str(ty: &str) -> Option<Vec<String>> {

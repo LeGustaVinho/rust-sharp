@@ -360,6 +360,12 @@ impl RustAnalyzerOracle {
 
     /// Queries `rust-analyzer` for all inferred type inlay hints in `file_path`.
     pub fn type_hints_for_file(&mut self, file_path: &Path, text: &str) -> Result<TypeHintMap> {
+        // Files that swap imports/types between `#[cfg(test)]` and `#[cfg(not(test))]` (e.g.
+        // mock `JoinHandle` in `tokio/src/fs/file.rs`) have incompatible types under `--lib` vs
+        // `--tests`, so skip RA hints and let `var` preserve dual-target compilation.
+        if text.contains("cfg(test)") && text.contains("cfg(not(test))") {
+            return Ok(TypeHintMap::default());
+        }
         let uri = path_to_file_uri(file_path);
         self.send_notification(
             "textDocument/didOpen",
