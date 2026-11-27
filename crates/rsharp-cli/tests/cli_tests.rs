@@ -26,7 +26,11 @@ fn project_discovery_follows_linked_directories_and_keeps_path_order() {
         "[package]\nname = \"linked\"\nversion = \"0.1.0\"\n",
     )
     .unwrap();
-    std::fs::write(src.join("lib.rs"), "").unwrap();
+    std::fs::write(
+        src.join("lib.rs"),
+        "mod a;\n#[path = \"a/linked.rs\"]\nmod linked;\n",
+    )
+    .unwrap();
     std::fs::write(src.join("a.rs"), "invalid {{{").unwrap();
     std::fs::write(external.join("linked.rs"), "invalid {{{").unwrap();
     let link = src.join("a");
@@ -346,7 +350,7 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     .unwrap();
     std::fs::write(
         proj.join("src").join("lib.rs"),
-        "pub fn double(x: i32) -> i32 { let y = x + x; y }\n",
+        "#[path = \"vendor/vendored.rs\"]\npub mod vendored;\npub fn double(x: i32) -> i32 { let y = x + x; y }\n",
     )
     .unwrap();
     std::fs::write(
@@ -419,7 +423,7 @@ fn test_cli_from_rust_project_and_workspace_mode() {
     assert_eq!(ok.exit_code, 0, "stderr: {}", ok.stderr);
     assert!(ok.stdout.contains("Converted 3/3 files cleanly"));
     let converted_lib = std::fs::read_to_string(out_dir.join("src").join("lib.rsharp")).unwrap();
-    assert!(converted_lib.starts_with("public int double(int x)\n{\n"));
+    assert!(converted_lib.contains("public int double(int x)\n{\n"));
     assert!(
         out_dir
             .join("src")

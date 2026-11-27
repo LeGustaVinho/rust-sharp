@@ -1320,6 +1320,7 @@ void direct_wave2<I>(I it) where I : Iterator<Item = int> + Lending<Item<static>
     std::fs::write(
         proj.join("src").join("lib.rs"),
         "pub mod ok_mod;\n\
+         pub mod empty_mod;\n\
          pub const CORE: &str = include_str!(\"minicore.rs\");\n\
          pub fn tbl() { include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/process_table.rs\")); }\n\
          pub fn out_lib() { include!(concat!(env!(\"OUT_DIR\"), \"/lib.rs\")); }\n\
@@ -1485,5 +1486,214 @@ void direct_wave2<I>(I it) where I : Iterator<Item = int> + Lending<Item<static>
             .iter()
             .any(|p| p.ends_with("multifrontmatter.rs"))
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn module_graph_discovery_all_rules_and_edge_cases() {
+    let base = std::env::temp_dir().join(format!("rsharp_modgraph_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let proj = base.join("ws");
+    std::fs::create_dir_all(proj.join("src").join("inline_plain")).unwrap();
+    std::fs::create_dir_all(proj.join("src").join("custom_inline")).unwrap();
+    std::fs::create_dir_all(proj.join("src").join("custom_os")).unwrap();
+    std::fs::create_dir_all(proj.join("src").join("nightly_fallback").join("fb_dir")).unwrap();
+    std::fs::create_dir_all(proj.join("src").join("dir_not_file")).unwrap();
+    std::fs::create_dir_all(proj.join("tests").join("fixtures")).unwrap();
+
+    std::fs::write(
+        proj.join("Cargo.toml"),
+        "[package]\nname = \"ws\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("lib.rs"),
+        "macro_rules! decl_mods { ($($m:ident),*) => { $(mod $m;)* }; }\n\
+         macro_rules! static_mod { () => { mod from_static_macro; }; }\n\
+         macro_rules! plain_mac { () => { fn nop() {} }; }\n\
+         decl_mods!(macro_a, (macro_b));\n\
+         static_mod!();\n\
+         plain_mac!();\n\
+         #[path = \"custom_os/unix.rs\"]\n\
+         #[cfg_attr(windows, path = \"custom_os/win.rs\")]\n\
+         #[cfg_attr(unix, 123)]\n\
+         #[path = 123]\n\
+         mod os_imp;\n\
+         #[path = \"missing_mod.rs\"]\n\
+         mod missing_mod;\n\
+         #[path = \"dir_not_file\"]\n\
+         mod dir_not_file_mod;\n\
+         #[path = \"lib.rs\"]\n\
+         mod cycle_self;\n\
+         mod inline_plain {\n\
+             pub mod leaf;\n\
+         }\n\
+         #[path = \"custom_inline\"]\n\
+         mod inline_path {\n\
+             pub mod leaf;\n\
+         }\n\
+         mod r#match;\n\
+         cfg_if::cfg_if! {\n\
+             if #[cfg(unix)] {\n\
+                 pub(crate) mod cfg_if_mod;\n\
+             } else {\n\
+                 pub mod cfg_if_else;\n\
+             }\n\
+         }\n\
+         include!(\"included_mods.rs\");\n\
+         include!(\"included_mods.rs\");\n\
+         include!(\"missing_inc.rs\");\n\
+         include!(\"dir_not_file\");\n\
+         mod nightly_fallback;\n",
+    )
+    .unwrap();
+    // Unreferenced pseudocode file inside `src/` (like linera-protocol's `template.rs`) MUST be skipped!
+    std::fs::write(
+        proj.join("src").join("template.rs"),
+        "fn {{ invalid_pseudocode }}()\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("src").join("macro_a.rs"), "pub fn a() {}\n").unwrap();
+    std::fs::write(proj.join("src").join("macro_b.rs"), "pub fn b() {}\n").unwrap();
+    std::fs::write(
+        proj.join("src").join("from_static_macro.rs"),
+        "pub fn s() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("custom_os").join("unix.rs"),
+        "pub fn u() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("custom_os").join("win.rs"),
+        "pub fn w() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("inline_plain").join("leaf.rs"),
+        "pub fn il() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src").join("custom_inline").join("leaf.rs"),
+        "pub fn cl() {}\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("src").join("match.rs"), "pub fn m() {}\n").unwrap();
+    std::fs::write(proj.join("src").join("cfg_if_mod.rs"), "pub fn c1() {}\n").unwrap();
+    std::fs::write(proj.join("src").join("cfg_if_else.rs"), "pub fn c2() {}\n").unwrap();
+    // Included fragment itself MUST NOT appear in discovered, but `mod from_inc;` inside it MUST!
+    std::fs::write(proj.join("src").join("included_mods.rs"), "mod from_inc;\n").unwrap();
+    std::fs::write(proj.join("src").join("from_inc.rs"), "pub fn inc() {}\n").unwrap();
+    // Valid Rust token stream that fails `syn::parse_file`, exercising the token-stream fallback!
+    std::fs::write(
+        proj.join("src").join("nightly_fallback.rs"),
+        "#![allow(dead_code)]\n\
+         #[1 + 2]\n\
+         gen fn nightly_only() {}\n\
+         #[path = \"fb_target.rs\"]\n\
+         pub(crate) mod fb_t;\n\
+         #[path = \"fb_dir\"]\n\
+         mod fb_in { pub mod leaf; }\n\
+         include!(\"fb_inc.rs\");\n\
+         include!(concat!(\"x\", \".rs\"));\n\
+         let include = 1;\n\
+         { mod at_zero_missing; }\n\
+         $mod dollar_prefixed;\n\
+         mod $m;\n\
+         mod bad = 1;\n\
+         #not_bracket\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src")
+            .join("nightly_fallback")
+            .join("fb_target.rs"),
+        "pub fn ft() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("src")
+            .join("nightly_fallback")
+            .join("fb_dir")
+            .join("leaf.rs"),
+        "pub fn fl() {}\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("src").join("fb_inc.rs"), "mod fb_from_inc;\n").unwrap();
+    std::fs::write(
+        proj.join("src")
+            .join("nightly_fallback")
+            .join("fb_from_inc.rs"),
+        "pub fn ffi() {}\n",
+    )
+    .unwrap();
+    // Integration test target using `#[path = "fixtures/helper.rs"]` (outside `src/` without `mod.rs`)!
+    std::fs::write(
+        proj.join("tests").join("integ.rs"),
+        "#[path = \"fixtures/helper.rs\"]\nmod helper;\n#[test]\nfn t() { helper::h(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests").join("fixtures").join("helper.rs"),
+        "pub fn h() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proj.join("tests").join("fixtures").join("unreferenced.rs"),
+        "broken {{{\n",
+    )
+    .unwrap();
+
+    let discovered = discover_cargo_rs_files(&proj).expect("should discover module graph");
+    for expected in [
+        "lib.rs",
+        "macro_a.rs",
+        "macro_b.rs",
+        "from_static_macro.rs",
+        "unix.rs",
+        "win.rs",
+        "match.rs",
+        "cfg_if_mod.rs",
+        "cfg_if_else.rs",
+        "from_inc.rs",
+        "nightly_fallback.rs",
+        "fb_target.rs",
+        "fb_from_inc.rs",
+        "integ.rs",
+        "helper.rs",
+    ] {
+        assert!(
+            discovered.iter().any(|p| p.ends_with(expected)),
+            "missing {expected} in {discovered:?}"
+        );
+    }
+    assert!(
+        discovered
+            .iter()
+            .any(|p| p.ends_with("inline_plain\\leaf.rs") || p.ends_with("inline_plain/leaf.rs"))
+    );
+    assert!(
+        discovered
+            .iter()
+            .any(|p| p.ends_with("custom_inline\\leaf.rs") || p.ends_with("custom_inline/leaf.rs"))
+    );
+    assert!(
+        discovered
+            .iter()
+            .any(|p| p.ends_with("fb_dir\\leaf.rs") || p.ends_with("fb_dir/leaf.rs"))
+    );
+    for excluded in [
+        "template.rs",
+        "included_mods.rs",
+        "fb_inc.rs",
+        "unreferenced.rs",
+    ] {
+        assert!(
+            !discovered.iter().any(|p| p.ends_with(excluded)),
+            "unexpectedly discovered {excluded} in {discovered:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&base);
 }

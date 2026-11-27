@@ -3,6 +3,7 @@ pub mod codegen_rust;
 pub mod error;
 pub mod from_rust;
 pub mod lexer;
+mod module_graph;
 pub mod parallel;
 pub mod parser;
 pub mod ra_oracle;
