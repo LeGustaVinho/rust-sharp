@@ -1265,7 +1265,7 @@ impl RustCodegen {
                     .map(|l| format!("{}: ", fmt_rust_lifetime(l)))
                     .unwrap_or_default();
                 let p = self.fmt_pattern(pat);
-                let it = self.fmt_expr(iter);
+                let it = self.fmt_no_struct_expr(iter);
                 self.line(&format!("{}for {} in {} {{", lbl, p, it));
                 self.indent += 1;
                 self.push_scope();
@@ -1338,7 +1338,7 @@ impl RustCodegen {
     ) {
         match cond {
             Condition::Bool(e) => {
-                let s = self.fmt_expr(e);
+                let s = self.fmt_no_struct_expr(e);
                 self.line(&format!("{}{} {{", prefix, s));
                 self.indent += 1;
                 if as_value {
@@ -1354,7 +1354,7 @@ impl RustCodegen {
                 pat,
             } => {
                 let p = self.fmt_pattern(pat);
-                let e = self.fmt_expr(expr);
+                let e = self.fmt_no_struct_expr(expr);
                 self.line(&format!("{}let {} = {} {{", prefix, p, e));
                 self.indent += 1;
                 self.push_scope();
@@ -1397,13 +1397,13 @@ impl RustCodegen {
                     match item {
                         ChainItem::IsPattern { expr, pat } => {
                             let p = self.fmt_pattern(pat);
-                            let e = self.fmt_expr(expr);
+                            let e = self.fmt_no_struct_expr(expr);
                             checks.extend(self.collect_pattern_type_checks(pat));
                             self.register_pattern_vars(pat);
                             parts.push(format!("let {} = {}", p, e));
                         }
                         ChainItem::Bool(e) => {
-                            parts.push(self.fmt_expr(e));
+                            parts.push(self.fmt_no_struct_expr(e));
                         }
                     }
                 }
@@ -1452,6 +1452,15 @@ impl RustCodegen {
         }
     }
 
+    fn fmt_no_struct_expr(&self, expr: &Expr) -> String {
+        let s = self.fmt_expr(expr);
+        if ends_with_struct_lit(expr) {
+            format!("({})", s)
+        } else {
+            s
+        }
+    }
+
     fn fmt_condition_expr<'a>(
         &self,
         cond: &'a Condition,
@@ -1459,14 +1468,14 @@ impl RustCodegen {
         bound_pats: &mut Vec<&'a Pattern>,
     ) -> String {
         match cond {
-            Condition::Bool(e) => sub.fmt_expr(e),
+            Condition::Bool(e) => sub.fmt_no_struct_expr(e),
             Condition::IsPattern {
                 expr,
                 negated: false,
                 pat,
             } => {
                 let p = sub.fmt_pattern(pat);
-                let e = sub.fmt_expr(expr);
+                let e = sub.fmt_no_struct_expr(expr);
                 sub.register_pattern_vars(pat);
                 bound_pats.push(pat);
                 format!("let {} = {}", p, e)
@@ -1486,13 +1495,13 @@ impl RustCodegen {
                     match item {
                         ChainItem::IsPattern { expr, pat } => {
                             let p = sub.fmt_pattern(pat);
-                            let e = sub.fmt_expr(expr);
+                            let e = sub.fmt_no_struct_expr(expr);
                             sub.register_pattern_vars(pat);
                             bound_pats.push(pat);
                             parts.push(format!("let {} = {}", p, e));
                         }
                         ChainItem::Bool(e) => {
-                            parts.push(sub.fmt_expr(e));
+                            parts.push(sub.fmt_no_struct_expr(e));
                         }
                     }
                 }
@@ -1502,7 +1511,7 @@ impl RustCodegen {
     }
 
     fn emit_match(&mut self, m: &MatchExpr, trailing_semi: bool) {
-        let scr = self.fmt_expr(&m.scrutinee);
+        let scr = self.fmt_no_struct_expr(&m.scrutinee);
         self.line(&format!("match {} {{", scr));
         self.indent += 1;
         for arm in &m.arms {
@@ -2403,7 +2412,7 @@ impl RustCodegen {
             } => {
                 format!(
                     "if {} {{ {} }} else {{ {} }}",
-                    self.fmt_expr(cond),
+                    self.fmt_no_struct_expr(cond),
                     self.fmt_expr(then_expr),
                     self.fmt_expr(else_expr)
                 )
@@ -2632,7 +2641,7 @@ impl RustCodegen {
                     .unwrap_or_default();
                 let mut sub = self.child_formatter();
                 let p = sub.fmt_pattern(pat);
-                let it = sub.fmt_expr(iter);
+                let it = sub.fmt_no_struct_expr(iter);
                 sub.line(&format!("{}for {} in {} {{", lbl, p, it));
                 sub.indent += 1;
                 sub.push_scope();
@@ -3838,5 +3847,16 @@ fn format_macro_call(mc: &MacroCall) -> String {
         MacroDelim::Paren => format!("{}!({})", path, mc.body),
         MacroDelim::Bracket => format!("{}![{}]", path, mc.body),
         MacroDelim::Brace => format!("{}!{{ {} }}", path, mc.body),
+    }
+}
+
+fn ends_with_struct_lit(expr: &Expr) -> bool {
+    match expr {
+        Expr::StructLit { .. } | Expr::StructUpdate { .. } => true,
+        Expr::Read(inner)
+        | Expr::Write(inner)
+        | Expr::Deref(inner)
+        | Expr::Unary { expr: inner, .. } => ends_with_struct_lit(inner),
+        _ => false,
     }
 }

@@ -3,6 +3,32 @@ use crate::error::{RSharpError, Result, Span};
 use crate::lexer::tokenize;
 use crate::token::{InterpPart, Keyword, Token, TokenKind};
 
+pub(crate) mod prec {
+    pub const ASSIGN: u8 = 1;
+    pub const TERNARY: u8 = 2;
+    pub const COALESCE: u8 = 3;
+    pub const RANGE: u8 = 4;
+    pub const OR: u8 = 5;
+    pub const AND: u8 = 6;
+    pub const BIT_OR: u8 = 7;
+    pub const BIT_XOR: u8 = 8;
+    pub const BIT_AND: u8 = 9;
+    pub const EQ: u8 = 10;
+    pub const IS: u8 = 10;
+    pub const CMP: u8 = 11;
+    pub const SHIFT: u8 = 12;
+    pub const ADD: u8 = 13;
+    pub const MUL: u8 = 14;
+    #[allow(dead_code)]
+    pub const CAST: u8 = 15;
+    #[allow(dead_code)]
+    pub const UNARY: u8 = 16;
+    #[allow(dead_code)]
+    pub const POSTFIX: u8 = 17;
+    #[allow(dead_code)]
+    pub const ATOM: u8 = 18;
+}
+
 /// Parses R# source code into a `FileAst`.
 pub fn parse_file(source: &str) -> Result<FileAst> {
     let tokens = tokenize(source)?;
@@ -2631,16 +2657,14 @@ impl<'a> Parser<'a> {
         }
 
         if self.check(&TokenKind::LBrace) {
-            let save = self.checkpoint();
             let block = self.parse_block()?;
             if self.block_stmt_continues_postfix() {
-                self.restore(save);
-            } else {
-                return Ok(Stmt {
-                    attrs,
-                    kind: StmtKind::Block(block),
-                });
+                return self.finish_block_stmt_postfix(attrs, Expr::ValueBlock(block));
             }
+            return Ok(Stmt {
+                attrs,
+                kind: StmtKind::Block(block),
+            });
         }
 
         if let TokenKind::RustBlock(raw) = self.peek_kind().clone() {
@@ -2680,17 +2704,15 @@ impl<'a> Parser<'a> {
             });
         }
 
-        if self.check_kw(Keyword::If) {
-            let save = self.checkpoint();
+        if self.check_kw(Keyword::If) && !self.is_expr_bodied_if() {
             let if_stmt = self.parse_if()?;
             if self.block_stmt_continues_postfix() {
-                self.restore(save);
-            } else {
-                return Ok(Stmt {
-                    attrs,
-                    kind: StmtKind::If(if_stmt),
-                });
+                return self.finish_block_stmt_postfix(attrs, Expr::IfBlock(Box::new(if_stmt)));
             }
+            return Ok(Stmt {
+                attrs,
+                kind: StmtKind::If(if_stmt),
+            });
         }
         if self.check_kw(Keyword::Require) {
             let mut st = self.parse_require()?;
@@ -2718,29 +2740,25 @@ impl<'a> Parser<'a> {
             return Ok(st);
         }
         if self.check_kw(Keyword::Match) {
-            let save = self.checkpoint();
             let m = self.parse_match()?;
             if self.block_stmt_continues_postfix() {
-                self.restore(save);
-            } else {
-                return Ok(Stmt {
-                    attrs,
-                    kind: StmtKind::Match(m),
-                });
+                return self.finish_block_stmt_postfix(attrs, Expr::Match(m));
             }
+            return Ok(Stmt {
+                attrs,
+                kind: StmtKind::Match(m),
+            });
         }
         if self.check_kw(Keyword::Unsafe) && matches!(self.peek_at(1).kind, TokenKind::LBrace) {
-            let save = self.checkpoint();
             self.bump();
             let block = self.parse_block()?;
             if self.block_stmt_continues_postfix() {
-                self.restore(save);
-            } else {
-                return Ok(Stmt {
-                    attrs,
-                    kind: StmtKind::Unsafe(block),
-                });
+                return self.finish_block_stmt_postfix(attrs, Expr::UnsafeBlock(block));
             }
+            return Ok(Stmt {
+                attrs,
+                kind: StmtKind::Unsafe(block),
+            });
         }
 
         // Labeled loop statement: `outer: loop/while/for/foreach`
@@ -2810,6 +2828,20 @@ impl<'a> Parser<'a> {
         }
 
         let expr = self.parse_expr()?;
+        self.finish_stmt_expr(attrs, expr)
+    }
+
+    fn finish_expr_after_primary(&mut self, primary: Expr) -> Result<Expr> {
+        let post = self.finish_postfix(primary)?;
+        self.finish_expr_bp(post, prec::ASSIGN)
+    }
+
+    fn finish_block_stmt_postfix(&mut self, attrs: Vec<Attribute>, primary: Expr) -> Result<Stmt> {
+        let expr = self.finish_expr_after_primary(primary)?;
+        self.finish_stmt_expr(attrs, expr)
+    }
+
+    fn finish_stmt_expr(&mut self, attrs: Vec<Attribute>, expr: Expr) -> Result<Stmt> {
         if matches!(&expr, Expr::TryBlock(_))
             || matches!(&expr, Expr::MacroCall(mc) if mc.delim == MacroDelim::Brace)
         {
@@ -2829,6 +2861,37 @@ impl<'a> Parser<'a> {
             attrs,
             kind: StmtKind::Expr(expr),
         })
+    }
+
+    fn token_kind_at(&self, idx: usize) -> &TokenKind {
+        self.tokens
+            .get(idx)
+            .map(|t| &t.kind)
+            .unwrap_or(&TokenKind::Eof)
+    }
+
+    fn find_matching_rparen(&self, lparen_pos: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for idx in lparen_pos..self.tokens.len() {
+            match self.tokens[idx].kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn is_expr_bodied_if(&self) -> bool {
+        matches!(self.peek_at(1).kind, TokenKind::LParen)
+            && self
+                .find_matching_rparen(self.pos + 1)
+                .is_some_and(|close| matches!(self.token_kind_at(close + 1), TokenKind::FatArrow))
     }
 
     fn parse_break_payload(&mut self) -> Result<(Option<String>, Option<Expr>)> {
@@ -3003,7 +3066,7 @@ impl<'a> Parser<'a> {
                 Pattern::DerefPat { .. }
                 | Pattern::BorrowRef { .. }
                 | Pattern::Paren(_)
-                | Pattern::Box(_) => has_types,
+                | Pattern::Box(_) => has_types || self.check(&TokenKind::Colon),
                 _ => false,
             };
             let explicit_ty = if allowed && self.eat(&TokenKind::Colon) {
@@ -3157,6 +3220,16 @@ impl<'a> Parser<'a> {
         let cond = self.parse_condition()?;
         self.expect(&TokenKind::RParen, "')'")?;
         let body = self.parse_block()?;
+        if self.block_stmt_continues_postfix() {
+            return self.finish_block_stmt_postfix(
+                Vec::new(),
+                Expr::While {
+                    label,
+                    cond: Box::new(cond),
+                    body,
+                },
+            );
+        }
         Ok(Stmt::plain(StmtKind::While { label, cond, body }))
     }
 
@@ -3203,6 +3276,17 @@ impl<'a> Parser<'a> {
         let iter = self.parse_expr()?;
         self.expect(&TokenKind::RParen, "')'")?;
         let body = self.parse_block()?;
+        if self.block_stmt_continues_postfix() {
+            return self.finish_block_stmt_postfix(
+                Vec::new(),
+                Expr::Foreach {
+                    label,
+                    pat,
+                    iter: Box::new(iter),
+                    body,
+                },
+            );
+        }
         Ok(Stmt::plain(StmtKind::Foreach {
             label,
             pat,
@@ -3214,6 +3298,9 @@ impl<'a> Parser<'a> {
     fn parse_loop(&mut self, label: Option<String>) -> Result<Stmt> {
         self.bump(); // 'loop'
         let body = self.parse_block()?;
+        if self.block_stmt_continues_postfix() {
+            return self.finish_block_stmt_postfix(Vec::new(), Expr::Loop { label, block: body });
+        }
         Ok(Stmt::plain(StmtKind::Loop { label, body }))
     }
 
@@ -3238,11 +3325,9 @@ impl<'a> Parser<'a> {
             };
             self.expect(&TokenKind::FatArrow, "'=>' in match arm")?;
             let body = if self.check(&TokenKind::LBrace) {
-                let save = self.checkpoint();
                 let block = self.parse_block()?;
                 if self.block_stmt_continues_postfix() {
-                    self.restore(save);
-                    MatchArmBody::Expr(self.parse_expr()?)
+                    MatchArmBody::Expr(self.finish_expr_after_primary(Expr::ValueBlock(block))?)
                 } else {
                     MatchArmBody::Block(block)
                 }
@@ -3356,6 +3441,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::LBracket
                         | TokenKind::Question
                         | TokenKind::QuestionQuestion
+                        | TokenKind::Bang
                 )
             {
                 let name = self.eat_ident().unwrap();
@@ -3609,6 +3695,13 @@ impl<'a> Parser<'a> {
     }
 
     fn try_parse_pat_qself_path(&mut self) -> Option<PatPath> {
+        let close = self.find_matching_rparen(self.pos)?;
+        if !matches!(
+            self.token_kind_at(close + 1),
+            TokenKind::Dot | TokenKind::ColonColon
+        ) {
+            return None;
+        }
         let save = self.checkpoint();
         self.bump(); // '('
         let Ok(self_ty) = self.parse_type() else {
@@ -3952,7 +4045,7 @@ impl<'a> Parser<'a> {
             };
         }
         loop {
-            if min_bp <= 10 && self.eat_kw(Keyword::Is) {
+            if min_bp <= prec::IS && self.eat_kw(Keyword::Is) {
                 let negated = self.eat_kw(Keyword::Not);
                 let pat = self.parse_pattern()?;
                 lhs = Expr::IsPattern {
@@ -3975,10 +4068,12 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
-            if min_bp <= 4 && (self.eat(&TokenKind::DotDot) || self.eat(&TokenKind::DotDotEq)) {
+            if min_bp <= prec::RANGE
+                && (self.eat(&TokenKind::DotDot) || self.eat(&TokenKind::DotDotEq))
+            {
                 let inclusive = matches!(self.tokens[self.pos - 1].kind, TokenKind::DotDotEq);
                 let end = if self.starts_expr_after_range() {
-                    Some(Box::new(self.parse_expr_bp(5)?))
+                    Some(Box::new(self.parse_expr_bp(prec::RANGE + 1)?))
                 } else {
                     None
                 };
@@ -3989,22 +4084,22 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
-            if min_bp <= 3 && self.eat(&TokenKind::QuestionQuestion) {
-                let rhs = self.parse_expr_bp(3)?;
+            if min_bp <= prec::COALESCE && self.eat(&TokenKind::QuestionQuestion) {
+                let rhs = self.parse_expr_bp(prec::COALESCE)?;
                 lhs = Expr::Coalesce {
                     lhs: Box::new(lhs),
                     rhs: Box::new(rhs),
                 };
                 continue;
             }
-            if min_bp <= 2 && self.eat(&TokenKind::Question) {
+            if min_bp <= prec::TERNARY && self.eat(&TokenKind::Question) {
                 let prev_ternary = self.in_ternary_then;
                 self.in_ternary_then = true;
-                let then_res = self.parse_expr_bp(1);
+                let then_res = self.parse_expr_bp(prec::ASSIGN);
                 self.in_ternary_then = prev_ternary;
                 let then_expr = then_res?;
                 self.expect(&TokenKind::Colon, "':' in ternary expression")?;
-                let else_expr = self.parse_expr_bp(2)?;
+                let else_expr = self.parse_expr_bp(prec::TERNARY)?;
                 lhs = Expr::Ternary {
                     cond: Box::new(lhs),
                     then_expr: Box::new(then_expr),
@@ -4012,11 +4107,11 @@ impl<'a> Parser<'a> {
                 };
                 continue;
             }
-            if min_bp <= 1
+            if min_bp <= prec::ASSIGN
                 && let Some(op) = assign_op(self.peek_kind())
             {
                 self.bump();
-                let rhs = self.parse_expr_bp(1)?;
+                let rhs = self.parse_expr_bp(prec::ASSIGN)?;
                 lhs = Expr::Assign {
                     op,
                     lhs: Box::new(lhs),
@@ -4783,6 +4878,13 @@ impl<'a> Parser<'a> {
     }
 
     fn try_parse_ufcs(&mut self) -> Option<Expr> {
+        let close = self.find_matching_rparen(self.pos)?;
+        if !matches!(
+            self.token_kind_at(close + 1),
+            TokenKind::Dot | TokenKind::ColonColon
+        ) {
+            return None;
+        }
         let save = self.checkpoint();
         self.bump(); // '('
         let Ok(self_ty) = self.parse_type() else {
@@ -4962,6 +5064,17 @@ impl<'a> Parser<'a> {
             self.restore(save);
             return Ok(None);
         }
+        let Some(close) = self.find_matching_rparen(self.pos) else {
+            self.restore(save);
+            return Ok(None);
+        };
+        if !matches!(
+            self.token_kind_at(close + 1),
+            TokenKind::FatArrow | TokenKind::Colon
+        ) {
+            self.restore(save);
+            return Ok(None);
+        }
         let Ok((params, variadic)) = self.parse_params() else {
             self.restore(save);
             return Ok(None);
@@ -4986,11 +5099,11 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let body = if self.check(&TokenKind::LBrace) {
-            let bsave = self.checkpoint();
             let block = self.parse_block()?;
             if self.block_stmt_continues_postfix() {
-                self.restore(bsave);
-                LambdaBody::Expr(Box::new(self.parse_expr()?))
+                LambdaBody::Expr(Box::new(
+                    self.finish_expr_after_primary(Expr::ValueBlock(block))?,
+                ))
             } else {
                 LambdaBody::Block(block)
             }
@@ -5291,24 +5404,24 @@ fn assign_op(kind: &TokenKind) -> Option<AssignOp> {
 
 fn binary_op_prec(kind: &TokenKind) -> Option<(u8, BinaryOp)> {
     match kind {
-        TokenKind::PipePipe => Some((5, BinaryOp::Or)),
-        TokenKind::AmpAmp => Some((6, BinaryOp::And)),
-        TokenKind::Pipe => Some((7, BinaryOp::BitOr)),
-        TokenKind::Caret => Some((8, BinaryOp::BitXor)),
-        TokenKind::Amp => Some((9, BinaryOp::BitAnd)),
-        TokenKind::EqEq => Some((10, BinaryOp::Eq)),
-        TokenKind::BangEq => Some((10, BinaryOp::Ne)),
-        TokenKind::Lt => Some((11, BinaryOp::Lt)),
-        TokenKind::Le => Some((11, BinaryOp::Le)),
-        TokenKind::Gt => Some((11, BinaryOp::Gt)),
-        TokenKind::Ge => Some((11, BinaryOp::Ge)),
-        TokenKind::Shl => Some((12, BinaryOp::Shl)),
-        TokenKind::Shr => Some((12, BinaryOp::Shr)),
-        TokenKind::Plus => Some((13, BinaryOp::Add)),
-        TokenKind::Minus => Some((13, BinaryOp::Sub)),
-        TokenKind::Star => Some((14, BinaryOp::Mul)),
-        TokenKind::Slash => Some((14, BinaryOp::Div)),
-        TokenKind::Percent => Some((14, BinaryOp::Rem)),
+        TokenKind::PipePipe => Some((prec::OR, BinaryOp::Or)),
+        TokenKind::AmpAmp => Some((prec::AND, BinaryOp::And)),
+        TokenKind::Pipe => Some((prec::BIT_OR, BinaryOp::BitOr)),
+        TokenKind::Caret => Some((prec::BIT_XOR, BinaryOp::BitXor)),
+        TokenKind::Amp => Some((prec::BIT_AND, BinaryOp::BitAnd)),
+        TokenKind::EqEq => Some((prec::EQ, BinaryOp::Eq)),
+        TokenKind::BangEq => Some((prec::EQ, BinaryOp::Ne)),
+        TokenKind::Lt => Some((prec::CMP, BinaryOp::Lt)),
+        TokenKind::Le => Some((prec::CMP, BinaryOp::Le)),
+        TokenKind::Gt => Some((prec::CMP, BinaryOp::Gt)),
+        TokenKind::Ge => Some((prec::CMP, BinaryOp::Ge)),
+        TokenKind::Shl => Some((prec::SHIFT, BinaryOp::Shl)),
+        TokenKind::Shr => Some((prec::SHIFT, BinaryOp::Shr)),
+        TokenKind::Plus => Some((prec::ADD, BinaryOp::Add)),
+        TokenKind::Minus => Some((prec::ADD, BinaryOp::Sub)),
+        TokenKind::Star => Some((prec::MUL, BinaryOp::Mul)),
+        TokenKind::Slash => Some((prec::MUL, BinaryOp::Div)),
+        TokenKind::Percent => Some((prec::MUL, BinaryOp::Rem)),
         _ => None,
     }
 }

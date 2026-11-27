@@ -1940,6 +1940,7 @@ impl<'a> RustToRSharp<'a> {
                     | Pat::Lit(_)
                     | Pat::Range(_)
                     | Pat::Const(_)
+                    | Pat::Verbatim(_)
             )
             || matches!(
                 inner_pat,
